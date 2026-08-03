@@ -153,10 +153,10 @@ mod_timezone() {
     echo -e "${C_GREEN}✅ Часовой пояс установлен в $tz.${C_RESET}"
 }
 
-# 2. Имя хоста (Hostname)
+# 2. Имя хоста
 mod_hostname() {
-    echo -e "${C_CYAN}🏷️ === 2/18. НАСТРОЙКА HOSTNAME ===${C_RESET}"
-    echo "Текущий hostname: $(hostname)"
+    echo -e "${C_CYAN}🏷️ === 2/18. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
+    echo "Текущее имя хоста: $(hostname)"
     
     local default_brand_host="Server_VPS"
     case "$SYSTEM_TYPE" in
@@ -420,9 +420,9 @@ SSH_HARDENING_EOF
     fi
 }
 
-# 7. Hardening Ядра
+# 7. Защита ядра и сети
 mod_hardening() {
-    echo -e "${C_CYAN}🛡️ === 7/18. SYSCTL HARDENING ЯДРА И СЕТИ ===${C_RESET}"
+    echo -e "${C_CYAN}🛡️ === 7/18. ЗАЩИТА ЯДРА И СЕТИ ===${C_RESET}"
     backup_file "/etc/sysctl.d/99-hardening.conf"
     tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << 'HARDENING_EOF'
 # Kernel Security Hardening
@@ -669,7 +669,7 @@ RAM_OPT_EOF
 
     systemctl daemon-reload
     mount -a 2>/dev/null || true
-    echo -e "${C_GREEN}✅ Оптимизации RAM/Flash применены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Оптимизации RAM / Flash применены.${C_RESET}"
 }
 
 # 13. Менеджер Swap
@@ -735,7 +735,7 @@ mod_swap_manager() {
     esac
 }
 
-# 14. Десктоп-утилиты
+# 14. PC-утилиты
 mod_desktop_apps() {
     echo -e "${C_CYAN}🖥️ === 14/18. PC-УТИЛИТЫ И АВТОЗАПУСК (DEBIAN PC/XFCE) ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
@@ -870,10 +870,10 @@ mod_server_audit() {
     systemctl get-default
     zramctl 2>/dev/null || echo "zram утилиты установлены"
 
-    echo -e "\n=== 3. ИМЯ ХОСТА (HOSTNAME) ==="
+    echo -e "\n=== 3. ИМЯ ХОСТА ==="
     hostnamectl status
 
-    echo -e "\n=== 4. SYSCTL HARDENING ==="
+    echo -e "\n=== 4. ЗАЩИТА ЯДРА И СЕТИ ==="
     sysctl kernel.dmesg_restrict kernel.kptr_restrict net.ipv4.tcp_syncookies net.ipv4.conf.all.rp_filter fs.protected_symlinks
 
     echo -e "\n=== 5. СЕТЕВЫЕ ИНТЕРФЕЙСЫ И UFW ==="
@@ -889,16 +889,11 @@ mod_router_sbc() {
     prompt_yn "Настроить этот узел как LAN-шлюз (роутер) через Tailscale Exit Node?" true
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
 
-    local default_lan_if="enP1p17s0"
-    local default_wan_if="enP2p33s0"
-
-    # Динамический поиск интерфейсов
-    if ! ip link show "$default_lan_if" >/dev/null 2>&1; then
-        default_lan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | head -n 1 || echo "eth0")
-    fi
-    if ! ip link show "$default_wan_if" >/dev/null 2>&1; then
-        default_wan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | tail -n 1 || echo "eth1")
-    fi
+    # Динамическое автоопределение физических сетевых интерфейсов
+    local default_lan_if
+    default_lan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | head -n 1 || echo "eth0")
+    local default_wan_if
+    default_wan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | tail -n 1 || echo "eth1")
 
     local lan_iface="" wan_iface="" ts_iface="" lan_ip="" lan_cidr="" dhcp_start="" dhcp_end="" exit_node_ip=""
     prompt_clean "LAN интерфейс (подсеть клиентов) (Enter - $default_lan_if)" lan_iface
@@ -1089,7 +1084,8 @@ PY
 while true; do
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
-    echo -e "${C_BOLD}       🛠️  ГЛАВНОЕ МЕНЮ НАСТРОЙКИ СЕРВЕРА И ПК (VPS/DEBIAN)     ${C_RESET}"
+    echo -e "${C_BOLD}       🛠️  ГЛАВНОЕ МЕНЮ НАСТРОЙКИ СЕРВЕРА И ПК     ${C_RESET}"
+    echo -e "${C_BOLD}       Автор: Michael Bobarev, Bobarev.com${C_RESET}"
     echo -e "${C_CYAN}=================================================================${C_RESET}"
     echo -e " Тип системы: ${C_GREEN}$SYSTEM_TYPE${C_RESET} | Хост: ${C_GREEN}$(hostname)${C_RESET} | Пояс: ${C_GREEN}$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")${C_RESET}"
     echo -e " Tailscale: ${C_GREEN}$(command -v tailscale &>/dev/null && echo "Установлен" || echo "Не установлен")${C_RESET} | UFW: ${C_GREEN}$(ufw status 2>/dev/null | head -n 1 || echo "Неизвестно")${C_RESET}"
@@ -1108,8 +1104,8 @@ while true; do
     echo " 11) 🧹 Отключение системного логирования"
     echo " 12) ⚡ Оптимизация RAM / Flash"
     echo " 13) 💾 Управление файлом подкачки"
-    echo " --- [ДЕСКТОП ПК / РОУТЕР / ДИАГНОСТИКА] ---"
-    echo " 14) 🖥️  Десктоп-утилиты (WiFi, Звук, Bluetooth, Батарея) и автозапуск"
+    echo " --- [PC / РОУТЕР / ДИАГНОСТИКА] ---"
+    echo " 14) 🖥️  PC-утилиты (WiFi, Звук, Bluetooth, Батарея) и автозапуск"
     echo " 15) 📺 Программный сброс HDMI (LightDM)"
     echo " 16) ⏱️  Диагностика времени загрузки системы"
     echo " 17) 🔍 Полный аудит и проверка настроек сервера"

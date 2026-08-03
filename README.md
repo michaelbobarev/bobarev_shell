@@ -1,4 +1,4 @@
-# 🛠️ Universal Debian / Ubuntu / Armbian Server & PC Setup Script
+# 🛠️ Universal Debian / Ubuntu / Armbian Server / PC Setup Script / Tailscale Exit-Node
 
 Универсальный интерактивный Bash-скрипт для базовой настройки, повышения безопасности и оптимизации VPS-серверов, десктопных ПК и одноплатных компьютеров (SBC). Скрипт устанавливает и оптимизирует Tailscale в пару кликов и Ваш одноплатный компьютер, например, с легкостью подключается к Exit-Node от Tailscale на Вашем арендованном VPS.
 

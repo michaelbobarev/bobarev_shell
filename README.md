@@ -6,5 +6,5 @@
 Запустите от имени `root` в терминале вашего сервера или ПК:
 
 ```bash
-curl -sSL [https://raw.githubusercontent.com/michaelbobarev/bobarev_shell/main/bobarev_shell.sh) | bash
+curl -sSL https://raw.githubusercontent.com/michaelbobarev/bobarev_shell/main/bobarev_shell.sh | bash
 ```

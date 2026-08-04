@@ -428,10 +428,14 @@ SSH_HARDENING_EOF
     fi
 }
 
-# 7. Защита ядра и сети
+# 7. Защита ядра и сети (С оптимизацией BBR, FastOpen и RFC1337)
 mod_hardening() {
-    echo -e "${C_CYAN}🛡️ === 7/18. ЗАЩИТА ЯДРА И СЕТИ ===${C_RESET}"
+    echo -e "${C_CYAN}🛡️ === 7/18. ЗАЩИТА ЯДРА, СЕТИ И УСКОРЕНИЕ TCP BBR ===${C_RESET}"
     backup_file "/etc/sysctl.d/99-hardening.conf"
+    
+    # Попытка подгрузить модуль BBR в ядре
+    modprobe tcp_bbr 2>/dev/null || true
+
     tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << 'HARDENING_EOF'
 # Kernel Security Hardening
 kernel.dmesg_restrict = 1
@@ -442,6 +446,8 @@ kernel.unprivileged_bpf_disabled = 1
 kernel.perf_event_paranoid = 3
 kernel.sysrq = 0
 net.core.bpf_jit_harden = 2
+
+# Сетевая безопасность и защита от атак
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.default.rp_filter = 2
@@ -457,13 +463,22 @@ net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
 net.ipv4.icmp_ignore_bogus_error_responses = 1
 net.ipv4.icmp_echo_ignore_all = 1
+
+# Защита файловой системы
 fs.protected_symlinks = 1
 fs.protected_hardlinks = 1
 fs.protected_fifos = 1
 fs.protected_regular = 1
+
+# Оптимизация сетевых задержек: Google BBR + FQ Queue + TCP FastOpen + RFC1337
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_rfc1337 = 1
+net.ipv4.tcp_timestamps = 0
 HARDENING_EOF
     sysctl --system > /dev/null
-    echo -e "${C_GREEN}✅ Настройки защиты ядра и сети применены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Настройки защиты ядра, сети и ускорения Google BBR применены.${C_RESET}"
 }
 
 # 8. Firewall UFW
@@ -698,24 +713,37 @@ DISABLE_LOGS_EOF
     echo -e "${C_GREEN}✅ Полное отключение системного логирования и аудита завершено.${C_RESET}"
 }
 
-# 12. Оптимизация RAM / Flash
+# 12. Оптимизация RAM / Flash (noatime + commit=120 + Dirty Pages + I/O Scheduler)
 mod_ram_flash_opt() {
-    echo -e "${C_CYAN}⚡ === 12/18. ОПТИМИЗАЦИЯ RAM, FLASH И NOATIME ===${C_RESET}"
+    echo -e "${C_CYAN}⚡ === 12/18. ОПТИМИЗАЦИЯ RAM, FLASH (COMMIT=120, NOATIME, I/O) ===${C_RESET}"
     backup_file "/etc/fstab"
 
+    # 1. Буферизация записи грязных страниц в RAM для ресурса Flash
     cat << 'EOF' > /etc/sysctl.d/99-ram-opt.conf
-# Минимизация использования Swap для сбережения ресурса накопителей
+# Оптимизация ресурса памяти MicroSD / eMMC / SSD
 vm.swappiness=1
 vm.vfs_cache_pressure=50
+vm.dirty_writeback_centisecs=1500
+vm.dirty_background_ratio=5
+vm.dirty_ratio=10
 
 # Ограничение доступа к буферу ядра (dmesg)
 kernel.dmesg_restrict=1
 EOF
     sysctl --system > /dev/null
 
-    sed -i -E '/\s+\/\s+/ { /noatime/! s/(\s+ext[234]|\s+xfs|\s+btrfs|\s+f2fs)(\s+)(\S+)/\1\2\3,noatime/ }' /etc/fstab
-    mount -o remount,noatime / 2>/dev/null || true
+    # 2. Оптимизация опций монтирования корня Ext4/Btrfs в /etc/fstab (noatime + commit=120)
+    sed -i -E '/\s+\/\s+/ { /noatime/! s/(\s+ext[234]|\s+xfs|\s+btrfs|\s+f2fs)(\s+)(\S+)/\1\2\3,noatime,commit=120/ }' /etc/fstab
+    mount -o remount,noatime,commit=120 / 2>/dev/null || true
 
+    # 3. Настройка I/O планировщика mq-deadline для Flash-накопителей
+    for dev_sched in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler /sys/block/nvme*/queue/scheduler; do
+        if [ -f "$dev_sched" ]; then
+            echo "mq-deadline" > "$dev_sched" 2>/dev/null || true
+        fi
+    done
+
+    # 4. Монтирование временных директорий и логов в RAM (tmpfs)
     TMPFS_ENTRIES=(
         "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=512M 0 0"
         "tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,size=256M 0 0"
@@ -733,7 +761,7 @@ EOF
 
     systemctl daemon-reload
     mount -a 2>/dev/null || true
-    echo -e "${C_GREEN}✅ Оптимизации RAM / Flash (noatime + tmpfs) применены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Оптимизации RAM / Flash (noatime, commit=120, dirty-writeback) применены.${C_RESET}"
 }
 
 # 13. Менеджер Swap
@@ -966,7 +994,7 @@ mod_server_audit() {
         echo -e "  • Вход по паролю SSH: ${C_YELLOW}⚠️ Включен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Привяжите ключи в Пункте 5 и отключите пароль в Пункте 6)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 3. Полная проверка параметров защиты ядра и сети (sysctl) ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 3. Проверка защиты ядра, сети и BBR (sysctl) ---${C_RESET}"
     local sysctl_ok=true
 
     check_sysctl_param() {
@@ -991,6 +1019,7 @@ mod_server_audit() {
     check_sysctl_param "net.ipv4.tcp_syncookies" "1" "Защита TCP SYN Cookies"
     check_sysctl_param "net.ipv4.conf.all.rp_filter" "2" "Фильтр спуфинга rp_filter"
     check_sysctl_param "net.ipv4.conf.all.accept_redirects" "0" "Запрет ICMP редиректов"
+    check_sysctl_param "net.ipv4.tcp_congestion_control" "bbr" "Ускорение TCP Google BBR"
     check_sysctl_param "fs.protected_symlinks" "1" "Защита симлинков"
     check_sysctl_param "fs.protected_hardlinks" "1" "Защита хардлинков"
 
@@ -1058,6 +1087,12 @@ mod_server_audit() {
         echo -e "  • Флаг noatime на корень (/): ${C_GREEN}✅ Включен${C_RESET}"
     else
         echo -e "  • Флаг noatime на корень (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
+    fi
+
+    if mount | grep " / " | grep -q "commit=120"; then
+        echo -e "  • Флаг commit=120 на корень (/): ${C_GREEN}✅ Включен${C_RESET}"
+    else
+        echo -e "  • Флаг commit=120 на корень (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
     fi
 
     local current_swap

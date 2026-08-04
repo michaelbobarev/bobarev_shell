@@ -72,7 +72,7 @@ prompt_yn() {
     [ "$default_yes" = "false" ] && yn_text="[y/N]"
 
     while true; do
-        read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} $yn_text (0 - Назад): ")" choice
+        read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} $yn_text (0 - Назад): ")" choice < /dev/tty
         choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
         if [ "$choice" = "0" ] || [ "$choice" = "b" ] || [ "$choice" = "back" ] || [ "$choice" = "назад" ]; then
             echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
@@ -94,7 +94,7 @@ prompt_default() {
     local default_val="$2"
     local var_name="$3"
     local val
-    read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} [$default_val] (0 - Назад): ")" val
+    read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} [$default_val] (0 - Назад): ")" val < /dev/tty
     if [ "$val" = "0" ] || [ "$val" = "b" ] || [ "$val" = "back" ] || [ "$val" = "назад" ]; then
         echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
         MODULE_CANCELED=true
@@ -107,7 +107,7 @@ prompt_clean() {
     local prompt="$1"
     local var_name="$2"
     local val
-    read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} (0 - Назад): ")" val
+    read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} (0 - Назад): ")" val < /dev/tty
     if [ "$val" = "0" ] || [ "$val" = "b" ] || [ "$val" = "back" ] || [ "$val" = "назад" ]; then
         echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
         MODULE_CANCELED=true
@@ -126,7 +126,7 @@ backup_file() {
 
 pause_enter() {
     echo ""
-    read -r -p "Нажмите Enter для возврата в главное меню..."
+    read -r -p "Нажмите Enter для возврата в главное меню..." < /dev/tty
 }
 
 if [ "$EUID" -ne 0 ]; then
@@ -203,10 +203,12 @@ mod_apt_update() {
     echo "Текущий режим загрузки системы: $current_target"
 
     if [ "$current_target" = "graphical.target" ]; then
-        prompt_yn "⚠️ Обнаружена графическая оболочка ($SYSTEM_TYPE). Переключить в консольный режим (multi-user.target)?" false
-        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        systemctl set-default multi-user.target
-        echo -e "${C_BLUE}ℹ️ Режим загрузки изменен на консольный (multi-user.target).${C_RESET}"
+        if prompt_yn "⚠️ Обнаружена графическая оболочка ($SYSTEM_TYPE). Переключить в консольный режим (multi-user.target)?" false; then
+            systemctl set-default multi-user.target
+            echo -e "${C_BLUE}ℹ️ Режим загрузки изменен на консольный (multi-user.target).${C_RESET}"
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+        fi
     else
         systemctl set-default multi-user.target
     fi
@@ -230,7 +232,7 @@ mod_user_setup() {
     usermod -aG sudo "$username"
 
     local pass
-    read -s -p "Введите новый пароль для $username (Enter, если не менять, 0 - Назад): " pass
+    read -s -p "Введите новый пароль для $username (Enter, если не менять, 0 - Назад): " pass < /dev/tty
     echo ""
     if [ "$pass" = "0" ]; then
         echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
@@ -239,25 +241,28 @@ mod_user_setup() {
     fi
 
     if [ -n "$pass" ]; then
-        read -s -p "Повторите пароль: " pass_confirm
+        read -s -p "Повторите пароль: " pass_confirm < /dev/tty
         echo ""
         while [ "$pass" != "$pass_confirm" ]; do
             echo -e "${C_RED}❌ Пароли не совпадают. Попробуйте снова.${C_RESET}"
-            read -s -p "Пароль: " pass
+            read -s -p "Пароль: " pass < /dev/tty
             echo ""
-            read -s -p "Повторите пароль: " pass_confirm
+            read -s -p "Повторите пароль: " pass_confirm < /dev/tty
             echo ""
         done
         echo "$username:$pass" | chpasswd
         echo -e "${C_GREEN}✅ Пароль установлен.${C_RESET}"
     fi
 
-    prompt_yn "Разрешить sudo без запроса пароля (NOPASSWD)?" true
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    echo "$username ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
-    chmod 0440 "/etc/sudoers.d/$username"
-    echo -e "${C_GREEN}✅ Sudo NOPASSWD включен для $username.${C_RESET}"
+    if prompt_yn "Разрешить sudo без запроса пароля (NOPASSWD)?" true; then
+        echo "$username ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
+        chmod 0440 "/etc/sudoers.d/$username"
+        echo -e "${C_GREEN}✅ Sudo NOPASSWD включен для $username.${C_RESET}"
+    else
+        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+        rm -f "/etc/sudoers.d/$username"
+        echo "ℹ️ Sudo будет запрашивать пароль."
+    fi
 }
 
 # 5. SSH-ключи
@@ -286,14 +291,16 @@ mod_ssh_key() {
     if [ -f /root/.ssh/authorized_keys ] && [ -s /root/.ssh/authorized_keys ]; then
         local root_key
         root_key=$(head -n 1 /root/.ssh/authorized_keys)
-        prompt_yn "Скопировать имеющийся SSH-ключ из /root/.ssh/authorized_keys?" true
-        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        pubkey="$root_key"
+        if prompt_yn "Скопировать имеющийся SSH-ключ из /root/.ssh/authorized_keys?" true; then
+            pubkey="$root_key"
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+        fi
     fi
 
     if [ -z "$pubkey" ]; then
         echo "Вставьте публичный SSH-ключ (ssh-ed25519, ssh-rsa и т.д., 0 - Назад):"
-        read -r pubkey
+        read -r pubkey < /dev/tty
         if [ "$pubkey" = "0" ]; then
             echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
             MODULE_CANCELED=true
@@ -307,7 +314,7 @@ mod_ssh_key() {
         echo "  2) Перезаписать файл authorized_keys"
         echo "  0) Назад / Отмена"
         local mode_choice
-        read -r -p "Ваш выбор [1-2, 0]: " mode_choice
+        read -r -p "Ваш выбор [1-2, 0]: " mode_choice < /dev/tty
         if [ "$mode_choice" = "0" ]; then
             echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
             MODULE_CANCELED=true
@@ -334,7 +341,7 @@ mod_ssh_key() {
     echo -e "${C_GREEN}✅ Права на $target_home/.ssh проверены и выставлены.${C_RESET}"
 }
 
-# 6. Конфигурация SSH (Интеллектуальная проверка портов)
+# 6. Конфигурация SSH
 mod_ssh_config() {
     echo -e "${C_CYAN}🔒 === 6/18. КОНФИГУРАЦИЯ SSH (БЕЗОПАСНОСТЬ) ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
@@ -359,26 +366,27 @@ mod_ssh_config() {
     local pass_auth_val="yes"
     local kbd_auth_val="yes"
 
-    prompt_yn "Отключить вход по паролю (разрешить ТОЛЬКО SSH-ключи)?" false
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+    if prompt_yn "Отключить вход по паролю (разрешить ТОЛЬКО SSH-ключи)?" false; then
+        local has_any_key=false
+        for user_home in /root /home/*; do
+            if [ -s "$user_home/.ssh/authorized_keys" ]; then
+                has_any_key=true
+                break
+            fi
+        done
 
-    local has_any_key=false
-    for user_home in /root /home/*; do
-        if [ -s "$user_home/.ssh/authorized_keys" ]; then
-            has_any_key=true
-            break
+        if [ "$has_any_key" = true ]; then
+            pass_auth_val="no"
+            kbd_auth_val="no"
+            echo -e "${C_GREEN}✅ Найдены действующие SSH-ключи. Вход по паролю будет отключен.${C_RESET}"
+        else
+            echo -e "${C_YELLOW}⚠️ ВНИМАНИЕ: На сервере не найдено ни одного SSH-ключа!${C_RESET}"
+            echo -e "${C_YELLOW}⚠️ Вход по паролю ОСТАЕТСЯ ВКЛЮЧЕННЫМ, чтобы избежать блокировки доступа.${C_RESET}"
+            pass_auth_val="yes"
+            kbd_auth_val="yes"
         fi
-    done
-
-    if [ "$has_any_key" = true ]; then
-        pass_auth_val="no"
-        kbd_auth_val="no"
-        echo -e "${C_GREEN}✅ Найдены действующие SSH-ключи. Вход по паролю будет отключен.${C_RESET}"
     else
-        echo -e "${C_YELLOW}⚠️ ВНИМАНИЕ: На сервере не найдено ни одного SSH-ключа!${C_RESET}"
-        echo -e "${C_YELLOW}⚠️ Вход по паролю ОСТАЕТСЯ ВКЛЮЧЕННЫМ, чтобы избежать блокировки доступа.${C_RESET}"
-        pass_auth_val="yes"
-        kbd_auth_val="yes"
+        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
     fi
 
     tee /etc/ssh/sshd_config.d/99-server-security.conf > /dev/null << SSH_HARDENING_EOF
@@ -482,11 +490,14 @@ mod_ufw() {
     ufw default deny incoming
     ufw default allow outgoing
 
-    prompt_yn "Разрешить маршрутизацию пакетов (FORWARD ACCEPT)? (Нужно для роутеров и Tailscale Exit-Node)" true
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    ufw default allow routed
-    sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+    if prompt_yn "Разрешить маршрутизацию пакетов (FORWARD ACCEPT)? (Нужно для роутеров и Tailscale Exit-Node)" true; then
+        ufw default allow routed
+        sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+    else
+        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+        ufw default deny routed
+        sed -i 's/DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw 2>/dev/null || true
+    fi
 
     if command -v tailscale &>/dev/null; then
         ufw allow in on tailscale0 comment 'Allow inside Tailscale' 2>/dev/null || true
@@ -499,10 +510,12 @@ mod_ufw() {
             ufw route allow in on "$netdev" out on tailscale0 2>/dev/null || true
         fi
 
-        prompt_yn "Ограничить доступ к SSH (порт $port) ТОЛЬКО через сеть Tailscale?" true
-        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-        ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+        if prompt_yn "Ограничить доступ к SSH (порт $port) ТОЛЬКО через сеть Tailscale?" true; then
+            ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+            ufw allow "$port"/tcp comment 'SSH Public Port'
+        fi
     else
         ufw allow "$port"/tcp comment 'SSH Public Port'
     fi
@@ -523,17 +536,16 @@ mod_lock_root() {
     fi
 }
 
-# 10. Tailscale & GRO-оптимизация (Исправлен порядок вызовов)
+# 10. Tailscale & GRO-оптимизация
 mod_tailscale() {
     echo -e "${C_CYAN}🔗 === 10/18. НАСТРОЙКА TAILSCALE И GRO-ОПТИМИЗАЦИЯ ===${C_RESET}"
     
-    # 1. Сначала опрашиваем параметры пользователя ДО создания служб и симлинков
     echo "Режим работы Tailscale:"
     echo "  1) Обычный узел"
     echo "  2) Сервер как Exit-Node (--advertise-exit-node)"
     echo "  0) Назад"
     local role
-    read -r -p "Ваш выбор [1-2, 0] (по умолчанию 1): " role
+    read -r -p "Ваш выбор [1-2, 0] (по умолчанию 1): " role < /dev/tty
     if [ "$role" = "0" ]; then
         echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
         MODULE_CANCELED=true
@@ -542,27 +554,24 @@ mod_tailscale() {
     role="${role:-1}"
 
     local authkey
-    read -r -p "Tailscale Auth Key (Enter для авторизации по ссылке, 0 - Назад): " authkey
+    read -r -p "Tailscale Auth Key (Enter для авторизации по ссылке, 0 - Назад): " authkey < /dev/tty
     if [ "$authkey" = "0" ]; then
         echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
-    # 2. Установка пакета Tailscale (если не установлен)
     if ! command -v tailscale &> /dev/null; then
         echo "Установка пакета Tailscale..."
         curl -fsSL https://tailscale.com/install.sh | sh
     fi
 
-    # 3. Настройка IP forwarding
     tee /etc/sysctl.d/99-tailscale-forward.conf > /dev/null << 'TS_EOF'
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 TS_EOF
     sysctl --system > /dev/null
 
-    # 4. Создание и включение службы GRO ТОЛЬКО после подтверждения пользователем
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do
@@ -592,7 +601,6 @@ ETHTOOL_SVC_EOF
     systemctl daemon-reload
     systemctl enable --now tailscale-gro.service
 
-    # 5. Запуск Tailscale
     local args=()
     [ -n "$authkey" ] && args+=("--authkey=$authkey")
     [ "$role" = "2" ] && args+=("--advertise-exit-node")
@@ -602,7 +610,7 @@ ETHTOOL_SVC_EOF
     else
         tailscale up "${args[@]}" || true
         echo ""
-        read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..."
+        read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
     fi
 
     echo ""
@@ -616,60 +624,116 @@ ETHTOOL_SVC_EOF
     echo -e "${C_GREEN}✅ Настройка Tailscale завершена.${C_RESET}"
 }
 
-# 11. Отключение логирования
+# 11. Отключение системного логирования
 mod_disable_logging() {
-    echo -e "${C_CYAN}🧹 === 11/18. ОТКЛЮЧЕНИЕ СИСТЕМНОГО ЛОГИРОВАНИЯ ===${C_RESET}"
+    echo -e "${C_CYAN}🧹 === 11/18. ОТКЛЮЧЕНИЕ СИСТЕМНОГО ЛОГИРОВАНИЯ И АУДИТА ===${C_RESET}"
     backup_file "/etc/systemd/journald.conf"
+
     cat << 'DISABLE_LOGS_EOF' > /usr/local/bin/disable-logging.sh
 #!/bin/bash
-sed -i -E '/^\s*#?\s*(Storage|ForwardToSyslog)=/d' /etc/systemd/journald.conf
-sed -i '/^\[Journal\]/a Storage=none\nForwardToSyslog=no' /etc/systemd/journald.conf
-systemctl restart systemd-journald
+set -euo pipefail
 
-systemctl stop rsyslog 2>/dev/null || true
-systemctl disable rsyslog 2>/dev/null || true
-systemctl mask rsyslog 2>/dev/null || true
-systemctl stop armbian-hardware-monitor 2>/dev/null || true
-systemctl disable armbian-hardware-monitor 2>/dev/null || true
-warp-cli log disable 2>/dev/null || true
+echo "🚀 Начинаем полное отключение логирования и аудита..."
+
+sed -i -E '/^\s*#?\s*(Storage|ForwardToSyslog|ForwardToKMsg|ForwardToConsole|ForwardToWall)=/d' /etc/systemd/journald.conf
+
+cat << 'CONF' >> /etc/systemd/journald.conf
+
+[Journal]
+Storage=none
+ForwardToSyslog=no
+ForwardToKMsg=no
+ForwardToConsole=no
+ForwardToWall=no
+CONF
+
+journalctl --rotate 2>/dev/null || true
+journalctl --vacuum-time=1s 2>/dev/null || true
+systemctl restart systemd-journald
+echo "✅ Служба systemd-journald переведена в режим Storage=none."
+
+SERVICES_TO_DISABLE=(
+  "rsyslog"
+  "auditd"
+  "armbian-hardware-monitor"
+)
+
+for svc in "${SERVICES_TO_DISABLE[@]}"; do
+  if systemctl list-unit-files | grep -q "^${svc}.service"; then
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
+    systemctl mask "$svc" 2>/dev/null || true
+    echo "✅ Служба $svc остановлена и заблокирована."
+  fi
+done
+
+if command -v auditctl &> /dev/null; then
+    auditctl -e 0 2>/dev/null || true
+    echo "✅ Аудит ядра (auditctl) отключен."
+fi
+
+if command -v warp-cli &> /dev/null; then
+    warp-cli log disable 2>/dev/null || true
+    echo "✅ Логи Cloudflare WARP отключены."
+fi
 
 if command -v ufw &>/dev/null; then
     ufw logging off 2>/dev/null || true
+    echo "✅ Логирование UFW отключено."
 fi
 
-find /var/log -type f \( -name "*.log*" -o -name "syslog*" -o -name "auth.log*" -o -name "kern.log*" -o -name "ufw.log*" \) -exec truncate -s 0 {} +
-find /var/log -type f \( -name "*.[0-9]" -o -name "*.gz" \) -delete
-rm -rf /var/log/journal/*
-journalctl --vacuum-size=1M
+find /var/log -type f \( -name "*.log*" -o -name "syslog*" -o -name "auth.log*" -o -name "kern.log*" -o -name "ufw.log*" \) -exec truncate -s 0 {} + 2>/dev/null || true
+find /var/log -type f \( -name "*.[0-9]" -o -name "*.gz" \) -delete 2>/dev/null || true
+rm -rf /var/log/journal/* /run/log/journal/* 2>/dev/null || true
+echo "✅ Папка /var/log и бинарные журналы очищены."
+
+journalctl --vacuum-size=1M 2>/dev/null || true
+echo "✅ Журнал journald принудительно очищен."
+
+echo "🎉 Системное логирование и аудит полностью отключены!"
 DISABLE_LOGS_EOF
+
     chmod +x /usr/local/bin/disable-logging.sh
     /usr/local/bin/disable-logging.sh
-    echo -e "${C_GREEN}✅ Системное логирование отключено.${C_RESET}"
+    echo -e "${C_GREEN}✅ Полное отключение системного логирования и аудита завершено.${C_RESET}"
 }
 
 # 12. Оптимизация RAM / Flash
 mod_ram_flash_opt() {
     echo -e "${C_CYAN}⚡ === 12/18. ОПТИМИЗАЦИЯ RAM, FLASH И NOATIME ===${C_RESET}"
     backup_file "/etc/fstab"
-    tee /etc/sysctl.d/99-ram-opt.conf > /dev/null << 'RAM_OPT_EOF'
+
+    cat << 'EOF' > /etc/sysctl.d/99-ram-opt.conf
+# Минимизация использования Swap для сбережения ресурса накопителей
 vm.swappiness=1
 vm.vfs_cache_pressure=50
-RAM_OPT_EOF
+
+# Ограничение доступа к буферу ядра (dmesg)
+kernel.dmesg_restrict=1
+EOF
     sysctl --system > /dev/null
 
     sed -i -E '/\s+\/\s+/ { /noatime/! s/(\s+ext[234]|\s+xfs|\s+btrfs|\s+f2fs)(\s+)(\S+)/\1\2\3,noatime/ }' /etc/fstab
     mount -o remount,noatime / 2>/dev/null || true
 
-    if ! grep -q "tmpfs /tmp" /etc/fstab; then
-        echo "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=512M 0 0" >> /etc/fstab
-    fi
-    if ! grep -q "tmpfs /var/tmp" /etc/fstab; then
-        echo "tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,size=256M 0 0" >> /etc/fstab
-    fi
+    TMPFS_ENTRIES=(
+        "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=512M 0 0"
+        "tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,size=256M 0 0"
+        "tmpfs /var/log/cloudflare-warp tmpfs defaults,noatime,size=16M 0 0"
+    )
+
+    for entry in "${TMPFS_ENTRIES[@]}"; do
+        mount_point=$(echo "$entry" | awk '{print $2}')
+        if ! grep -q "$mount_point" /etc/fstab; then
+            mkdir -p "$mount_point"
+            echo "$entry" >> /etc/fstab
+            echo "  - Добавлен $mount_point в tmpfs."
+        fi
+    done
 
     systemctl daemon-reload
     mount -a 2>/dev/null || true
-    echo -e "${C_GREEN}✅ Оптимизации RAM / Flash применены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Оптимизации RAM / Flash (noatime + tmpfs) применены.${C_RESET}"
 }
 
 # 13. Менеджер Swap
@@ -687,7 +751,7 @@ mod_swap_manager() {
     echo "  3) Полностью отключить и удалить файл Swap"
     echo "  0) Назад / Отмена"
     local swap_choice
-    read -r -p "Ваш выбор [0-3]: " swap_choice
+    read -r -p "Ваш выбор [0-3]: " swap_choice < /dev/tty
 
     case "$swap_choice" in
         1|2)
@@ -721,13 +785,14 @@ mod_swap_manager() {
             echo -e "${C_GREEN}✅ Swap ($swap_size) успешно настроен!${C_RESET}"
             ;;
         3)
-            prompt_yn "Вы уверены, что хотите полностью удалить Swap?" false
-            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-            swapoff -a 2>/dev/null || true
-            sed -i '/swap/d' /etc/fstab
-            rm -f /swapfile /swap.img
-            echo -e "${C_GREEN}✅ Swap полностью отключен и удален.${C_RESET}"
+            if prompt_yn "Вы уверены, что хотите полностью удалить Swap?" false; then
+                swapoff -a 2>/dev/null || true
+                sed -i '/swap/d' /etc/fstab
+                rm -f /swapfile /swap.img
+                echo -e "${C_GREEN}✅ Swap полностью отключен и удален.${C_RESET}"
+            else
+                if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+            fi
             ;;
         *)
             echo "Пропущено."
@@ -859,37 +924,162 @@ mod_boot_diag() {
     echo "📊 SVG-график:      $svg_file"
 }
 
-# 17. Полный аудит сервера
+# 17. Полный аудит сервера (ИНТЕЛЛЕКТУАЛЬНАЯ ДИАГНОСТИКА)
 mod_server_audit() {
-    echo -e "${C_CYAN}🔍 === 17/18. ПОЛНЫЙ АУДИТ И ПРОВЕРКА НАСТРОЕК СЕРВЕРА ===${C_RESET}"
-    echo "=== 1. ЧАСОВОЙ ПОЯС ==="
-    timedatectl show --property=Timezone --value
+    echo -e "${C_CYAN}🔍 === 17/18. ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ АУДИТ И ДИАГНОСТИКА ===${C_RESET}\n"
+    
+    local active_user
+    active_user=$(get_active_user)
 
-    echo -e "\n=== 2. СТАТУС ОБНОВЛЕНИЙ И ZRAM ==="
-    systemctl is-active unattended-upgrades 2>/dev/null || echo "Не активен"
-    systemctl get-default
-    zramctl 2>/dev/null || echo "zram утилиты установлены"
+    echo -e "${C_BOLD}--- 1. Базовая система и параметры хоста ---${C_RESET}"
+    local current_tz
+    current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+    echo -e "  • Часовой пояс: ${C_GREEN}$current_tz${C_RESET}"
+    echo -e "  • Имя хоста:    ${C_GREEN}$(hostname)${C_RESET}"
+    
+    if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
+        echo -e "  • Авто-обновления безопасности: ${C_GREEN}✅ Включены${C_RESET}"
+    else
+        echo -e "  • Авто-обновления безопасности: ${C_RED}❌ Отключены${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 3)${C_RESET}"
+    fi
 
-    echo -e "\n=== 3. ИМЯ ХОСТА ==="
-    hostnamectl status
+    echo -e "\n${C_BOLD}--- 2. Пользователи и SSH-доступ ---${C_RESET}"
+    echo -e "  • Активный sudo-пользователь: ${C_GREEN}$active_user${C_RESET}"
+    
+    local ssh_port
+    ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    echo -e "  • Порт SSH: ${C_GREEN}$ssh_port${C_RESET}"
 
-    echo -e "\n=== 4. ЗАЩИТА ЯДРА И СЕТИ ==="
-    sysctl kernel.dmesg_restrict kernel.kptr_restrict net.ipv4.tcp_syncookies net.ipv4.conf.all.rp_filter fs.protected_symlinks
+    local root_ssh
+    root_ssh=$(sshd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' || echo "yes")
+    if [ "$root_ssh" = "no" ]; then
+        echo -e "  • Вход root по SSH: ${C_GREEN}✅ Запрещен (PermitRootLogin no)${C_RESET}"
+    else
+        echo -e "  • Вход root по SSH: ${C_RED}❌ Разрешен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Настройте Пункт 6)${C_RESET}"
+    fi
 
-    echo -e "\n=== 5. СЕТЕВЫЕ ИНТЕРФЕЙСЫ И UFW ==="
-    ip -br a
-    ufw status verbose 2>/dev/null || echo "UFW не активен"
-    echo "================================================="
+    local pass_auth
+    pass_auth=$(sshd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' || echo "yes")
+    if [ "$pass_auth" = "no" ]; then
+        echo -e "  • Вход по паролю SSH: ${C_GREEN}✅ Отключен (Только ключи)${C_RESET}"
+    else
+        echo -e "  • Вход по паролю SSH: ${C_YELLOW}⚠️ Включен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Привяжите ключи в Пункте 5 и отключите пароль в Пункте 6)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 3. Полная проверка параметров защиты ядра и сети (sysctl) ---${C_RESET}"
+    local sysctl_ok=true
+
+    check_sysctl_param() {
+        local param="$1"
+        local expected="$2"
+        local name="$3"
+        local val
+        val=$(sysctl -n "$param" 2>/dev/null || echo "0")
+        if [ "$val" = "$expected" ]; then
+            echo -e "  • $name ($param = $val): ${C_GREEN}✅ В норме${C_RESET}"
+        else
+            echo -e "  • $name ($param = $val, ожидается $expected): ${C_RED}❌ Не настроено${C_RESET}"
+            sysctl_ok=false
+        fi
+    }
+
+    check_sysctl_param "kernel.dmesg_restrict" "1" "Ограничение dmesg"
+    check_sysctl_param "kernel.kptr_restrict" "2" "Скрытие указателей ядра kptr"
+    check_sysctl_param "kernel.yama.ptrace_scope" "1" "Защита ptrace"
+    check_sysctl_param "kernel.unprivileged_bpf_disabled" "1" "Блокировка eBPF"
+    check_sysctl_param "net.core.bpf_jit_harden" "2" "Защита BPF JIT"
+    check_sysctl_param "net.ipv4.tcp_syncookies" "1" "Защита TCP SYN Cookies"
+    check_sysctl_param "net.ipv4.conf.all.rp_filter" "2" "Фильтр спуфинга rp_filter"
+    check_sysctl_param "net.ipv4.conf.all.accept_redirects" "0" "Запрет ICMP редиректов"
+    check_sysctl_param "fs.protected_symlinks" "1" "Защита симлинков"
+    check_sysctl_param "fs.protected_hardlinks" "1" "Защита хардлинков"
+
+    if [ "$sysctl_ok" = false ]; then
+        echo -e "  ${C_YELLOW}💡 Рекомендация: Примените полную защиту ядра и сети в Пункте 7${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 4. Сетевая безопасность и Firewall (UFW) ---${C_RESET}"
+    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+        echo -e "  • Статус UFW: ${C_GREEN}✅ Активен${C_RESET}"
+    else
+        echo -e "  • Статус UFW: ${C_RED}❌ Не активен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Включите UFW в Пункте 8)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 5. Состояние учетных записей ---${C_RESET}"
+    local root_locked
+    root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "P")
+    if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
+        echo -e "  • Статус пароля root: ${C_GREEN}✅ Заблокирован${C_RESET}"
+    else
+        echo -e "  • Статус пароля root: ${C_RED}❌ Активен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Заблокируйте root в Пункте 9)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 6. VPN и оптимизация Tailscale ---${C_RESET}"
+    if command -v tailscale &>/dev/null; then
+        echo -e "  • Пакет Tailscale: ${C_GREEN}✅ Установлен${C_RESET}"
+        if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
+            echo -e "  • Служба ethtool GRO: ${C_GREEN}✅ Активна${C_RESET}"
+        else
+            echo -e "  • Служба ethtool GRO: ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
+        fi
+    else
+        echo -e "  • Пакет Tailscale: ${C_YELLOW}⚠️ Не установлен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Настройте Пункт 10)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 7. Логирование и очистка диска ---${C_RESET}"
+    local journal_storage
+    journal_storage=$(grep -E "^\s*Storage=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 || echo "auto")
+    if [ "$journal_storage" = "none" ]; then
+        echo -e "  • Логирование journald: ${C_GREEN}✅ Отключено (Storage=none)${C_RESET}"
+    else
+        echo -e "  • Логирование journald: ${C_YELLOW}⚠️ Включено (Storage=$journal_storage)${C_RESET} ${C_YELLOW}(💡 Рекомендация: Отключите в Пункте 11)${C_RESET}"
+    fi
+
+    if systemctl is-active --quiet rsyslog 2>/dev/null; then
+        echo -e "  • Служба rsyslog: ${C_YELLOW}⚠️ Активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Заблокируйте в Пункте 11)${C_RESET}"
+    else
+        echo -e "  • Служба rsyslog: ${C_GREEN}✅ Остановлена/Заблокирована${C_RESET}"
+    fi
+
+    local var_log_size
+    var_log_size=$(du -sh /var/log 2>/dev/null | awk '{print $1}' || echo "0")
+    echo -e "  • Размер папки /var/log: ${C_BLUE}$var_log_size${C_RESET}"
+
+    echo -e "\n${C_BOLD}--- 8. Память, Флеш-накопитель и Swap ---${C_RESET}"
+    local swap_swappiness
+    swap_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "60")
+    if [ "$swap_swappiness" -le 10 ]; then
+        echo -e "  • Параметр swappiness: ${C_GREEN}✅ Оптимизирован ($swap_swappiness)${C_RESET}"
+    else
+        echo -e "  • Параметр swappiness: ${C_YELLOW}⚠️ Стандартный ($swap_swappiness)${C_RESET} ${C_YELLOW}(💡 Рекомендация: Оптимизируйте в Пункте 12)${C_RESET}"
+    fi
+
+    if mount | grep " / " | grep -q "noatime"; then
+        echo -e "  • Флаг noatime на корень (/): ${C_GREEN}✅ Включен${C_RESET}"
+    else
+        echo -e "  • Флаг noatime на корень (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
+    fi
+
+    local current_swap
+    current_swap=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "")
+    [ -z "$current_swap" ] && current_swap="Отключен"
+    echo -e "  • Состояние Swap: ${C_BLUE}$current_swap${C_RESET}"
+
+    echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Роутер-режим Одноплатного компьютера (Автоопределение конфликта подсетей)
+# 18. Роутер-режим Одноплатного компьютера
 mod_router_sbc() {
     echo -e "${C_CYAN}🛜 === 18/18. ОДНОПЛАТНЫЙ КОМПЬЮТЕР КАК РОУТЕР ===${C_RESET}"
 
-    prompt_yn "Настроить этот узел как LAN-шлюз (роутер) через Tailscale Exit Node?" true
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+    if prompt_yn "Настроить этот узел как LAN-шлюз (роутер) через Tailscale Exit Node?" true; then
+        : # Продолжаем
+    else
+        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+        echo "Пропущено."
+        return 0
+    fi
 
-    # Динамическое автоопределение физических сетевых интерфейсов
     local default_lan_if
     default_lan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | head -n 1 || echo "eth0")
     local default_wan_if
@@ -908,7 +1098,6 @@ mod_router_sbc() {
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
     ts_iface="${ts_iface:-tailscale0}"
 
-    # Проверка конфликта подсетей WAN vs LAN
     local wan_subnet
     wan_subnet=$(get_interface_subnet "$wan_iface")
 
@@ -1011,19 +1200,17 @@ EOF
     local before_rules="/etc/ufw/before.rules"
     backup_file "$before_rules"
 
-    # Безопасное встраивание правил роутинга и Kill Switch в /etc/ufw/before.rules
     python3 - "$lan_iface" "$wan_iface" "$ts_iface" <<'PY'
 import sys
 from pathlib import Path
 
 lan_iface = sys.argv
-wan_iface = sys.argv
-ts_iface = sys.argv
+wan_iface = sys.argv[2]
+ts_iface = sys.argv[3]
 
 path = Path("/etc/ufw/before.rules")
 content = path.read_text()
 
-# Очистка старого блока, если перенастраиваем
 start = content.find("# --- Router Rules BEGIN ---")
 if start != -1:
     end = content.find("# --- Router Rules END ---", start)
@@ -1114,7 +1301,7 @@ while true; do
     echo -e "${C_GREEN}  A) 🚀 ВЫПОЛНИТЬ ВСЮ ПЕРВИЧНУЮ НАСТРОЙКУ С НУЛЯ (МОДУЛИ 1-12)${C_RESET}"
     echo -e "${C_RED}  0) ❌ Выход${C_RESET}"
     echo -e "${C_CYAN}=================================================================${C_RESET}"
-    read -r -p "Выберите пункт меню [0-18, A]: " choice
+    read -r -p "Выберите пункт меню [0-18, A]: " choice < /dev/tty
 
     MODULE_CANCELED=false
 

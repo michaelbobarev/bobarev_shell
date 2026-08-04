@@ -126,7 +126,7 @@ backup_file() {
 
 pause_enter() {
     echo ""
-    read -r -p "Нажмите Enter для возврата в главное меню..." < /dev/tty
+    read -r -p "Нажмите Enter для продолжения..." < /dev/tty
 }
 
 if [ "$EUID" -ne 0 ]; then
@@ -551,43 +551,155 @@ mod_lock_root() {
     fi
 }
 
-# 10. Tailscale, GRO-оптимизация & Auto-Update
+# 10. Tailscale, GRO-оптимизация & Интерактивная безопасность
 mod_tailscale() {
-    echo -e "${C_CYAN}🔗 === 10/18. НАСТРОЙКА TAILSCALE И GRO-ОПТИМИЗАЦИЯ ===${C_RESET}"
-    
-    echo "Режим работы Tailscale:"
-    echo "  1) Обычный узел"
-    echo "  2) Сервер как Exit-Node (--advertise-exit-node)"
-    echo "  0) Назад"
-    local role
-    read -r -p "Ваш выбор [1-2, 0] (по умолчанию 1): " role < /dev/tty
-    if [ "$role" = "0" ]; then
-        echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
-        MODULE_CANCELED=true
-        return 0
-    fi
-    role="${role:-1}"
+    while true; do
+        clear
+        echo -e "${C_CYAN}🔗 === 10/18. УПРАВЛЕНИЕ И НАСТРОЙКА TAILSCALE CLI ===${C_RESET}"
+        
+        # Предварительный вывод статуса узла
+        if command -v tailscale &>/dev/null; then
+            local ts_name ts_ip ts_exit ts_adv_exit ts_adv_routes ts_accept ts_stealth
+            ts_name=$(tailscale whoami 2>/dev/null | grep -i "^  Name:" | awk '{print $2}' || echo "Не привязан")
+            ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
+            ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
+            ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
+            ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "нет")
+            ts_accept=$(tailscale get accept-routes 2>/dev/null || echo "false")
+            ts_stealth=$(tailscale debug prefs 2>/dev/null | grep -i "StatefulFiltering" | awk '{print $2}' | tr -d ',' || echo "false")
 
-    local authkey
-    read -r -p "Tailscale Auth Key (Enter для авторизации по ссылке, 0 - Назад): " authkey < /dev/tty
-    if [ "$authkey" = "0" ]; then
-        echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
-        MODULE_CANCELED=true
-        return 0
-    fi
+            echo -e " Узел: ${C_GREEN}$ts_name${C_RESET} | IP: ${C_GREEN}$ts_ip${C_RESET}"
+            echo -e " Exit-Node target: ${C_BLUE}$ts_exit${C_RESET} | Анонс ExitNode: ${C_BLUE}$ts_adv_exit${C_RESET}"
+            echo -e " Свои подсети (LAN): ${C_BLUE}${ts_adv_routes:-нет}${C_RESET} | Прием чужих подсетей: ${C_BLUE}$ts_accept${C_RESET}"
+            echo -e " Стелс-режим (StatefulFiltering): ${C_BLUE}$ts_stealth${C_RESET}"
+        else
+            echo -e " Статус: ${C_YELLOW}Пакет Tailscale еще не установлен в системе.${C_RESET}"
+        fi
+        echo -e "${C_CYAN}-----------------------------------------------------------------${C_RESET}"
+        echo " Выберите действие:"
+        echo "  1) 🔑 Первичный запуск и авторизация (tailscale up)"
+        echo "  2) 🌐 Настройка Exit Node (Анонс / Подключение / Отключение)"
+        echo "  3) 🔀 Анонсирование локальных подсетей (--advertise-routes)"
+        echo "  4) 🛡️ Прием маршрутов подсетей от других узлов (--accept-routes)"
+        echo "  5) 🔒 Стелс-режим / Изоляция узла (--stateful-filtering)"
+        echo "  6) ⚡ Настройка ethtool GRO-ускорения (tailscale-gro.service)"
+        echo "  7) 🔄 Полный сброс настроек подключения (tailscale up --reset)"
+        echo "  0) ↩️ Назад в Главное меню"
+        echo -e "${C_CYAN}=================================================================${C_RESET}"
+        
+        local ts_choice
+        read -r -p "Ваш выбор [0-7]: " ts_choice < /dev/tty
+        
+        case "$ts_choice" in
+            1)
+                if ! command -v tailscale &> /dev/null; then
+                    echo "Установка пакета Tailscale..."
+                    curl -fsSL https://tailscale.com/install.sh | sh
+                fi
 
-    if ! command -v tailscale &> /dev/null; then
-        echo "Установка пакета Tailscale..."
-        curl -fsSL https://tailscale.com/install.sh | sh
-    fi
+                # Оверрайд systemd для задержки старта до появления интернета (убирает Offline после ребута)
+                mkdir -p /etc/systemd/system/tailscaled.service.d
+                cat << 'TS_OVERRIDE' > /etc/systemd/system/tailscaled.service.d/override.conf
+[Unit]
+After=network-online.target NetworkManager-wait-online.service systemd-networkd-wait-online.service
+Wants=network-online.target
+TS_OVERRIDE
+                systemctl daemon-reload
 
-    tee /etc/sysctl.d/99-tailscale-forward.conf > /dev/null << 'TS_EOF'
+                tee /etc/sysctl.d/99-tailscale-forward.conf > /dev/null << 'TS_EOF'
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 TS_EOF
-    sysctl --system > /dev/null
+                sysctl --system > /dev/null
 
-    cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
+                local authkey
+                read -r -p "Tailscale Auth Key (Enter для авторизации по ссылке, 0 - Назад): " authkey < /dev/tty
+                if [ "$authkey" = "0" ]; then continue; fi
+
+                if [ -n "$authkey" ]; then
+                    tailscale up --authkey="$authkey" || true
+                else
+                    tailscale up || true
+                    echo ""
+                    read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
+                fi
+
+                tailscale set --auto-update 2>/dev/null || true
+                echo -e "${C_GREEN}✅ Авторизация выполнена, включен автозапуск с защитой от таймаутов.${C_RESET}"
+                pause_enter
+                ;;
+            2)
+                echo "Настройка Exit Node:"
+                echo "  1) Включить анонс сервера как Exit-Node (tailscale set --advertise-exit-node=true)"
+                echo "  2) Выключить анонс сервера как Exit-Node (tailscale set --advertise-exit-node=false)"
+                echo "  3) Подключиться к внешнему Exit-Node (tailscale set --exit-node=<IP>)"
+                echo "  4) Отключиться от внешнего Exit-Node (tailscale set --exit-node=)"
+                echo "  0) Отмена"
+                local en_choice
+                read -r -p "Ваш выбор [0-4]: " en_choice < /dev/tty
+                case "$en_choice" in
+                    1) tailscale set --advertise-exit-node=true 2>/dev/null || true; echo -e "${C_GREEN}✅ Анонс Exit Node включен.${C_RESET}" ;;
+                    2) tailscale set --advertise-exit-node=false 2>/dev/null || true; echo -e "${C_GREEN}✅ Анонс Exit Node выключен.${C_RESET}" ;;
+                    3)
+                        local target_ip=""
+                        prompt_clean "Введите IP-адрес или имя Exit Node" target_ip
+                        if [ -n "$target_ip" ]; then
+                            tailscale set --exit-node="$target_ip" --exit-node-allow-lan-access 2>/dev/null || true
+                            echo -e "${C_GREEN}✅ Подключен к Exit Node $target_ip.${C_RESET}"
+                        fi
+                        ;;
+                    4) tailscale set --exit-node= 2>/dev/null || true; echo -e "${C_GREEN}✅ Отключен от Exit Node.${C_RESET}" ;;
+                esac
+                pause_enter
+                ;;
+            3)
+                echo "Анонсирование локальных подсетей (LAN):"
+                local detected_subnet
+                detected_subnet=$(get_interface_subnet "$DEFAULT_WAN_IF")
+                local default_route_spec=""
+                [ -n "$detected_subnet" ] && default_route_spec="${detected_subnet}.0/24"
+
+                echo "Введите подсети в формате CIDR (например, 192.168.2.0/24)."
+                echo "Чтобы отключить анонс подсетей, введите 0."
+                local routes_input=""
+                prompt_clean "Подсеть для анонса (Enter - ${default_route_spec:-192.168.1.0/24})" routes_input
+                
+                if [ "$routes_input" = "0" ]; then
+                    tailscale set --advertise-routes= 2>/dev/null || true
+                    echo -e "${C_GREEN}✅ Анонсирование подсетей отключено.${C_RESET}"
+                else
+                    routes_input="${routes_input:-${default_route_spec:-192.168.1.0/24}}"
+                    tailscale set --advertise-routes="$routes_input" 2>/dev/null || true
+                    echo -e "${C_GREEN}✅ Анонсируется подсеть $routes_input.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+            4)
+                echo "Прием маршрутов подсетей от других узлов сети (--accept-routes):"
+                if prompt_yn "Разрешить доступ к анонсируемым локальным подсетям других устройств?" false; then
+                    tailscale set --accept-routes=true 2>/dev/null || true
+                    echo -e "${C_GREEN}✅ Прием подсетей включен (--accept-routes=true).${C_RESET}"
+                else
+                    tailscale set --accept-routes=false 2>/dev/null || true
+                    echo -e "${C_BLUE}ℹ️ Прием подсетей отключен (безопасный режим).${C_RESET}"
+                fi
+                pause_enter
+                ;;
+            5)
+                echo "Стелс-режим / Изоляция узла (Stateful Filtering):"
+                echo "  1) Включить стелс-режим/изоляцию (tailscale set --stateful-filtering=true)"
+                echo "  2) Отключить стелс-режим (tailscale set --stateful-filtering=false)"
+                echo "  0) Отмена"
+                local sf_choice
+                read -r -p "Ваш выбор [0-2]: " sf_choice < /dev/tty
+                case "$sf_choice" in
+                    1) tailscale set --stateful-filtering=true 2>/dev/null || true; echo -e "${C_GREEN}✅ Стелс-режим (Stateful Filtering) включен.${C_RESET}" ;;
+                    2) tailscale set --stateful-filtering=false 2>/dev/null || true; echo -e "${C_GREEN}✅ Стелс-режим отключен.${C_RESET}" ;;
+                esac
+                pause_enter
+                ;;
+            6)
+                cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do
     sleep 2
@@ -597,9 +709,9 @@ if [ -n "$NETDEV" ]; then
     ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off || true
 fi
 ETHTOOL_SCRIPT_EOF
-    chmod +x /usr/local/bin/tailscale-gro.sh
+                chmod +x /usr/local/bin/tailscale-gro.sh
 
-    tee /etc/systemd/system/tailscale-gro.service > /dev/null << 'ETHTOOL_SVC_EOF'
+                tee /etc/systemd/system/tailscale-gro.service > /dev/null << 'ETHTOOL_SVC_EOF'
 [Unit]
 Description=Ethtool rx-udp-gro-forwarding for Tailscale
 After=network-online.target
@@ -613,33 +725,23 @@ ExecStart=/usr/local/bin/tailscale-gro.sh
 [Install]
 WantedBy=multi-user.target
 ETHTOOL_SVC_EOF
-    systemctl daemon-reload
-    systemctl enable --now tailscale-gro.service
-
-    local args=()
-    [ -n "$authkey" ] && args+=("--authkey=$authkey")
-    [ "$role" = "2" ] && args+=("--advertise-exit-node")
-
-    if [ -n "$authkey" ]; then
-        tailscale up "${args[@]}" || true
-    else
-        tailscale up "${args[@]}" || true
-        echo ""
-        read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
-    fi
-
-    # Включение авто-обновления Tailscale
-    tailscale set --auto-update 2>/dev/null || true
-
-    echo ""
-    echo "🔍 Проверка статуса оптимизации Tailscale:"
-    systemctl status tailscale-gro.service --no-pager -n 5 || true
-    local netdev="$DEFAULT_WAN_IF"
-    [ -z "$netdev" ] && netdev=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
-    if [ -n "$netdev" ]; then
-        ethtool -k "$netdev" 2>/dev/null | grep -E 'rx-udp-gro-forwarding|rx-gro-list' || true
-    fi
-    echo -e "${C_GREEN}✅ Настройка Tailscale завершена (Включено авто-обновление client auto-update).${C_RESET}"
+                systemctl daemon-reload
+                systemctl enable --now tailscale-gro.service
+                echo -e "${C_GREEN}✅ Служба GRO-ускорения tailscale-gro.service активирована.${C_RESET}"
+                pause_enter
+                ;;
+            7)
+                if prompt_yn "⚠️ Сбросить все текущие параметры Tailscale к значениям по умолчанию (tailscale up --reset)?" false; then
+                    tailscale up --reset || true
+                    echo -e "${C_GREEN}✅ Настройки Tailscale сброшены к значениям по умолчанию.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+            0)
+                break
+                ;;
+        esac
+    done
 }
 
 # 11. Отключение системного логирования
@@ -1083,28 +1185,45 @@ mod_server_audit() {
     if command -v tailscale &>/dev/null; then
         echo -e "  • Пакет Tailscale: ${C_GREEN}✅ Установлен${C_RESET}"
         
-        local ts_name ts_ip ts_user ts_exit
+        local ts_name ts_ip ts_user ts_exit ts_adv_exit ts_adv_routes ts_accept_routes ts_stealth
         ts_name=$(tailscale whoami 2>/dev/null | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
         ts_user=$(tailscale whoami 2>/dev/null | grep -i "^User:" -A 1 | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
         ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
         ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
+        ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
+        ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "нет")
+        ts_accept_routes=$(tailscale get accept-routes 2>/dev/null || echo "false")
+        ts_stealth=$(tailscale debug prefs 2>/dev/null | grep -i "StatefulFiltering" | awk '{print $2}' | tr -d ',' || echo "false")
 
-        echo -e "  • Имя узла Tailnet: ${C_BLUE}$ts_name${C_RESET}"
-        echo -e "  • IP-адрес Tailscale: ${C_BLUE}$ts_ip${C_RESET}"
-        echo -e "  • Аккаунт:           ${C_BLUE}$ts_user${C_RESET}"
-        echo -e "  • Exit-Node target: ${C_BLUE}$ts_exit${C_RESET}"
+        echo -e "  • Имя узла Tailnet:     ${C_BLUE}$ts_name${C_RESET}"
+        echo -e "  • IP-адрес Tailscale:   ${C_BLUE}$ts_ip${C_RESET}"
+        echo -e "  • Аккаунт:              ${C_BLUE}$ts_user${C_RESET}"
+        echo -e "  • Exit-Node target:    ${C_BLUE}$ts_exit${C_RESET}"
+        echo -e "  • Анонс Exit-Node:      ${C_BLUE}$ts_adv_exit${C_RESET}"
+        echo -e "  • Анонсируемые подсети: ${C_BLUE}${ts_adv_routes:-нет}${C_RESET}"
+
+        if [ "$ts_accept_routes" = "true" ]; then
+            echo -e "  • Прием чужих подсетей: ${C_GREEN}✅ Включен (--accept-routes)${C_RESET}"
+        else
+            echo -e "  • Прием чужих подсетей: ${C_BLUE}🛡️ Отключен (безопасный режим)${C_RESET}"
+        fi
+
+        if [ "$ts_stealth" = "true" ]; then
+            echo -e "  • Стелс-режим (Изоляция): ${C_GREEN}🔒 Включен (StatefulFiltering)${C_RESET}"
+        else
+            echo -e "  • Стелс-режим (Изоляция): ${C_BLUE}🌐 Отключен${C_RESET}"
+        fi
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
-            echo -e "  • Служба ethtool GRO: ${C_GREEN}✅ Активна${C_RESET}"
+            echo -e "  • Служба ethtool GRO:   ${C_GREEN}✅ Активна${C_RESET}"
         else
-            echo -e "  • Служба ethtool GRO: ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
+            echo -e "  • Служба ethtool GRO:   ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
         fi
 
         local health_warn
-        health_warn=$(tailscale status --peers=false 2>/dev/null | grep -A 5 -i "# Health check:" || echo "")
+        health_warn=$(tailscale status --peers=false 2>/dev/null | grep -A 5 -i "# Health check:" | grep -v "accept-routes" || echo "")
         if [ -n "$health_warn" ]; then
             echo -e "  • Предупреждение Tailscale Health Check:\n${C_YELLOW}$health_warn${C_RESET}"
-            echo -e "  ${C_YELLOW}💡 Рекомендация: Если маршруты рекламируются, активируйте их через tailscale set --accept-routes=true${C_RESET}"
         else
             echo -e "  • Предупреждения сети Tailnet: ${C_GREEN}✅ Отсутствуют (Сеть здорова)${C_RESET}"
         fi

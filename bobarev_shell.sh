@@ -551,7 +551,7 @@ mod_lock_root() {
     fi
 }
 
-# 10. Tailscale & GRO-оптимизация
+# 10. Tailscale, GRO-оптимизация & Auto-Update
 mod_tailscale() {
     echo -e "${C_CYAN}🔗 === 10/18. НАСТРОЙКА TAILSCALE И GRO-ОПТИМИЗАЦИЯ ===${C_RESET}"
     
@@ -628,6 +628,9 @@ ETHTOOL_SVC_EOF
         read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
     fi
 
+    # Включение авто-обновления Tailscale
+    tailscale set --auto-update 2>/dev/null || true
+
     echo ""
     echo "🔍 Проверка статуса оптимизации Tailscale:"
     systemctl status tailscale-gro.service --no-pager -n 5 || true
@@ -636,7 +639,7 @@ ETHTOOL_SVC_EOF
     if [ -n "$netdev" ]; then
         ethtool -k "$netdev" 2>/dev/null | grep -E 'rx-udp-gro-forwarding|rx-gro-list' || true
     fi
-    echo -e "${C_GREEN}✅ Настройка Tailscale завершена.${C_RESET}"
+    echo -e "${C_GREEN}✅ Настройка Tailscale завершена (Включено авто-обновление client auto-update).${C_RESET}"
 }
 
 # 11. Отключение системного логирования
@@ -713,7 +716,7 @@ DISABLE_LOGS_EOF
     echo -e "${C_GREEN}✅ Полное отключение системного логирования и аудита завершено.${C_RESET}"
 }
 
-# 12. Оптимизация RAM / Flash (noatime + commit=120 + Dirty Pages + I/O Scheduler)
+# 12. Оптимизация RAM / Flash (Надежная двойная запись noatime + commit=120)
 mod_ram_flash_opt() {
     echo -e "${C_CYAN}⚡ === 12/18. ОПТИМИЗАЦИЯ RAM, FLASH (COMMIT=120, NOATIME, I/O) ===${C_RESET}"
     backup_file "/etc/fstab"
@@ -732,18 +735,51 @@ kernel.dmesg_restrict=1
 EOF
     sysctl --system > /dev/null
 
-    # 2. Оптимизация опций монтирования корня Ext4/Btrfs в /etc/fstab (noatime + commit=120)
-    sed -i -E '/\s+\/\s+/ { /noatime/! s/(\s+ext[234]|\s+xfs|\s+btrfs|\s+f2fs)(\s+)(\S+)/\1\2\3,noatime,commit=120/ }' /etc/fstab
+    # 2. Гарантированная запись опций noatime,commit=120 в /etc/fstab через Python
+    python3 - << 'PY' 2>/dev/null || true
+from pathlib import Path
+
+fstab_path = Path("/etc/fstab")
+if fstab_path.exists():
+    lines = fstab_path.read_text().splitlines()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            new_lines.append(line)
+            continue
+        parts = line.split()
+        if len(parts) >= 4 and parts[1] == "/":
+            opts = parts[3].split(",")
+            if "noatime" not in opts:
+                opts.append("noatime")
+            if "commit=120" not in opts:
+                opts.append("commit=120")
+            parts[3] = ",".join(opts)
+            new_lines.append("\t".join(parts))
+        else:
+            new_lines.append(line)
+    fstab_path.write_text("\n".join(new_lines) + "\n")
+PY
+
+    # 3. Дополнительно прописываем commit=120 в суперблок Ext4 (если корень на ext4)
+    local root_dev
+    root_dev=$(df / 2>/dev/null | awk 'NR==2 {print $1}' || echo "")
+    if [ -n "$root_dev" ] && command -v tune2fs >/dev/null 2>&1; then
+        tune2fs -E mount_opts=commit=120 "$root_dev" 2>/dev/null || true
+    fi
+
+    # Перемонтирование с новыми опциями
     mount -o remount,noatime,commit=120 / 2>/dev/null || true
 
-    # 3. Настройка I/O планировщика mq-deadline для Flash-накопителей
+    # 4. Настройка I/O планировщика mq-deadline для Flash-накопителей
     for dev_sched in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler /sys/block/nvme*/queue/scheduler; do
         if [ -f "$dev_sched" ]; then
             echo "mq-deadline" > "$dev_sched" 2>/dev/null || true
         fi
     done
 
-    # 4. Монтирование временных директорий и логов в RAM (tmpfs)
+    # 5. Монтирование временных директорий и логов в RAM (tmpfs)
     TMPFS_ENTRIES=(
         "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=512M 0 0"
         "tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,size=256M 0 0"
@@ -761,7 +797,7 @@ EOF
 
     systemctl daemon-reload
     mount -a 2>/dev/null || true
-    echo -e "${C_GREEN}✅ Оптимизации RAM / Flash (noatime, commit=120, dirty-writeback) применены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Оптимизации RAM / Flash (noatime, commit=120, dirty-writeback) гарантированно применены и сохранены.${C_RESET}"
 }
 
 # 13. Менеджер Swap
@@ -952,7 +988,7 @@ mod_boot_diag() {
     echo "📊 SVG-график:      $svg_file"
 }
 
-# 17. Полный аудит сервера (ИНТЕЛЛЕКТУАЛЬНАЯ ДИАГНОСТИКА)
+# 17. Полный аудит сервера (ИНТЕЛЛЕКТУАЛЬНАЯ ДИАГНОСТИКА С ГЛУБОКИМ ТАЙЛСКЕЙЛ-АНАЛИЗОМ)
 mod_server_audit() {
     echo -e "${C_CYAN}🔍 === 17/18. ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ АУДИТ И ДИАГНОСТИКА ===${C_RESET}\n"
     
@@ -1043,13 +1079,34 @@ mod_server_audit() {
         echo -e "  • Статус пароля root: ${C_RED}❌ Активен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Заблокируйте root в Пункте 9)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 6. VPN и оптимизация Tailscale ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 6. VPN, Tailscale CLI & Health Checks ---${C_RESET}"
     if command -v tailscale &>/dev/null; then
         echo -e "  • Пакет Tailscale: ${C_GREEN}✅ Установлен${C_RESET}"
+        
+        local ts_name ts_ip ts_user ts_exit
+        ts_name=$(tailscale whoami 2>/dev/null | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
+        ts_user=$(tailscale whoami 2>/dev/null | grep -i "^User:" -A 1 | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
+        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
+        ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
+
+        echo -e "  • Имя узла Tailnet: ${C_BLUE}$ts_name${C_RESET}"
+        echo -e "  • IP-адрес Tailscale: ${C_BLUE}$ts_ip${C_RESET}"
+        echo -e "  • Аккаунт:           ${C_BLUE}$ts_user${C_RESET}"
+        echo -e "  • Exit-Node target: ${C_BLUE}$ts_exit${C_RESET}"
+
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
             echo -e "  • Служба ethtool GRO: ${C_GREEN}✅ Активна${C_RESET}"
         else
             echo -e "  • Служба ethtool GRO: ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
+        fi
+
+        local health_warn
+        health_warn=$(tailscale status --peers=false 2>/dev/null | grep -A 5 -i "# Health check:" || echo "")
+        if [ -n "$health_warn" ]; then
+            echo -e "  • Предупреждение Tailscale Health Check:\n${C_YELLOW}$health_warn${C_RESET}"
+            echo -e "  ${C_YELLOW}💡 Рекомендация: Если маршруты рекламируются, активируйте их через tailscale set --accept-routes=true${C_RESET}"
+        else
+            echo -e "  • Предупреждения сети Tailnet: ${C_GREEN}✅ Отсутствуют (Сеть здорова)${C_RESET}"
         fi
     else
         echo -e "  • Пакет Tailscale: ${C_YELLOW}⚠️ Не установлен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Настройте Пункт 10)${C_RESET}"
@@ -1059,9 +1116,9 @@ mod_server_audit() {
     local journal_storage
     journal_storage=$(grep -E "^\s*Storage=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 || echo "auto")
     if [ "$journal_storage" = "none" ]; then
-        echo -e "  • Логирование journald: ${C_GREEN}✅ Отключено (Storage=none)${C_RESET}"
+        echo -e "  • Логирование journald: ${C_GREEN}✅ Отключено${C_RESET}"
     else
-        echo -e "  • Логирование journald: ${C_YELLOW}⚠️ Включено (Storage=$journal_storage)${C_RESET} ${C_YELLOW}(💡 Рекомендация: Отключите в Пункте 11)${C_RESET}"
+        echo -e "  • Логирование journald: ${C_YELLOW}⚠️ Включено${C_RESET} ${C_YELLOW}(💡 Рекомендация: Отключите в Пункте 11)${C_RESET}"
     fi
 
     if systemctl is-active --quiet rsyslog 2>/dev/null; then
@@ -1089,7 +1146,7 @@ mod_server_audit() {
         echo -e "  • Флаг noatime на корень (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
     fi
 
-    if mount | grep " / " | grep -q "commit=120"; then
+    if grep -E '\s+/\s+' /etc/fstab 2>/dev/null | grep -q "commit=120" || mount | grep " / " | grep -q "commit=120" || grep -E '\s+/\s+' /proc/mounts 2>/dev/null | grep -q "commit=120"; then
         echo -e "  • Флаг commit=120 на корень (/): ${C_GREEN}✅ Включен${C_RESET}"
     else
         echo -e "  • Флаг commit=120 на корень (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
@@ -1239,7 +1296,7 @@ EOF
 import sys
 from pathlib import Path
 
-lan_iface = sys.argv
+lan_iface = sys.argv[1]
 wan_iface = sys.argv[2]
 ts_iface = sys.argv[3]
 

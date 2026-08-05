@@ -75,6 +75,34 @@ print(f"{ts_name}|{ts_user}")
 ' 2>/dev/null || echo "N/A|N/A"
 }
 
+# Динамическое определение активного порта веб-интерфейса Tailscale Web
+get_tailscale_web_port() {
+    python3 -c '
+import re
+port = "5252"
+try:
+    with open("/etc/systemd/system/tailscale-web.service") as f:
+        content = f.read()
+        m = re.search(r"--listen\s+\S+:(\d+)", content)
+        if m:
+            port = m.group(1)
+except Exception:
+    pass
+
+if port == "5252":
+    try:
+        import subprocess
+        out = subprocess.check_output(["ps", "aux"], text=True, stderr=subprocess.DEVNULL)
+        m = re.search(r"tailscale.*web.*--listen\s+\S+:(\d+)", out)
+        if m:
+            port = m.group(1)
+    except Exception:
+        pass
+
+print(port)
+' 2>/dev/null || echo "5252"
+}
+
 # Проверка активности веб-интерфейса Tailscale Web
 is_tailscale_web_active() {
     if systemctl is-active --quiet tailscale-web.service 2>/dev/null; then
@@ -86,7 +114,9 @@ is_tailscale_web_active() {
     if ps aux 2>/dev/null | grep -v grep | grep -q -iE "tailscale.*web"; then
         return 0
     fi
-    if command -v ss &>/dev/null && ss -tulpn 2>/dev/null | grep -q -iE "tailscale.*web|5252"; then
+    local active_port
+    active_port=$(get_tailscale_web_port)
+    if command -v ss &>/dev/null && ss -tulpn 2>/dev/null | grep -q -iE "tailscale.*web|:$active_port"; then
         return 0
     fi
     return 1
@@ -912,33 +942,37 @@ TS_WEB_SVC_EOF
 
                         local current_ts_ip
                         current_ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "127.0.0.1")
-                        echo -e "${C_GREEN}✅ Служба веб-интерфейса tailscale-web.service успешно включена и запущенна.${C_RESET}"
+                        echo -e "${C_GREEN}✅ Служба веб-интерфейса tailscale-web.service успешно включена и запущенна (Порт: $web_port).${C_RESET}"
                         echo -e "${C_CYAN}🌐 Откройте веб-панель в браузере: http://${current_ts_ip}:$web_port${C_RESET}"
                         ;;
                     2)
+                        local active_web_port
+                        active_web_port=$(get_tailscale_web_port)
+
                         systemctl disable --now tailscale-web.service 2>/dev/null || true
                         pkill -9 -f "tailscale.*web" 2>/dev/null || true
                         
-                        python3 -c '
-import subprocess, re
+                        python3 - "$active_web_port" << 'PY' 2>/dev/null || true
+import sys, subprocess, re
+port = sys.argv
 try:
     out = subprocess.check_output(["ss", "-tulpn"], text=True, stderr=subprocess.DEVNULL)
     for line in out.splitlines():
-        if "5252" in line or "tailscale" in line and "web" in line:
+        if f":{port}" in line or ("tailscale" in line and "web" in line):
             for pid in re.findall(r"pid=(\d+)", line):
                 subprocess.run(["kill", "-9", pid], stderr=subprocess.DEVNULL)
 except Exception:
     pass
-' 2>/dev/null || true
+PY
 
                         rm -f /etc/systemd/system/tailscale-web.service
                         systemctl daemon-reload
 
                         if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-                            ufw delete allow 5252/tcp 2>/dev/null || true
+                            ufw delete allow "$active_web_port"/tcp 2>/dev/null || true
                             ufw reload 2>/dev/null || true
                         fi
-                        echo -e "${C_BLUE}ℹ️ Служба и процесс веб-интерфейса Tailscale Web принудительно остановлены, порт 5252 закрыт в UFW.${C_RESET}"
+                        echo -e "${C_BLUE}ℹ️ Служба и процесс веб-интерфейса Tailscale Web принудительно остановлены, порт $active_web_port закрыт в UFW.${C_RESET}"
                         ;;
                 esac
                 pause_enter

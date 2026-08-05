@@ -590,7 +590,7 @@ mod_tailscale() {
         echo "  3) 🔀 Анонсирование локальных подсетей (--advertise-routes)"
         echo "  4) 🛡️  Прием подсетей из Tailscale (--accept-routes)"
         echo "  5) 🔒 Стелс-режим (--stateful-filtering)"
-        echo "  6) ⚡ Настройка ethtool GRO-ускорения (tailscale-gro.service)"
+        echo "  6) ⚡ Настройка GRO-оптимизации (tailscale-gro.service)"
         echo "  7) 🔄 Полный сброс настроек подключения (tailscale up --reset)"
         echo "  0) ↩️ Назад в Главное меню"
         echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -722,9 +722,9 @@ TS_EOF
                 pause_enter
                 ;;
             6)
-                echo "Настройка ethtool GRO-ускорения (tailscale-gro.service):"
-                echo "  1) Включить GRO-ускорение (создать и запустить tailscale-gro.service)"
-                echo "  2) Отключить GRO-ускорение (остановить и удалить tailscale-gro.service)"
+                echo "Настройка GRO-оптимизации (tailscale-gro.service):"
+                echo "  1) Включить GRO-оптимизацию (создать и запустить tailscale-gro.service)"
+                echo "  2) Отключить GRO-оптимизацию (остановить и удалить tailscale-gro.service)"
                 echo "  0) Назад"
                 local gro_choice
                 read -r -p "Ваш выбор [0-2]: " gro_choice < /dev/tty
@@ -758,7 +758,7 @@ WantedBy=multi-user.target
 ETHTOOL_SVC_EOF
                         systemctl daemon-reload
                         systemctl enable --now tailscale-gro.service
-                        echo -e "${C_GREEN}✅ Служба GRO-ускорения tailscale-gro.service включена.${C_RESET}"
+                        echo -e "${C_GREEN}✅ Служба GRO-оптимизации tailscale-gro.service включена.${C_RESET}"
                         ;;
                     2)
                         systemctl disable --now tailscale-gro.service 2>/dev/null || true
@@ -769,7 +769,7 @@ ETHTOOL_SVC_EOF
                         if [ -n "$netdev" ]; then
                             ethtool -K "$netdev" rx-udp-gro-forwarding off 2>/dev/null || true
                         fi
-                        echo -e "${C_BLUE}ℹ️ Служба GRO-ускорения отключена и удалена.${C_RESET}"
+                        echo -e "${C_BLUE}ℹ️ Служба GRO-оптимизации отключена и удалена.${C_RESET}"
                         ;;
                 esac
                 pause_enter
@@ -1240,38 +1240,45 @@ mod_server_audit() {
         echo -e "  • Пакет Tailscale: ${C_GREEN}✅ Установлен${C_RESET}"
         
         local ts_name ts_ip ts_user ts_exit ts_adv_exit ts_adv_routes ts_accept_routes ts_stealth
+        local adv_exit_fmt adv_routes_fmt accept_fmt stealth_fmt
+
         ts_name=$(tailscale whoami 2>/dev/null | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
         ts_user=$(tailscale whoami 2>/dev/null | grep -i "^User:" -A 1 | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
         ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
         ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
         ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
-        ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "нет")
+        ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "")
         ts_accept_routes=$(tailscale get accept-routes 2>/dev/null || echo "false")
         ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
+
+        [ "$ts_adv_exit" = "true" ] && adv_exit_fmt="Включен" || adv_exit_fmt="Отключен"
+        [ -n "$ts_adv_routes" ] && [ "$ts_adv_routes" != "нет" ] && adv_routes_fmt="$ts_adv_routes" || adv_routes_fmt="Не анонсируются"
+        [ "$ts_accept_routes" = "true" ] && accept_fmt="Включен" || accept_fmt="Отключен"
+        [ "$ts_stealth" = "true" ] && stealth_fmt="Включен" || stealth_fmt="Отключен"
 
         echo -e "  • Имя узла Tailnet:          ${C_BLUE}$ts_name${C_RESET}"
         echo -e "  • IP-адрес Tailscale:        ${C_BLUE}$ts_ip${C_RESET}"
         echo -e "  • Аккаунт:                   ${C_BLUE}$ts_user${C_RESET}"
         echo -e "  • Exit-Node target:         ${C_BLUE}$ts_exit${C_RESET}"
-        echo -e "  • Анонс Exit-Node:           ${C_BLUE}$ts_adv_exit${C_RESET}"
-        echo -e "  • Анонсируемые подсети:      ${C_BLUE}${ts_adv_routes:-нет}${C_RESET}"
+        echo -e "  • Анонс Exit-Node:           ${C_BLUE}$adv_exit_fmt${C_RESET}"
+        echo -e "  • Анонсируемые подсети:      ${C_BLUE}$adv_routes_fmt${C_RESET}"
 
         if [ "$ts_accept_routes" = "true" ]; then
-            echo -e "  • Прием подсетей из Tailscale: ${C_GREEN}✅ Включен${C_RESET}"
+            echo -e "  • Прием подсетей из Tailscale: ${C_GREEN}✅ $accept_fmt${C_RESET}"
         else
-            echo -e "  • Прием подсетей из Tailscale: ${C_BLUE}🛡️ Отключен${C_RESET}"
+            echo -e "  • Прием подсетей из Tailscale: ${C_BLUE}🛡️ $accept_fmt${C_RESET}"
         fi
 
         if [ "$ts_stealth" = "true" ]; then
-            echo -e "  • Стелс-режим:              ${C_GREEN}🔒 Включен${C_RESET}"
+            echo -e "  • Стелс-режим:              ${C_GREEN}🔒 $stealth_fmt${C_RESET}"
         else
-            echo -e "  • Стелс-режим:              ${C_BLUE}🌐 Отключен${C_RESET}"
+            echo -e "  • Стелс-режим:              ${C_BLUE}🌐 $stealth_fmt${C_RESET}"
         fi
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
-            echo -e "  • Служба ethtool GRO:        ${C_GREEN}✅ Активна${C_RESET}"
+            echo -e "  • Служба GRO-оптимизации:     ${C_GREEN}✅ Активна${C_RESET}"
         else
-            echo -e "  • Служба ethtool GRO:        ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
+            echo -e "  • Служба GRO-оптимизации:     ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
         fi
 
         # Парсинг только реальных пунктов предупреждений (начинающихся с дефиса '- ') без дублей и пустых заголовков

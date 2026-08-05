@@ -949,7 +949,7 @@ TS_WEB_SVC_EOF
     done
 }
 
-# 11. Отключение системного логирования
+# 11. Отключение системного логирования (С АВТО-ОЧИСТКОЙ ПРИ ПЕРЕЗАГРУЗКЕ И APT)
 mod_disable_logging() {
     echo -e "${C_CYAN}🧹 === 11/18. ОТКЛЮЧЕНИЕ СИСТЕМНОГО ЛОГИРОВАНИЯ И АУДИТА ===${C_RESET}"
     backup_file "/etc/systemd/journald.conf"
@@ -1007,9 +1007,16 @@ if command -v ufw &>/dev/null; then
     echo "✅ Логирование UFW отключено."
 fi
 
-find /var/log -type f \( -name "*.log*" -o -name "syslog*" -o -name "auth.log*" -o -name "kern.log*" -o -name "ufw.log*" \) -exec truncate -s 0 {} + 2>/dev/null || true
+# 1. Автоматическая очистка APT / DPKG логов после любых установок пакетов
+mkdir -p /etc/apt/apt.conf.d
+cat << 'APT_CLEAN_EOF' > /etc/apt/apt.conf.d/99clean-logs
+DPkg::Post-Invoke {"truncate -s 0 /var/log/dpkg.log /var/log/alternatives.log /var/log/apt/*.log 2>/dev/null || true";};
+APT_CLEAN_EOF
+
+# 2. Очистка журналов и удаление структуры /var/log/journal
+find /var/log -type f \( -name "*.log*" -o -name "syslog*" -o -name "auth.log*" -o -name "kern.log*" -o -name "ufw.log*" -o -name "dpkg*" -o -name "wtmp*" -o -name "btmp*" -o -name "lastlog*" \) -exec truncate -s 0 {} + 2>/dev/null || true
 find /var/log -type f \( -name "*.[0-9]" -o -name "*.gz" \) -delete 2>/dev/null || true
-rm -rf /var/log/journal/* /run/log/journal/* 2>/dev/null || true
+rm -rf /var/log/journal /run/log/journal 2>/dev/null || true
 echo "✅ Папка /var/log и бинарные журналы очищены."
 
 journalctl --vacuum-size=1M 2>/dev/null || true
@@ -1019,8 +1026,27 @@ echo "🎉 Системное логирование и аудит полнос�
 DISABLE_LOGS_EOF
 
     chmod +x /usr/local/bin/disable-logging.sh
+
+    # 3. Автоматический запуск очистки логов при КАЖДОЙ загрузке системы (systemd boot service)
+    tee /etc/systemd/system/clean-logs-boot.service > /dev/null << 'BOOT_CLEAN_SVC_EOF'
+[Unit]
+Description=Automated System Log Cleanup on Boot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/disable-logging.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BOOT_CLEAN_SVC_EOF
+
+    systemctl daemon-reload
+    systemctl enable clean-logs-boot.service 2>/dev/null || true
+
     /usr/local/bin/disable-logging.sh
-    echo -e "${C_GREEN}✅ Полное отключение системного логирования и аудита завершено.${C_RESET}"
+    echo -e "${C_GREEN}✅ Полное авто-отключение системного логирования и постоянная очистка при перезагрузках/APT настроена.${C_RESET}"
 }
 
 # 12. Оптимизация RAM / Flash (Надежная двойная запись noatime + commit=120)
@@ -1056,7 +1082,7 @@ if fstab_path.exists():
             new_lines.append(line)
             continue
         parts = line.split()
-        if len(parts) >= 4 and parts[1] == "/":
+        if len(parts) >= 4 and parts == "/":
             opts = parts[3].split(",")
             if "noatime" not in opts:
                 opts.append("noatime")
@@ -1621,7 +1647,7 @@ EOF
 import sys
 from pathlib import Path
 
-lan_iface = sys.argv[1]
+lan_iface = sys.argv
 wan_iface = sys.argv[2]
 ts_iface = sys.argv[3]
 

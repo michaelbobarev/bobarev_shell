@@ -42,6 +42,56 @@ get_active_user() {
     echo "$u"
 }
 
+# Парсинг имени узла и аккаунта Tailscale
+get_tailscale_whoami() {
+    python3 -c '
+import subprocess, re
+try:
+    whoami_raw = subprocess.check_output(["tailscale", "whoami"], stderr=subprocess.STDOUT, text=True)
+except Exception:
+    whoami_raw = ""
+
+email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", whoami_raw)
+ts_user = email_match.group(0) if email_match else "N/A"
+
+ts_name = "N/A"
+fqdn_match = re.search(r"([a-zA-Z0-9\.-]+\.(?:ts|tailscale)\.net)", whoami_raw)
+if fqdn_match:
+    ts_name = fqdn_match.group(1)
+else:
+    node_sec = re.search(r"Node:\s*\n?\s*(?:Name:)?\s*([a-zA-Z0-9\.-]+)", whoami_raw, re.IGNORECASE)
+    if node_sec:
+        ts_name = node_sec.group(1)
+    else:
+        mac_sec = re.search(r"Machine:\s*([a-zA-Z0-9\.-]+)", whoami_raw, re.IGNORECASE)
+        if mac_sec:
+            ts_name = mac_sec.group(1)
+        else:
+            words = [w for w in whoami_raw.replace("\n", " ").split() if "@" not in w and not w.endswith(":") and w.lower() not in ["machine", "node", "user"]]
+            if words:
+                ts_name = words[0]
+
+print(f"{ts_name}|{ts_user}")
+' 2>/dev/null || echo "N/A|N/A"
+}
+
+# Проверка активности веб-интерфейса Tailscale Web
+is_tailscale_web_active() {
+    if systemctl is-active --quiet tailscale-web.service 2>/dev/null; then
+        return 0
+    fi
+    if systemctl is-enabled --quiet tailscale-web.service 2>/dev/null; then
+        return 0
+    fi
+    if ps aux 2>/dev/null | grep -v grep | grep -q -iE "tailscale.*web"; then
+        return 0
+    fi
+    if command -v ss &>/dev/null && ss -tulpn 2>/dev/null | grep -q -iE "tailscale.*web|5252"; then
+        return 0
+    fi
+    return 1
+}
+
 # Проверка занятости сетевого TCP-порта
 is_port_free() {
     local port="$1"
@@ -623,9 +673,7 @@ mod_tailscale() {
             local ts_name ts_ip ts_exit ts_adv_exit ts_adv_routes ts_accept ts_stealth ts_web_fmt
             local adv_exit_fmt adv_routes_fmt accept_fmt stealth_fmt
 
-            local whoami_line
-            whoami_line=$(tailscale whoami 2>/dev/null | head -n 1 || echo "")
-            ts_name=$(echo "$whoami_line" | awk '{print $1}')
+            IFS="|" read -r ts_name ts_user <<< "$(get_tailscale_whoami)"
             [ -z "$ts_name" ] && ts_name="Не привязан"
 
             ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
@@ -635,7 +683,7 @@ mod_tailscale() {
             ts_accept=$(tailscale get accept-routes 2>/dev/null || echo "false")
             ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
 
-            if systemctl is-active --quiet tailscale-web.service 2>/dev/null || pgrep -f "tailscale web" >/dev/null 2>&1; then
+            if is_tailscale_web_active; then
                 ts_web_fmt="Включен"
             else
                 ts_web_fmt="Отключен"
@@ -1345,11 +1393,7 @@ mod_server_audit() {
         local ts_name ts_ip ts_user ts_exit ts_adv_exit ts_adv_routes ts_accept_routes ts_stealth
         local adv_exit_fmt adv_routes_fmt accept_fmt stealth_fmt
 
-        local whoami_line
-        whoami_line=$(tailscale whoami 2>/dev/null | head -n 1 || echo "")
-        ts_name=$(echo "$whoami_line" | awk '{print $1}')
-        ts_user=$(echo "$whoami_line" | awk '{print $2}')
-
+        IFS="|" read -r ts_name ts_user <<< "$(get_tailscale_whoami)"
         [ -z "$ts_name" ] && ts_name="N/A"
         [ -z "$ts_user" ] && ts_user="N/A"
 
@@ -1390,7 +1434,7 @@ mod_server_audit() {
             echo -e "  • Служба GRO-оптимизации:     ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
         fi
 
-        if systemctl is-active --quiet tailscale-web.service 2>/dev/null || pgrep -f "tailscale web" >/dev/null 2>&1; then
+        if is_tailscale_web_active; then
             echo -e "  • Веб-интерфейс Tailscale Web: ${C_GREEN}✅ Включен${C_RESET}"
         else
             echo -e "  • Веб-интерфейс Tailscale Web: ${C_BLUE}🌐 Отключен${C_RESET}"
@@ -1649,7 +1693,17 @@ while true; do
     echo -e "${C_BOLD}       Автор: Michael Bobarev, Bobarev.com${C_RESET}"
     echo -e "${C_CYAN}=================================================================${C_RESET}"
     echo -e " Тип системы: ${C_GREEN}$SYSTEM_TYPE${C_RESET} | Хост: ${C_GREEN}$(hostname)${C_RESET} | Пояс: ${C_GREEN}$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")${C_RESET}"
-    echo -e " Tailscale: ${C_GREEN}$(command -v tailscale &>/dev/null && echo "Установлен" || echo "Не установлен")${C_RESET} | UFW: ${C_GREEN}$(ufw status 2>/dev/null | head -n 1 || echo "Неизвестно")${C_RESET}"
+    
+    ts_main_status="Не установлен"
+    if command -v tailscale &>/dev/null; then
+        if is_tailscale_web_active; then
+            ts_main_status="Установлен (Web UI)"
+        else
+            ts_main_status="Установлен"
+        fi
+    fi
+
+    echo -e " Tailscale: ${C_GREEN}$ts_main_status${C_RESET} | UFW: ${C_GREEN}$(ufw status 2>/dev/null | head -n 1 || echo "Неизвестно")${C_RESET}"
     echo -e "${C_CYAN}=================================================================${C_RESET}"
     echo " --- [БАЗОВАЯ СИСТЕМА И СЕРВЕР] ---"
     echo "  1) 🌐 Часовой пояс"

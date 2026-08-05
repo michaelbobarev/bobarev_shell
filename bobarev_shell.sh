@@ -1173,7 +1173,7 @@ mod_server_audit() {
     local root_ssh
     root_ssh=$(sshd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' || echo "yes")
     if [ "$root_ssh" = "no" ]; then
-        echo -e "  • Вход root по SSH: ${C_GREEN}✅ Запрещен (PermitRootLogin no)${C_RESET}"
+        echo -e "  • Вход root по SSH: ${C_GREEN}✅ Запрещен${C_RESET}"
     else
         echo -e "  • Вход root по SSH: ${C_RED}❌ Разрешен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Настройте Пункт 6)${C_RESET}"
     fi
@@ -1257,15 +1257,15 @@ mod_server_audit() {
         echo -e "  • Анонсируемые подсети:      ${C_BLUE}${ts_adv_routes:-нет}${C_RESET}"
 
         if [ "$ts_accept_routes" = "true" ]; then
-            echo -e "  • Прием подсетей из Tailscale: ${C_GREEN}✅ Включен (--accept-routes)${C_RESET}"
+            echo -e "  • Прием подсетей из Tailscale: ${C_GREEN}✅ Включен${C_RESET}"
         else
             echo -e "  • Прием подсетей из Tailscale: ${C_BLUE}🛡️ Отключен${C_RESET}"
         fi
 
         if [ "$ts_stealth" = "true" ]; then
-            echo -e "  • Стелс-режим (StatefulFiltering): ${C_GREEN}🔒 Включен${C_RESET}"
+            echo -e "  • Стелс-режим:              ${C_GREEN}🔒 Включен${C_RESET}"
         else
-            echo -e "  • Стелс-режим (StatefulFiltering): ${C_BLUE}🌐 Отключен${C_RESET}"
+            echo -e "  • Стелс-режим:              ${C_BLUE}🌐 Отключен${C_RESET}"
         fi
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then

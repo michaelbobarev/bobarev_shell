@@ -950,19 +950,64 @@ TS_WEB_SVC_EOF
                         active_web_port=$(get_tailscale_web_port)
 
                         systemctl disable --now tailscale-web.service 2>/dev/null || true
-                        pkill -9 -f "tailscale.*web" 2>/dev/null || true
-                        
+
                         python3 - "$active_web_port" << 'PY' 2>/dev/null || true
-import sys, subprocess, re
-port = sys.argv
+import sys, os, glob, re, subprocess
+
+port_str = sys.argv
+port_hex = f"{int(port_str):04X}"
+pids = set()
+
+inodes = set()
+for proc_file in ["/proc/net/tcp", "/proc/net/tcp6"]:
+    if os.path.exists(proc_file):
+        try:
+            with open(proc_file) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 10:
+                        local_addr = parts
+                        state = parts[3]
+                        inode = parts[9]
+                        if local_addr.endswith(":" + port_hex) and state == "0A":
+                            inodes.add(inode)
+        except Exception:
+            pass
+
+if inodes:
+    for fd_path in glob.glob("/proc/[0-9]*/fd/*"):
+        try:
+            link = os.readlink(fd_path)
+            for inode in inodes:
+                if f"socket:[{inode}]" in link:
+                    pids.add(fd_path.split("/")[2])
+        except Exception:
+            pass
+
 try:
-    out = subprocess.check_output(["ss", "-tulpn"], text=True, stderr=subprocess.DEVNULL)
-    for line in out.splitlines():
-        if f":{port}" in line or ("tailscale" in line and "web" in line):
+    ss_out = subprocess.check_output(["ss", "-tulpn"], text=True, stderr=subprocess.DEVNULL)
+    for line in ss_out.splitlines():
+        if f":{port_str}" in line:
             for pid in re.findall(r"pid=(\d+)", line):
-                subprocess.run(["kill", "-9", pid], stderr=subprocess.DEVNULL)
+                pids.add(pid)
 except Exception:
     pass
+
+try:
+    ps_out = subprocess.check_output(["ps", "aux"], text=True, stderr=subprocess.DEVNULL)
+    for line in ps_out.splitlines():
+        if "tailscale" in line and "web" in line:
+            parts = line.split()
+            if len(parts) >= 2 and parts.isdigit():
+                pids.add(parts)
+except Exception:
+    pass
+
+for pid in pids:
+    try:
+        os.kill(int(pid), 9)
+    except Exception:
+        pass
 PY
 
                         rm -f /etc/systemd/system/tailscale-web.service
@@ -972,7 +1017,7 @@ PY
                             ufw delete allow "$active_web_port"/tcp 2>/dev/null || true
                             ufw reload 2>/dev/null || true
                         fi
-                        echo -e "${C_BLUE}ℹ️ Служба и процесс веб-интерфейса Tailscale Web принудительно остановлены, порт $active_web_port закрыт в UFW.${C_RESET}"
+                        echo -e "${C_BLUE}ℹ️ Служба и процесс веб-интерфейса Tailscale Web полностью завершены (SIGKILL), порт $active_web_port освобождён.${C_RESET}"
                         ;;
                 esac
                 pause_enter

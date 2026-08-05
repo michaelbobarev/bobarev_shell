@@ -625,9 +625,10 @@ TS_EOF
                 if [ "$authkey" = "0" ]; then continue; fi
 
                 if [ -n "$authkey" ]; then
-                    tailscale up --authkey="$authkey" || true
+                    tailscale up --authkey="$authkey" --force-reauth || true
                 else
-                    tailscale up || true
+                    echo -e "${C_BLUE}ℹ️ Запрос новой ссылки авторизации у сервера Tailscale...${C_RESET}"
+                    tailscale up --force-reauth || true
                     echo ""
                     read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
                 fi

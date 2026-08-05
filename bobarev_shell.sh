@@ -557,21 +557,28 @@ mod_tailscale() {
         clear
         echo -e "${C_CYAN}🔗 === 10/18. УПРАВЛЕНИЕ И НАСТРОЙКА TAILSCALE CLI ===${C_RESET}"
         
-        # Предварительный вывод статуса узла
+        # Предварительный вывод статуса узла с понятным форматированием значений
         if command -v tailscale &>/dev/null; then
             local ts_name ts_ip ts_exit ts_adv_exit ts_adv_routes ts_accept ts_stealth
+            local adv_exit_fmt adv_routes_fmt accept_fmt stealth_fmt
+
             ts_name=$(tailscale whoami 2>/dev/null | grep -i "^  Name:" | awk '{print $2}' || echo "Не привязан")
             ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
             ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
             ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
-            ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "нет")
+            ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "")
             ts_accept=$(tailscale get accept-routes 2>/dev/null || echo "false")
             ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
 
+            [ "$ts_adv_exit" = "true" ] && adv_exit_fmt="Включен" || adv_exit_fmt="Отключен"
+            [ -n "$ts_adv_routes" ] && [ "$ts_adv_routes" != "нет" ] && adv_routes_fmt="$ts_adv_routes" || adv_routes_fmt="Не анонсируются"
+            [ "$ts_accept" = "true" ] && accept_fmt="Включен" || accept_fmt="Отключен"
+            [ "$ts_stealth" = "true" ] && stealth_fmt="Включен" || stealth_fmt="Отключен"
+
             echo -e " Узел:                   ${C_GREEN}$ts_name${C_RESET} | IP: ${C_GREEN}$ts_ip${C_RESET}"
-            echo -e " Exit-Node target:       ${C_BLUE}$ts_exit${C_RESET} | Анонс ExitNode: ${C_BLUE}$ts_adv_exit${C_RESET}"
-            echo -e " Свои подсети (LAN):     ${C_BLUE}${ts_adv_routes:-нет}${C_RESET} | Прием чужих подсетей: ${C_BLUE}$ts_accept${C_RESET}"
-            echo -e " Стелс-режим (Изоляция): ${C_BLUE}$ts_stealth${C_RESET}"
+            echo -e " Exit-Node target:       ${C_BLUE}$ts_exit${C_RESET} | Анонс Exit-Node: ${C_BLUE}$adv_exit_fmt${C_RESET}"
+            echo -e " Свои подсети (LAN):     ${C_BLUE}$adv_routes_fmt${C_RESET} | Прием чужих подсетей: ${C_BLUE}$accept_fmt${C_RESET}"
+            echo -e " Стелс-режим (Изоляция): ${C_BLUE}$stealth_fmt${C_RESET}"
         else
             echo -e " Статус: ${C_YELLOW}Пакет Tailscale еще не установлен в системе.${C_RESET}"
         fi
@@ -580,7 +587,7 @@ mod_tailscale() {
         echo "  1) 🔑 Первичный запуск и авторизация (tailscale up)"
         echo "  2) 🌐 Настройка Exit Node (Анонс / Подключение / Отключение)"
         echo "  3) 🔀 Анонсирование локальных подсетей (--advertise-routes)"
-        echo "  4) 🛡️  Прием маршрутов подсетей от других узлов (--accept-routes)"
+        echo "  4) 🛡️ Прием маршрутов подсетей от других узлов (--accept-routes)"
         echo "  5) 🔒 Стелс-режим / Изоляция узла (--stateful-filtering)"
         echo "  6) ⚡ Настройка ethtool GRO-ускорения (tailscale-gro.service)"
         echo "  7) 🔄 Полный сброс настроек подключения (tailscale up --reset)"
@@ -661,7 +668,7 @@ TS_EOF
                 [ -n "$detected_subnet" ] && default_route_spec="${detected_subnet}.0/24"
 
                 echo "  1) Задать подсеть для анонса (по умолчанию: ${default_route_spec:-192.168.1.0/24})"
-                echo "  2) Очистить / Отключить анонс подсетей (tailscale set --advertise-routes=)"
+                echo "  2) Отключить анонс подсетей (tailscale set --advertise-routes=)"
                 echo "  0) Назад"
                 local ar_choice
                 read -r -p "Ваш выбор [0-2]: " ar_choice < /dev/tty
@@ -689,21 +696,22 @@ TS_EOF
                 ;;
             4)
                 echo "Прием маршрутов подсетей от других узлов сети (--accept-routes):"
-                if prompt_yn "Разрешить доступ к анонсируемым локальным подсетям других устройств?" false; then
-                    tailscale set --accept-routes=true 2>/dev/null || true
-                    echo -e "${C_GREEN}✅ Прием подсетей включен (--accept-routes=true).${C_RESET}"
-                else
-                    if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
-                    tailscale set --accept-routes=false 2>/dev/null || true
-                    echo -e "${C_BLUE}ℹ️ Прием подсетей отключен (безопасный режим).${C_RESET}"
-                fi
+                echo "  1) Включить прием чужих подсетей (tailscale set --accept-routes=true)"
+                echo "  2) Отключить прием чужих подсетей (tailscale set --accept-routes=false)"
+                echo "  0) Назад"
+                local ac_choice
+                read -r -p "Ваш выбор [0-2]: " ac_choice < /dev/tty
+                case "$ac_choice" in
+                    1) tailscale set --accept-routes=true 2>/dev/null || true; echo -e "${C_GREEN}✅ Прием подсетей включен (--accept-routes=true).${C_RESET}" ;;
+                    2) tailscale set --accept-routes=false 2>/dev/null || true; echo -e "${C_BLUE}ℹ️ Прием подсетей отключен.${C_RESET}" ;;
+                esac
                 pause_enter
                 ;;
             5)
                 echo "Стелс-режим / Изоляция узла (Stateful Filtering):"
                 echo "  1) Включить стелс-режим/изоляцию (tailscale set --stateful-filtering=true)"
                 echo "  2) Отключить стелс-режим (tailscale set --stateful-filtering=false)"
-                echo "  0) Отмена"
+                echo "  0) Назад"
                 local sf_choice
                 read -r -p "Ваш выбор [0-2]: " sf_choice < /dev/tty
                 case "$sf_choice" in
@@ -1219,7 +1227,7 @@ mod_server_audit() {
         if [ "$ts_accept_routes" = "true" ]; then
             echo -e "  • Прием чужих подсетей: ${C_GREEN}✅ Включен (--accept-routes)${C_RESET}"
         else
-            echo -e "  • Прием чужих подсетей: ${C_BLUE}🛡️ Отключен (безопасный режим)${C_RESET}"
+            echo -e "  • Прием чужих подсетей: ${C_BLUE}🛡️ Отключен${C_RESET}"
         fi
 
         if [ "$ts_stealth" = "true" ]; then

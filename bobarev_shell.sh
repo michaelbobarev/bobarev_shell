@@ -612,7 +612,7 @@ mod_lock_root() {
     fi
 }
 
-# 10. Tailscale, GRO-оптимизация & Интерактивная безопасность
+# 10. Tailscale, GRO-оптимизация, Web UI & Интерактивная безопасность
 mod_tailscale() {
     while true; do
         clear
@@ -620,16 +620,26 @@ mod_tailscale() {
         
         # Предварительный вывод статуса узла с понятным форматированием значений
         if command -v tailscale &>/dev/null; then
-            local ts_name ts_ip ts_exit ts_adv_exit ts_adv_routes ts_accept ts_stealth
+            local ts_name ts_ip ts_exit ts_adv_exit ts_adv_routes ts_accept ts_stealth ts_web_fmt
             local adv_exit_fmt adv_routes_fmt accept_fmt stealth_fmt
 
-            ts_name=$(tailscale whoami 2>/dev/null | grep -i "^  Name:" | awk '{print $2}' || echo "Не привязан")
+            local whoami_line
+            whoami_line=$(tailscale whoami 2>/dev/null | head -n 1 || echo "")
+            ts_name=$(echo "$whoami_line" | awk '{print $1}')
+            [ -z "$ts_name" ] && ts_name="Не привязан"
+
             ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
             ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
             ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
             ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "")
             ts_accept=$(tailscale get accept-routes 2>/dev/null || echo "false")
             ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
+
+            if systemctl is-active --quiet tailscale-web.service 2>/dev/null || pgrep -f "tailscale web" >/dev/null 2>&1; then
+                ts_web_fmt="Включен"
+            else
+                ts_web_fmt="Отключен"
+            fi
 
             [ "$ts_adv_exit" = "true" ] && adv_exit_fmt="Включен" || adv_exit_fmt="Отключен"
             [ -n "$ts_adv_routes" ] && [ "$ts_adv_routes" != "нет" ] && adv_routes_fmt="$ts_adv_routes" || adv_routes_fmt="Не анонсируются"
@@ -641,6 +651,7 @@ mod_tailscale() {
             echo -e " Свои подсети (LAN):         ${C_BLUE}$adv_routes_fmt${C_RESET}"
             echo -e " Прием подсетей из Tailscale: ${C_BLUE}$accept_fmt${C_RESET}"
             echo -e " Стелс-режим:                ${C_BLUE}$stealth_fmt${C_RESET}"
+            echo -e " Веб-интерфейс Tailscale Web:${C_BLUE}$ts_web_fmt${C_RESET}"
         else
             echo -e " Статус: ${C_YELLOW}Пакет Tailscale еще не установлен в системе.${C_RESET}"
         fi
@@ -652,12 +663,13 @@ mod_tailscale() {
         echo "  4) 🛡️  Прием подсетей из Tailscale (--accept-routes)"
         echo "  5) 🔒 Стелс-режим (--stateful-filtering)"
         echo "  6) ⚡ Настройка GRO-оптимизации (tailscale-gro.service)"
-        echo "  7) 🔄 Полный сброс настроек подключения (tailscale up --reset)"
+        echo "  7) 💻 Настройка веб-интерфейса Tailscale Web (tailscale-web.service)"
+        echo "  8) 🔄 Полный сброс настроек подключения (tailscale up --reset)"
         echo "  0) ↩️ Назад в Главное меню"
         echo -e "${C_CYAN}=================================================================${C_RESET}"
         
         local ts_choice
-        read -r -p "Ваш выбор [0-7]: " ts_choice < /dev/tty
+        read -r -p "Ваш выбор [0-8]: " ts_choice < /dev/tty
         
         case "$ts_choice" in
             1)
@@ -683,9 +695,14 @@ mod_tailscale() {
                         if [ -n "$target_ip" ]; then
                             tailscale set --exit-node="$target_ip" --exit-node-allow-lan-access 2>/dev/null || true
                             echo -e "${C_GREEN}✅ Подключен к Exit Node $target_ip.${C_RESET}"
+                            echo -e "${C_YELLOW}💡 ВНИМАНИЕ: Если пропал интернет при подключении к Exit Node:${C_RESET}"
+                            echo -e "   1. На удаленном Exit Node сервере должен быть включен анонс (Пункт 2 -> 1)."
+                            echo -e "   2. В админке (admin.tailscale.com -> Machines -> Сервер -> Edit route settings)"
+                            echo -e "      обязательно должна быть включена галочка 'Approve exit node'."
+                            echo -e "   3. На удаленном сервере должен быть включен IP Forwarding и UFW / NAT."
                         fi
                         ;;
-                    4) tailscale set --exit-node= 2>/dev/null || true; echo -e "${C_GREEN}✅ Отключен от Exit Node.${C_RESET}" ;;
+                    4) tailscale set --exit-node= 2>/dev/null || true; echo -e "${C_GREEN}✅ Отключен от Exit Node (Интернет через физический провайдер восстановлен).${C_RESET}" ;;
                 esac
                 pause_enter
                 ;;
@@ -803,6 +820,64 @@ ETHTOOL_SVC_EOF
                 pause_enter
                 ;;
             7)
+                echo "Настройка веб-интерфейса Tailscale Web (tailscale-web.service):"
+                echo "  1) Включить веб-интерфейс Tailscale Web (создать и запустить tailscale-web.service)"
+                echo "  2) Отключить веб-интерфейс Tailscale Web (остановить и удалить tailscale-web.service)"
+                echo "  0) Назад"
+                local web_choice
+                read -r -p "Ваш выбор [0-2]: " web_choice < /dev/tty
+                case "$web_choice" in
+                    1)
+                        if ! command -v tailscale &>/dev/null; then
+                            ensure_tailscale_installed
+                        fi
+
+                        local web_port=""
+                        prompt_clean "Введите порт для веб-интерфейса (Enter - 5252)" web_port
+                        if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
+                        web_port="${web_port:-5252}"
+
+                        local ts_bin
+                        ts_bin=$(command -v tailscale || echo "/usr/bin/tailscale")
+
+                        tee /etc/systemd/system/tailscale-web.service > /dev/null << TS_WEB_SVC_EOF
+[Unit]
+Description=Tailscale Web Management Interface
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+ExecStart=$ts_bin web --listen 0.0.0.0:$web_port
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+TS_WEB_SVC_EOF
+                        systemctl daemon-reload
+                        systemctl enable --now tailscale-web.service
+
+                        if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+                            ufw allow "$web_port"/tcp comment 'Tailscale Web UI' 2>/dev/null || true
+                        fi
+
+                        local current_ts_ip
+                        current_ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "127.0.0.1")
+                        echo -e "${C_GREEN}✅ Служба веб-интерфейса tailscale-web.service успешно включена и запущенна.${C_RESET}"
+                        echo -e "${C_CYAN}🌐 Откройте веб-панель в браузере: http://${current_ts_ip}:$web_port${C_RESET}"
+                        ;;
+                    2)
+                        systemctl disable --now tailscale-web.service 2>/dev/null || true
+                        pkill -f "tailscale web" 2>/dev/null || true
+                        rm -f /etc/systemd/system/tailscale-web.service
+                        systemctl daemon-reload
+                        echo -e "${C_BLUE}ℹ️ Служба веб-интерфейса Tailscale Web отключена и удалена.${C_RESET}"
+                        ;;
+                esac
+                pause_enter
+                ;;
+            8)
                 echo "⚠️ Сброс параметров Tailscale к значениям по умолчанию (tailscale up --reset):"
                 if prompt_yn "Вы действительно хотите сбросить все текущие параметры Tailscale?" false; then
                     if [ "$MODULE_CANCELED" = true ]; then
@@ -1270,8 +1345,14 @@ mod_server_audit() {
         local ts_name ts_ip ts_user ts_exit ts_adv_exit ts_adv_routes ts_accept_routes ts_stealth
         local adv_exit_fmt adv_routes_fmt accept_fmt stealth_fmt
 
-        ts_name=$(tailscale whoami 2>/dev/null | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
-        ts_user=$(tailscale whoami 2>/dev/null | grep -i "^User:" -A 1 | grep -i "^  Name:" | awk '{print $2}' || echo "N/A")
+        local whoami_line
+        whoami_line=$(tailscale whoami 2>/dev/null | head -n 1 || echo "")
+        ts_name=$(echo "$whoami_line" | awk '{print $1}')
+        ts_user=$(echo "$whoami_line" | awk '{print $2}')
+
+        [ -z "$ts_name" ] && ts_name="N/A"
+        [ -z "$ts_user" ] && ts_user="N/A"
+
         ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
         ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
         ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
@@ -1307,6 +1388,12 @@ mod_server_audit() {
             echo -e "  • Служба GRO-оптимизации:     ${C_GREEN}✅ Активна${C_RESET}"
         else
             echo -e "  • Служба GRO-оптимизации:     ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
+        fi
+
+        if systemctl is-active --quiet tailscale-web.service 2>/dev/null || pgrep -f "tailscale web" >/dev/null 2>&1; then
+            echo -e "  • Веб-интерфейс Tailscale Web: ${C_GREEN}✅ Включен${C_RESET}"
+        else
+            echo -e "  • Веб-интерфейс Tailscale Web: ${C_BLUE}🌐 Отключен${C_RESET}"
         fi
 
         # Парсинг только реальных пунктов предупреждений (начинающихся с дефиса '- ') без дублей и пустых заголовков

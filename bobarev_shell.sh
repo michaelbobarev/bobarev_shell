@@ -917,10 +917,28 @@ TS_WEB_SVC_EOF
                         ;;
                     2)
                         systemctl disable --now tailscale-web.service 2>/dev/null || true
-                        pkill -f "tailscale web" 2>/dev/null || true
+                        pkill -9 -f "tailscale.*web" 2>/dev/null || true
+                        
+                        python3 -c '
+import subprocess, re
+try:
+    out = subprocess.check_output(["ss", "-tulpn"], text=True, stderr=subprocess.DEVNULL)
+    for line in out.splitlines():
+        if "5252" in line or "tailscale" in line and "web" in line:
+            for pid in re.findall(r"pid=(\d+)", line):
+                subprocess.run(["kill", "-9", pid], stderr=subprocess.DEVNULL)
+except Exception:
+    pass
+' 2>/dev/null || true
+
                         rm -f /etc/systemd/system/tailscale-web.service
                         systemctl daemon-reload
-                        echo -e "${C_BLUE}ℹ️ Служба веб-интерфейса Tailscale Web отключена и удалена.${C_RESET}"
+
+                        if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+                            ufw delete allow 5252/tcp 2>/dev/null || true
+                            ufw reload 2>/dev/null || true
+                        fi
+                        echo -e "${C_BLUE}ℹ️ Служба и процесс веб-интерфейса Tailscale Web принудительно остановлены, порт 5252 закрыт в UFW.${C_RESET}"
                         ;;
                 esac
                 pause_enter

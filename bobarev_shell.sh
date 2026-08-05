@@ -566,12 +566,12 @@ mod_tailscale() {
             ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
             ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "нет")
             ts_accept=$(tailscale get accept-routes 2>/dev/null || echo "false")
-            ts_stealth=$(tailscale debug prefs 2>/dev/null | grep -i "StatefulFiltering" | awk '{print $2}' | tr -d ',' || echo "false")
+            ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
 
-            echo -e " Узел: ${C_GREEN}$ts_name${C_RESET} | IP: ${C_GREEN}$ts_ip${C_RESET}"
-            echo -e " Exit-Node target: ${C_BLUE}$ts_exit${C_RESET} | Анонс ExitNode: ${C_BLUE}$ts_adv_exit${C_RESET}"
-            echo -e " Свои подсети (LAN): ${C_BLUE}${ts_adv_routes:-нет}${C_RESET} | Прием чужих подсетей: ${C_BLUE}$ts_accept${C_RESET}"
-            echo -e " Стелс-режим (StatefulFiltering): ${C_BLUE}$ts_stealth${C_RESET}"
+            echo -e " Узел:                   ${C_GREEN}$ts_name${C_RESET} | IP: ${C_GREEN}$ts_ip${C_RESET}"
+            echo -e " Exit-Node target:       ${C_BLUE}$ts_exit${C_RESET} | Анонс ExitNode: ${C_BLUE}$ts_adv_exit${C_RESET}"
+            echo -e " Свои подсети (LAN):     ${C_BLUE}${ts_adv_routes:-нет}${C_RESET} | Прием чужих подсетей: ${C_BLUE}$ts_accept${C_RESET}"
+            echo -e " Стелс-режим (Изоляция): ${C_BLUE}$ts_stealth${C_RESET}"
         else
             echo -e " Статус: ${C_YELLOW}Пакет Tailscale еще не установлен в системе.${C_RESET}"
         fi
@@ -580,7 +580,7 @@ mod_tailscale() {
         echo "  1) 🔑 Первичный запуск и авторизация (tailscale up)"
         echo "  2) 🌐 Настройка Exit Node (Анонс / Подключение / Отключение)"
         echo "  3) 🔀 Анонсирование локальных подсетей (--advertise-routes)"
-        echo "  4) 🛡️ Прием маршрутов подсетей от других узлов (--accept-routes)"
+        echo "  4) 🛡️  Прием маршрутов подсетей от других узлов (--accept-routes)"
         echo "  5) 🔒 Стелс-режим / Изоляция узла (--stateful-filtering)"
         echo "  6) ⚡ Настройка ethtool GRO-ускорения (tailscale-gro.service)"
         echo "  7) 🔄 Полный сброс настроек подключения (tailscale up --reset)"
@@ -634,7 +634,7 @@ TS_EOF
                 echo "  2) Выключить анонс сервера как Exit-Node (tailscale set --advertise-exit-node=false)"
                 echo "  3) Подключиться к внешнему Exit-Node (tailscale set --exit-node=<IP>)"
                 echo "  4) Отключиться от внешнего Exit-Node (tailscale set --exit-node=)"
-                echo "  0) Отмена"
+                echo "  0) Отмена / Назад"
                 local en_choice
                 read -r -p "Ваш выбор [0-4]: " en_choice < /dev/tty
                 case "$en_choice" in
@@ -660,8 +660,8 @@ TS_EOF
                 local default_route_spec=""
                 [ -n "$detected_subnet" ] && default_route_spec="${detected_subnet}.0/24"
 
-                echo "  1) Задать подсеть (по умолчанию: ${default_route_spec:-192.168.1.0/24})"
-                echo "  2) Очистить / Отключить анонс подсетей"
+                echo "  1) Задать подсеть для анонса (по умолчанию: ${default_route_spec:-192.168.1.0/24})"
+                echo "  2) Очистить / Отключить анонс подсетей (tailscale set --advertise-routes=)"
                 echo "  0) Назад"
                 local ar_choice
                 read -r -p "Ваш выбор [0-2]: " ar_choice < /dev/tty
@@ -1207,7 +1207,7 @@ mod_server_audit() {
         ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
         ts_adv_routes=$(tailscale get advertise-routes 2>/dev/null || echo "нет")
         ts_accept_routes=$(tailscale get accept-routes 2>/dev/null || echo "false")
-        ts_stealth=$(tailscale debug prefs 2>/dev/null | grep -i "StatefulFiltering" | awk '{print $2}' | tr -d ',' || echo "false")
+        ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
 
         echo -e "  • Имя узла Tailnet:     ${C_BLUE}$ts_name${C_RESET}"
         echo -e "  • IP-адрес Tailscale:   ${C_BLUE}$ts_ip${C_RESET}"
@@ -1277,9 +1277,10 @@ mod_server_audit() {
     local dirty_writeback
     dirty_writeback=$(sysctl -n vm.dirty_writeback_centisecs 2>/dev/null || echo "500")
     if [ "$dirty_writeback" -ge 1000 ]; then
-        echo -e "  • Буферизация записи RAM (dirty_writeback): ${C_GREEN}✅ Оптимизирована (${dirty_writeback}cs)${C_RESET}"
+        local dirty_sec=$((dirty_writeback / 100))
+        echo -e "  • Буферизация записи RAM: ${C_GREEN}✅ Оптимизирована (${dirty_sec} сек)${C_RESET}"
     else
-        echo -e "  • Буферизация записи RAM (dirty_writeback): ${C_YELLOW}⚠️ Стандартная (${dirty_writeback}cs)${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
+        echo -e "  • Буферизация записи RAM: ${C_YELLOW}⚠️ Стандартная (${dirty_writeback}cs)${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
     fi
 
     if mount | grep " / " | grep -q "noatime"; then
@@ -1304,22 +1305,14 @@ mod_server_audit() {
 
 # 18. Роутер-режим Одноплатного компьютера
 mod_router_sbc() {
-    echo -e "${C_CYAN}🛜 === 18/18. ОДНОПЛАТНЫЙ КОМПЬЮТЕР КАК РОУТЕР ===${C_RESET}"
-
-    if prompt_yn "Настроить этот узел как LAN-шлюз (роутер) через Tailscale Exit Node?" true; then
-        : # Продолжаем
-    else
-        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        echo "Пропущено."
-        return 0
-    fi
+    echo -e "${C_CYAN}🛜 === 18/18. ОДНОПЛАТНЫЙ КОМПЬЮТЕР КАК РОУТЕР (LAN-ШЛЮЗ) ===${C_RESET}"
 
     local default_lan_if
     default_lan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | head -n 1 || echo "eth0")
     local default_wan_if
     default_wan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | tail -n 1 || echo "eth1")
 
-    local lan_iface="" wan_iface="" ts_iface="" lan_ip="" lan_cidr="" dhcp_start="" dhcp_end="" exit_node_ip=""
+    local lan_iface="" wan_iface="" ts_iface="" lan_ip="" lan_cidr="" dhcp_start="" dhcp_end=""
     prompt_clean "LAN интерфейс (подсеть клиентов) (Enter - $default_lan_if)" lan_iface
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
     lan_iface="${lan_iface:-$default_lan_if}"
@@ -1371,20 +1364,7 @@ mod_router_sbc() {
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
     dhcp_end="${dhcp_end:-${lan_prefix}.254}"
 
-    prompt_clean "IP-адрес Exit Node в сети Tailscale" exit_node_ip
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    if [ -z "$exit_node_ip" ]; then
-        echo -e "${C_RED}❌ IP-адрес Exit Node не введен.${C_RESET}" >&2
-        return 0
-    fi
-
-    if ! command -v tailscale >/dev/null 2>&1; then
-        echo -e "${C_RED}❌ Tailscale не установлен. Сначала выполните Модуль 10.${C_RESET}" >&2
-        return 0
-    fi
-
-    echo -e "${C_BLUE}🌐 [1/5] Включение IP Forwarding в ядре...${C_RESET}"
+    echo -e "${C_BLUE}🌐 [1/4] Включение IP Forwarding в ядре...${C_RESET}"
     backup_file "/etc/sysctl.d/99-tailscale-forward.conf"
     cat > /etc/sysctl.d/99-tailscale-forward.conf <<EOF
 net.ipv4.ip_forward=1
@@ -1392,7 +1372,7 @@ net.ipv6.conf.all.forwarding=1
 EOF
     sysctl --system >/dev/null
 
-    echo -e "${C_BLUE}⚙️ [2/5] Настройка LAN-интерфейса в systemd-networkd...${C_RESET}"
+    echo -e "${C_BLUE}⚙️ [2/4] Настройка LAN-интерфейса в systemd-networkd...${C_RESET}"
     mkdir -p /etc/systemd/network
     backup_file "/etc/systemd/network/10-lan.network"
     cat > /etc/systemd/network/10-lan.network <<EOF
@@ -1409,7 +1389,7 @@ ConfigureWithoutCarrier=yes
 EOF
     systemctl restart systemd-networkd 2>/dev/null || true
 
-    echo -e "${C_BLUE}📦 [3/5] Настройка DHCP/DNS сервера (dnsmasq)...${C_RESET}"
+    echo -e "${C_BLUE}📦 [3/4] Настройка DHCP/DNS сервера (dnsmasq)...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     apt update && apt install -y dnsmasq
     backup_file "/etc/dnsmasq.d/lan-dhcp.conf"
@@ -1422,10 +1402,7 @@ dhcp-option=6,1.1.1.1,8.8.8.8
 EOF
     systemctl restart dnsmasq
 
-    echo -e "${C_BLUE}🔗 [4/5] Подключение к Exit Node ($exit_node_ip)...${C_RESET}"
-    tailscale set --exit-node="$exit_node_ip" --exit-node-allow-lan-access --accept-routes=false || true
-
-    echo -e "${C_BLUE}🧱 [5/5] Настройка правил UFW, MSS Clamping и Kill Switch...${C_RESET}"
+    echo -e "${C_BLUE}🧱 [4/4] Настройка правил UFW, MSS Clamping и Kill Switch...${C_RESET}"
     ufw allow in on "$lan_iface" to any port 67 proto udp 2>/dev/null || true
     ufw allow in on "$lan_iface" to any port 53 proto udp 2>/dev/null || true
     ufw allow in on "$lan_iface" to any port 53 proto tcp 2>/dev/null || true
@@ -1495,7 +1472,8 @@ PY
     fi
 
     ufw reload 2>/dev/null || true
-    echo -e "${C_GREEN}✅ Настройка одноплатного компьютера в качестве роутера успешно завершена!${C_RESET}"
+    echo -e "${C_GREEN}✅ Настройка одноплатного компьютера в качестве LAN-роутера успешно завершена!${C_RESET}"
+    echo -e "${C_BLUE}ℹ️ Подключение к Exit Node выполняйте в Модуле 10 при необходимости.${C_RESET}"
 }
 
 # ==============================================================================

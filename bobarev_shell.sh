@@ -65,6 +65,47 @@ get_interface_subnet() {
     ip -4 addr show dev "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1 | cut -d. -f1-3 || echo ""
 }
 
+# Автоматическая установка и авторизация Tailscale при необходимости
+ensure_tailscale_installed() {
+    if ! command -v tailscale &>/dev/null; then
+        echo -e "${C_BLUE}📦 Для ограничения SSH через Tailscale требуется установка пакета...${C_RESET}"
+        curl -fsSL https://tailscale.com/install.sh | sh
+
+        mkdir -p /etc/systemd/system/tailscaled.service.d
+        cat << 'TS_OVERRIDE' > /etc/systemd/system/tailscaled.service.d/override.conf
+[Unit]
+After=network-online.target NetworkManager-wait-online.service systemd-networkd-wait-online.service
+Wants=network-online.target
+TS_OVERRIDE
+        systemctl daemon-reload
+
+        tee /etc/sysctl.d/99-tailscale-forward.conf > /dev/null << 'TS_EOF'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+TS_EOF
+        sysctl --system > /dev/null
+
+        local authkey
+        read -r -p "Tailscale Auth Key (Enter для авторизации по ссылке, 0 - Назад): " authkey < /dev/tty
+        if [ "$authkey" = "0" ]; then
+            return 1
+        fi
+
+        if [ -n "$authkey" ]; then
+            tailscale up --authkey="$authkey" --force-reauth || true
+        else
+            echo -e "${C_BLUE}ℹ️ Запрос новой ссылки авторизации у сервера Tailscale...${C_RESET}"
+            tailscale up --force-reauth || true
+            echo ""
+            read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
+        fi
+
+        tailscale set --auto-update 2>/dev/null || true
+        echo -e "${C_GREEN}✅ Tailscale успешно установлен и авторизован.${C_RESET}"
+    fi
+    return 0
+}
+
 prompt_yn() {
     local prompt="$1"
     local default_yes="$2"
@@ -346,7 +387,7 @@ mod_ssh_config() {
     echo -e "${C_CYAN}🔒 === 6/18. КОНФИГУРАЦИЯ SSH (БЕЗОПАСНОСТЬ) ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
     local active_ssh_port
-    active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "14597")
+    active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
 
     local port=""
     while true; do
@@ -418,9 +459,29 @@ SSH_HARDENING_EOF
         systemctl enable --now ssh.service
         systemctl restart sshd
 
-        if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-            ufw allow "$port"/tcp comment 'SSH Port' 2>/dev/null || true
+        # Автоматическая связка с Tailscale
+        if prompt_yn "Ограничить доступ к SSH ТОЛЬКО через сеть Tailscale?" true; then
+            if ensure_tailscale_installed; then
+                if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+                    ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only' 2>/dev/null || true
+                    ufw delete allow "$port"/tcp 2>/dev/null || true
+                    echo -e "${C_GREEN}✅ SSH доступ ограничен: разрешен ТОЛЬКО через сеть Tailscale.${C_RESET}"
+                else
+                    echo -e "${C_BLUE}ℹ️ Ограничение SSH сохранено. Правило будет задействовано при включении UFW в Модуле 8.${C_RESET}"
+                fi
+            else
+                echo -e "${C_YELLOW}⚠️ Установка Tailscale отменена. SSH настроен в обычном режиме (порт $port).${C_RESET}"
+                if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+                    ufw allow "$port"/tcp comment 'SSH Public Port' 2>/dev/null || true
+                fi
+            fi
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+            if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+                ufw allow "$port"/tcp comment 'SSH Public Port' 2>/dev/null || true
+            fi
         fi
+
         echo -e "${C_GREEN}✅ Служба SSH успешно перезапущена (Порт: $port, Вход по паролю: $pass_auth_val).${C_RESET}"
     else
         echo -e "${C_RED}❌ Ошибка синтаксиса в конфигурации SSH! Откат изменений...${C_RESET}"
@@ -486,7 +547,7 @@ mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/18. НАСТРОЙКА FIREWALL (UFW) ===${C_RESET}"
     
     local active_ssh_port
-    active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "14597")
+    active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
 
     local port=""
     while true; do
@@ -514,24 +575,24 @@ mod_ufw() {
         sed -i 's/DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw 2>/dev/null || true
     fi
 
-    if command -v tailscale &>/dev/null; then
-        ufw allow in on tailscale0 comment 'Allow inside Tailscale' 2>/dev/null || true
-        ufw allow 41641/udp comment 'Tailscale Direct P2P' 2>/dev/null || true
+    if prompt_yn "Ограничить доступ к SSH ТОЛЬКО через сеть Tailscale?" true; then
+        if ensure_tailscale_installed; then
+            ufw allow in on tailscale0 comment 'Allow inside Tailscale' 2>/dev/null || true
+            ufw allow 41641/udp comment 'Tailscale Direct P2P' 2>/dev/null || true
 
-        local netdev="$DEFAULT_WAN_IF"
-        [ -z "$netdev" ] && netdev=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
-        if [ -n "$netdev" ]; then
-            ufw route allow in on tailscale0 out on "$netdev" 2>/dev/null || true
-            ufw route allow in on "$netdev" out on tailscale0 2>/dev/null || true
-        fi
-
-        if prompt_yn "Ограничить доступ к SSH (порт $port) ТОЛЬКО через сеть Tailscale?" true; then
+            local netdev="$DEFAULT_WAN_IF"
+            [ -z "$netdev" ] && netdev=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
+            if [ -n "$netdev" ]; then
+                ufw route allow in on tailscale0 out on "$netdev" 2>/dev/null || true
+                ufw route allow in on "$netdev" out on tailscale0 2>/dev/null || true
+            fi
             ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
         else
-            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+            echo -e "${C_YELLOW}⚠️ Установка Tailscale отменена. Открываем публичный порт SSH ($port).${C_RESET}"
             ufw allow "$port"/tcp comment 'SSH Public Port'
         fi
     else
+        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
         ufw allow "$port"/tcp comment 'SSH Public Port'
     fi
 
@@ -600,41 +661,7 @@ mod_tailscale() {
         
         case "$ts_choice" in
             1)
-                if ! command -v tailscale &> /dev/null; then
-                    echo "Установка пакета Tailscale..."
-                    curl -fsSL https://tailscale.com/install.sh | sh
-                fi
-
-                # Оверрайд systemd для задержки старта до появления интернета (убирает Offline после ребута)
-                mkdir -p /etc/systemd/system/tailscaled.service.d
-                cat << 'TS_OVERRIDE' > /etc/systemd/system/tailscaled.service.d/override.conf
-[Unit]
-After=network-online.target NetworkManager-wait-online.service systemd-networkd-wait-online.service
-Wants=network-online.target
-TS_OVERRIDE
-                systemctl daemon-reload
-
-                tee /etc/sysctl.d/99-tailscale-forward.conf > /dev/null << 'TS_EOF'
-net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
-TS_EOF
-                sysctl --system > /dev/null
-
-                local authkey
-                read -r -p "Tailscale Auth Key (Enter для авторизации по ссылке, 0 - Назад): " authkey < /dev/tty
-                if [ "$authkey" = "0" ]; then continue; fi
-
-                if [ -n "$authkey" ]; then
-                    tailscale up --authkey="$authkey" --force-reauth || true
-                else
-                    echo -e "${C_BLUE}ℹ️ Запрос новой ссылки авторизации у сервера Tailscale...${C_RESET}"
-                    tailscale up --force-reauth || true
-                    echo ""
-                    read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
-                fi
-
-                tailscale set --auto-update 2>/dev/null || true
-                echo -e "${C_GREEN}✅ Авторизация выполнена, включен автозапуск с защитой от таймаутов.${C_RESET}"
+                ensure_tailscale_installed
                 pause_enter
                 ;;
             2)
@@ -1236,7 +1263,7 @@ mod_server_audit() {
         echo -e "  • Статус пароля root: ${C_RED}❌ Активен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Заблокируйте root в Пункте 9)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 6. VPN, Tailscale CLI & Health Checks ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 6. Состояние и настройки сети Tailscale ---${C_RESET}"
     if command -v tailscale &>/dev/null; then
         echo -e "  • Пакет Tailscale: ${C_GREEN}✅ Установлен${C_RESET}"
         

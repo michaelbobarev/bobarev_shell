@@ -694,7 +694,7 @@ mod_tailscale() {
             [ "$ts_stealth" = "true" ] && stealth_fmt="Включен" || stealth_fmt="Отключен"
 
             echo -e " Узел:                       ${C_GREEN}$ts_name${C_RESET} | IP: ${C_GREEN}$ts_ip${C_RESET}"
-            echo -e " Exit-Node target:           ${C_BLUE}$ts_exit${C_RESET} | Анонс Exit-Node: ${C_BLUE}$adv_exit_fmt${C_RESET}"
+            echo -e " Внешний Exit-Node:          ${C_BLUE}$ts_exit${C_RESET} | Анонс Exit-Node: ${C_BLUE}$adv_exit_fmt${C_RESET}"
             echo -e " Свои подсети (LAN):         ${C_BLUE}$adv_routes_fmt${C_RESET}"
             echo -e " Прием подсетей из Tailscale: ${C_BLUE}$accept_fmt${C_RESET}"
             echo -e " Стелс-режим:                ${C_BLUE}$stealth_fmt${C_RESET}"
@@ -1428,7 +1428,7 @@ mod_server_audit() {
         echo -e "  • Имя узла Tailnet:          ${C_BLUE}$ts_name${C_RESET}"
         echo -e "  • IP-адрес Tailscale:        ${C_BLUE}$ts_ip${C_RESET}"
         echo -e "  • Аккаунт:                   ${C_BLUE}$ts_user${C_RESET}"
-        echo -e "  • Exit-Node target:         ${C_BLUE}$ts_exit${C_RESET}"
+        echo -e "  • Внешний Exit-Node:         ${C_BLUE}$ts_exit${C_RESET}"
         echo -e "  • Анонс Exit-Node:           ${C_BLUE}$adv_exit_fmt${C_RESET}"
         echo -e "  • Анонсируемые подсети:      ${C_BLUE}$adv_routes_fmt${C_RESET}"
 

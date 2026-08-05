@@ -643,6 +643,7 @@ TS_EOF
                     3)
                         local target_ip=""
                         prompt_clean "Введите IP-адрес или имя Exit Node" target_ip
+                        if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
                         if [ -n "$target_ip" ]; then
                             tailscale set --exit-node="$target_ip" --exit-node-allow-lan-access 2>/dev/null || true
                             echo -e "${C_GREEN}✅ Подключен к Exit Node $target_ip.${C_RESET}"
@@ -659,20 +660,32 @@ TS_EOF
                 local default_route_spec=""
                 [ -n "$detected_subnet" ] && default_route_spec="${detected_subnet}.0/24"
 
-                echo "Введите подсети в формате CIDR (например, 192.168.2.0/24)."
-                echo "Чтобы отключить анонс подсетей, введите 0."
-                local routes_input=""
-                prompt_clean "Подсеть для анонса (Enter - ${default_route_spec:-192.168.1.0/24})" routes_input
-                
-                if [ "$routes_input" = "0" ]; then
-                    tailscale set --advertise-routes= 2>/dev/null || true
-                    echo -e "${C_GREEN}✅ Анонсирование подсетей отключено.${C_RESET}"
-                else
-                    routes_input="${routes_input:-${default_route_spec:-192.168.1.0/24}}"
-                    tailscale set --advertise-routes="$routes_input" 2>/dev/null || true
-                    echo -e "${C_GREEN}✅ Анонсируется подсеть $routes_input.${C_RESET}"
-                fi
-                pause_enter
+                echo "  1) Задать подсеть (по умолчанию: ${default_route_spec:-192.168.1.0/24})"
+                echo "  2) Очистить / Отключить анонс подсетей"
+                echo "  0) Назад"
+                local ar_choice
+                read -r -p "Ваш выбор [0-2]: " ar_choice < /dev/tty
+                case "$ar_choice" in
+                    1)
+                        local routes_input=""
+                        prompt_clean "Введите подсеть CIDR (Enter - ${default_route_spec:-192.168.1.0/24})" routes_input
+                        if [ "$MODULE_CANCELED" = true ]; then
+                            MODULE_CANCELED=false
+                            continue
+                        fi
+                        routes_input="${routes_input:-${default_route_spec:-192.168.1.0/24}}"
+                        tailscale set --advertise-routes="$routes_input" 2>/dev/null || true
+                        echo -e "${C_GREEN}✅ Анонсируется подсеть $routes_input.${C_RESET}"
+                        pause_enter
+                        ;;
+                    2)
+                        tailscale set --advertise-routes= 2>/dev/null || true
+                        echo -e "${C_GREEN}✅ Анонсирование подсетей отключено.${C_RESET}"
+                        pause_enter
+                        ;;
+                    0)
+                        ;;
+                esac
                 ;;
             4)
                 echo "Прием маршрутов подсетей от других узлов сети (--accept-routes):"
@@ -680,6 +693,7 @@ TS_EOF
                     tailscale set --accept-routes=true 2>/dev/null || true
                     echo -e "${C_GREEN}✅ Прием подсетей включен (--accept-routes=true).${C_RESET}"
                 else
+                    if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
                     tailscale set --accept-routes=false 2>/dev/null || true
                     echo -e "${C_BLUE}ℹ️ Прием подсетей отключен (безопасный режим).${C_RESET}"
                 fi
@@ -1220,10 +1234,11 @@ mod_server_audit() {
             echo -e "  • Служба ethtool GRO:   ${C_YELLOW}⚠️ Не активна${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 10)${C_RESET}"
         fi
 
+        # Парсинг только реальных пунктов предупреждений (начинающихся с дефиса '- ') без дублей и пустых заголовков
         local health_warn
-        health_warn=$(tailscale status --peers=false 2>/dev/null | grep -A 5 -i "# Health check:" | grep -v "accept-routes" || echo "")
+        health_warn=$(tailscale status --peers=false 2>/dev/null | grep -E "^\s*-\s+" | grep -v "accept-routes" || echo "")
         if [ -n "$health_warn" ]; then
-            echo -e "  • Предупреждение Tailscale Health Check:\n${C_YELLOW}$health_warn${C_RESET}"
+            echo -e "  • Предупреждения Tailscale Health Check:\n${C_YELLOW}$health_warn${C_RESET}"
         else
             echo -e "  • Предупреждения сети Tailnet: ${C_GREEN}✅ Отсутствуют (Сеть здорова)${C_RESET}"
         fi
@@ -1257,6 +1272,14 @@ mod_server_audit() {
         echo -e "  • Параметр swappiness: ${C_GREEN}✅ Оптимизирован ($swap_swappiness)${C_RESET}"
     else
         echo -e "  • Параметр swappiness: ${C_YELLOW}⚠️ Стандартный ($swap_swappiness)${C_RESET} ${C_YELLOW}(💡 Рекомендация: Оптимизируйте в Пункте 12)${C_RESET}"
+    fi
+
+    local dirty_writeback
+    dirty_writeback=$(sysctl -n vm.dirty_writeback_centisecs 2>/dev/null || echo "500")
+    if [ "$dirty_writeback" -ge 1000 ]; then
+        echo -e "  • Буферизация записи RAM (dirty_writeback): ${C_GREEN}✅ Оптимизирована (${dirty_writeback}cs)${C_RESET}"
+    else
+        echo -e "  • Буферизация записи RAM (dirty_writeback): ${C_YELLOW}⚠️ Стандартная (${dirty_writeback}cs)${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 12)${C_RESET}"
     fi
 
     if mount | grep " / " | grep -q "noatime"; then
@@ -1526,7 +1549,7 @@ while true; do
         7) mod_hardening; pause_enter ;;
         8) mod_ufw; pause_enter ;;
         9) mod_lock_root; pause_enter ;;
-        10) mod_tailscale; pause_enter ;;
+        10) mod_tailscale ;;
         11) mod_disable_logging; pause_enter ;;
         12) mod_ram_flash_opt; pause_enter ;;
         13) mod_swap_manager; pause_enter ;;

@@ -75,48 +75,17 @@ print(f"{ts_name}|{ts_user}")
 ' 2>/dev/null || echo "N/A|N/A"
 }
 
-# Динамическое определение активного порта веб-интерфейса Tailscale Web
-get_tailscale_web_port() {
-    python3 -c '
-import re
-port = "5252"
-try:
-    with open("/etc/systemd/system/tailscale-web.service") as f:
-        content = f.read()
-        m = re.search(r"--listen\s+\S+:(\d+)", content)
-        if m:
-            port = m.group(1)
-except Exception:
-    pass
-
-if port == "5252":
-    try:
-        import subprocess
-        out = subprocess.check_output(["ps", "aux"], text=True, stderr=subprocess.DEVNULL)
-        m = re.search(r"tailscale.*web.*--listen\s+\S+:(\d+)", out)
-        if m:
-            port = m.group(1)
-    except Exception:
-        pass
-
-print(port)
-' 2>/dev/null || echo "5252"
-}
-
-# Проверка активности веб-интерфейса Tailscale Web
+# Проверка активности веб-интерфейса Tailscale Web через нативный статус CLI
 is_tailscale_web_active() {
+    local web_val
+    web_val=$(tailscale get webclient 2>/dev/null || echo "false")
+    if [ "$web_val" = "true" ]; then
+        return 0
+    fi
     if systemctl is-active --quiet tailscale-web.service 2>/dev/null; then
         return 0
     fi
-    if systemctl is-enabled --quiet tailscale-web.service 2>/dev/null; then
-        return 0
-    fi
     if ps aux 2>/dev/null | grep -v grep | grep -q -iE "tailscale.*web"; then
-        return 0
-    fi
-    local active_port
-    active_port=$(get_tailscale_web_port)
-    if command -v ss &>/dev/null && ss -tulpn 2>/dev/null | grep -q -iE "tailscale.*web|:$active_port"; then
         return 0
     fi
     return 1
@@ -127,7 +96,7 @@ is_port_free() {
     local port="$1"
     python3 - "$port" << 'PY' 2>/dev/null
 import sys, socket
-port = int(sys.argv)
+port = int(sys.argv[1])
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -692,7 +661,7 @@ mod_lock_root() {
     fi
 }
 
-# 10. Tailscale, GRO-оптимизация, Web UI & Интерактивная безопасность
+# 10. Tailscale, GRO-оптимизация, Нативный Web UI & Интерактивная безопасность
 mod_tailscale() {
     while true; do
         clear
@@ -741,7 +710,7 @@ mod_tailscale() {
         echo "  4) 🛡️  Прием подсетей из Tailscale (--accept-routes)"
         echo "  5) 🔒 Стелс-режим (--stateful-filtering)"
         echo "  6) ⚡ Настройка GRO-оптимизации (tailscale-gro.service)"
-        echo "  7) 💻 Настройка веб-интерфейса Tailscale Web (tailscale-web.service)"
+        echo "  7) 💻 Настройка веб-интерфейса Tailscale Web (tailscale set --webclient)"
         echo "  8) 🔄 Полный сброс настроек подключения (tailscale up --reset)"
         echo "  0) ↩️ Назад в Главное меню"
         echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -898,9 +867,9 @@ ETHTOOL_SVC_EOF
                 pause_enter
                 ;;
             7)
-                echo "Настройка веб-интерфейса Tailscale Web (tailscale-web.service):"
-                echo "  1) Включить веб-интерфейс Tailscale Web (создать и запустить tailscale-web.service)"
-                echo "  2) Отключить веб-интерфейс Tailscale Web (остановить и удалить tailscale-web.service)"
+                echo "Настройка веб-интерфейса Tailscale Web (tailscale set --webclient):"
+                echo "  1) Включить веб-интерфейс Tailscale Web (tailscale set --webclient=true)"
+                echo "  2) Отключить веб-интерфейс Tailscale Web (tailscale set --webclient=false)"
                 echo "  0) Назад"
                 local web_choice
                 read -r -p "Ваш выбор [0-2]: " web_choice < /dev/tty
@@ -910,114 +879,36 @@ ETHTOOL_SVC_EOF
                             ensure_tailscale_installed
                         fi
 
-                        local web_port=""
-                        prompt_clean "Введите порт для веб-интерфейса (Enter - 5252)" web_port
-                        if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
-                        web_port="${web_port:-5252}"
+                        # Нативный и безопасный метод из официальной документации
+                        tailscale set --webclient=true 2>/dev/null || true
 
-                        local ts_bin
-                        ts_bin=$(command -v tailscale || echo "/usr/bin/tailscale")
-
-                        tee /etc/systemd/system/tailscale-web.service > /dev/null << TS_WEB_SVC_EOF
-[Unit]
-Description=Tailscale Web Management Interface
-After=network-online.target tailscaled.service
-Wants=network-online.target tailscaled.service
-
-[Service]
-Type=simple
-ExecStart=$ts_bin web --listen 0.0.0.0:$web_port
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-TS_WEB_SVC_EOF
+                        # Очищаем старые застрявшие службы и логику UFW, если они создавались ранее
+                        systemctl disable --now tailscale-web.service 2>/dev/null || true
+                        rm -f /etc/systemd/system/tailscale-web.service
                         systemctl daemon-reload
-                        systemctl enable --now tailscale-web.service
-
-                        if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-                            ufw allow "$web_port"/tcp comment 'Tailscale Web UI' 2>/dev/null || true
-                        fi
 
                         local current_ts_ip
-                        current_ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "127.0.0.1")
-                        echo -e "${C_GREEN}✅ Служба веб-интерфейса tailscale-web.service успешно включена и запущенна (Порт: $web_port).${C_RESET}"
-                        echo -e "${C_CYAN}🌐 Откройте веб-панель в браузере: http://${current_ts_ip}:$web_port${C_RESET}"
+                        current_ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "100.100.100.100")
+                        echo -e "${C_GREEN}✅ Нативный веб-интерфейс Tailscale Web успешно включен (tailscale set --webclient=true).${C_RESET}"
+                        echo -e "${C_CYAN}🌐 Доступные адреса веб-панели в браузере:${C_RESET}"
+                        echo -e "   • Локально на устройстве:  http://100.100.100.100"
+                        echo -e "   • Удаленно из сети Tailnet: http://${current_ts_ip}:5252"
                         ;;
                     2)
-                        local active_web_port
-                        active_web_port=$(get_tailscale_web_port)
+                        # Нативное и моментальное отключение по официальной документации
+                        tailscale set --webclient=false 2>/dev/null || true
 
+                        # Очистка и завершение возможных старых фоновых служб
                         systemctl disable --now tailscale-web.service 2>/dev/null || true
-
-                        python3 - "$active_web_port" << 'PY' 2>/dev/null || true
-import sys, os, glob, re, subprocess
-
-port_str = sys.argv
-port_hex = f"{int(port_str):04X}"
-pids = set()
-
-inodes = set()
-for proc_file in ["/proc/net/tcp", "/proc/net/tcp6"]:
-    if os.path.exists(proc_file):
-        try:
-            with open(proc_file) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 10:
-                        local_addr = parts
-                        state = parts[3]
-                        inode = parts[9]
-                        if local_addr.endswith(":" + port_hex) and state == "0A":
-                            inodes.add(inode)
-        except Exception:
-            pass
-
-if inodes:
-    for fd_path in glob.glob("/proc/[0-9]*/fd/*"):
-        try:
-            link = os.readlink(fd_path)
-            for inode in inodes:
-                if f"socket:[{inode}]" in link:
-                    pids.add(fd_path.split("/")[2])
-        except Exception:
-            pass
-
-try:
-    ss_out = subprocess.check_output(["ss", "-tulpn"], text=True, stderr=subprocess.DEVNULL)
-    for line in ss_out.splitlines():
-        if f":{port_str}" in line:
-            for pid in re.findall(r"pid=(\d+)", line):
-                pids.add(pid)
-except Exception:
-    pass
-
-try:
-    ps_out = subprocess.check_output(["ps", "aux"], text=True, stderr=subprocess.DEVNULL)
-    for line in ps_out.splitlines():
-        if "tailscale" in line and "web" in line:
-            parts = line.split()
-            if len(parts) >= 2 and parts.isdigit():
-                pids.add(parts)
-except Exception:
-    pass
-
-for pid in pids:
-    try:
-        os.kill(int(pid), 9)
-    except Exception:
-        pass
-PY
-
+                        pkill -9 -f "tailscale.*web" 2>/dev/null || true
                         rm -f /etc/systemd/system/tailscale-web.service
                         systemctl daemon-reload
 
                         if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-                            ufw delete allow "$active_web_port"/tcp 2>/dev/null || true
+                            ufw delete allow 5252/tcp 2>/dev/null || true
                             ufw reload 2>/dev/null || true
                         fi
-                        echo -e "${C_BLUE}ℹ️ Служба и процесс веб-интерфейса Tailscale Web полностью завершены (SIGKILL), порт $active_web_port освобождён.${C_RESET}"
+                        echo -e "${C_GREEN}✅ Нативный веб-интерфейс Tailscale Web успешно отключен (tailscale set --webclient=false).${C_RESET}"
                         ;;
                 esac
                 pause_enter
@@ -1179,7 +1070,7 @@ if fstab_path.exists():
             new_lines.append(line)
             continue
         parts = line.split()
-        if len(parts) >= 4 and parts == "/":
+        if len(parts) >= 4 and parts[1] == "/":
             opts = parts[3].split(",")
             if "noatime" not in opts:
                 opts.append("noatime")
@@ -1744,7 +1635,7 @@ EOF
 import sys
 from pathlib import Path
 
-lan_iface = sys.argv
+lan_iface = sys.argv[1]
 wan_iface = sys.argv[2]
 ts_iface = sys.argv[3]
 

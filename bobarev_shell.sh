@@ -882,7 +882,7 @@ ETHTOOL_SVC_EOF
                         # Нативный и безопасный метод из официальной документации
                         tailscale set --webclient=true 2>/dev/null || true
 
-                        # Очищаем старые застрявшие службы и логику UFW, если они создавались ранее
+                        # Очищаем старые службы, если они создавались ранее
                         systemctl disable --now tailscale-web.service 2>/dev/null || true
                         rm -f /etc/systemd/system/tailscale-web.service
                         systemctl daemon-reload
@@ -895,8 +895,14 @@ ETHTOOL_SVC_EOF
                         echo -e "   • Удаленно из сети Tailnet: http://${current_ts_ip}:5252"
                         ;;
                     2)
-                        # Нативное и моментальное отключение по официальной документации
+                        # Нативное отключение + перезапуск демона tailscaled для применения изменения в памяти
                         tailscale set --webclient=false 2>/dev/null || true
+
+                        if systemctl is-active --quiet tailscaled 2>/dev/null; then
+                            systemctl restart tailscaled 2>/dev/null || true
+                        elif command -v launchctl &>/dev/null; then
+                            launchctl kickstart -k system/com.tailscale.tailscaled 2>/dev/null || true
+                        fi
 
                         # Очистка и завершение возможных старых фоновых служб
                         systemctl disable --now tailscale-web.service 2>/dev/null || true
@@ -904,11 +910,7 @@ ETHTOOL_SVC_EOF
                         rm -f /etc/systemd/system/tailscale-web.service
                         systemctl daemon-reload
 
-                        if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-                            ufw delete allow 5252/tcp 2>/dev/null || true
-                            ufw reload 2>/dev/null || true
-                        fi
-                        echo -e "${C_GREEN}✅ Нативный веб-интерфейс Tailscale Web успешно отключен (tailscale set --webclient=false).${C_RESET}"
+                        echo -e "${C_GREEN}✅ Нативный веб-интерфейс Tailscale Web отключен (tailscale set --webclient=false), демон tailscaled перезапущен.${C_RESET}"
                         ;;
                 esac
                 pause_enter

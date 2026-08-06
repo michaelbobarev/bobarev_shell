@@ -486,6 +486,10 @@ mod_ssh_key() {
 mod_ssh_config() {
     echo -e "${C_CYAN}🔒 === 6/18. КОНФИГУРАЦИЯ SSH (БЕЗОПАСНОСТЬ) ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
+
+    # Закоментируем старые директивы в основном sshd_config, чтобы они не перекрывали sshd_config.d (First-Match-Wins в OpenSSH)
+    sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config 2>/dev/null || true
+
     local active_ssh_port
     active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
     active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
@@ -539,14 +543,25 @@ mod_ssh_config() {
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
     fi
 
-    # Гарантируем существование директории sshd_config.d и директивы Include
+    # Гарантируем существование директории sshd_config.d и помещаем Include в САМОЕ НАЧАЛО файла sshd_config
     mkdir -p /etc/ssh/sshd_config.d
-    if [ -f /etc/ssh/sshd_config ] && ! grep -q -i "Include /etc/ssh/sshd_config.d/\*.conf" /etc/ssh/sshd_config; then
-        echo -e "\nInclude /etc/ssh/sshd_config.d/*.conf" >> /etc/ssh/sshd_config
+    if [ -f /etc/ssh/sshd_config ]; then
+        sed -i '/^\s*Include \/etc\/ssh\/sshd_config\.d\/\*\.conf/d' /etc/ssh/sshd_config 2>/dev/null || true
+        sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
+    fi
+
+    local ts_restrict_comment=""
+    local restrict_choice=false
+    if prompt_yn "Ограничить доступ к SSH ТОЛЬКО через сеть Tailscale?" true; then
+        restrict_choice=true
+        ts_restrict_comment="# SSH via Tailscale only"
+    else
+        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
     fi
 
     tee /etc/ssh/sshd_config.d/99-server-security.conf > /dev/null << SSH_HARDENING_EOF
 # Server Security Hardening Configuration
+$ts_restrict_comment
 Port $port
 PermitRootLogin no
 PubkeyAuthentication yes
@@ -574,8 +589,7 @@ SSH_HARDENING_EOF
         systemctl enable --now ssh.service
         systemctl restart sshd
 
-        # Автоматическая связка с Tailscale
-        if prompt_yn "Ограничить доступ к SSH ТОЛЬКО через сеть Tailscale?" true; then
+        if [ "$restrict_choice" = true ]; then
             if ensure_tailscale_installed; then
                 if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
                     ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only' 2>/dev/null || true
@@ -591,13 +605,12 @@ SSH_HARDENING_EOF
                 fi
             fi
         else
-            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
             if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
                 ufw allow "$port"/tcp comment 'SSH Public Port' 2>/dev/null || true
             fi
         fi
 
-        echo -e "${C_GREEN}✅ Служба SSH успешно перезапущена (Порт: $port, Вход по паролю: $pass_auth_val).${C_RESET}"
+        echo -e "${C_GREEN}✅ Служба SSH успешно перезапущена (Порт: $port, Вход по паролю: $pass_auth_val, PermitRootLogin: no).${C_RESET}"
     else
         echo -e "${C_RED}❌ Ошибка синтаксиса в конфигурации SSH! Откат изменений...${C_RESET}"
         rm -f /etc/ssh/sshd_config.d/99-server-security.conf
@@ -696,7 +709,25 @@ mod_ufw() {
         sed -i 's/DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw 2>/dev/null || true
     fi
 
-    if prompt_yn "Ограничить доступ к SSH ТОЛЬКО через сеть Tailscale?" true; then
+    # Автоматическое считывание ранее сделанного выбора из Модуля 6 (чтобы не задавать глупых дублирующих вопросов)
+    local is_ts_restricted_in_mod6=false
+    if grep -q "SSH via Tailscale only" /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null; then
+        is_ts_restricted_in_mod6=true
+    fi
+
+    local do_restrict=false
+    if [ "$is_ts_restricted_in_mod6" = true ]; then
+        echo -e "${C_BLUE}ℹ️ Авто-определение: Вы уже выбрали ограничение SSH через Tailscale в Модуле 6.${C_RESET}"
+        do_restrict=true
+    else
+        if prompt_yn "Ограничить доступ к SSH ТОЛЬКО через сеть Tailscale?" true; then
+            do_restrict=true
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+        fi
+    fi
+
+    if [ "$do_restrict" = true ]; then
         if ensure_tailscale_installed; then
             ufw allow in on tailscale0 comment 'Allow inside Tailscale' 2>/dev/null || true
             ufw allow 41641/udp comment 'Tailscale Direct P2P' 2>/dev/null || true
@@ -708,12 +739,12 @@ mod_ufw() {
                 ufw route allow in on "$netdev" out on tailscale0 2>/dev/null || true
             fi
             ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+            echo -e "${C_GREEN}✅ Настроено правило UFW: доступ к SSH (порт $port) разрешен ТОЛЬКО из сети Tailscale.${C_RESET}"
         else
-            echo -e "${C_YELLOW}⚠️ Установка Tailscale отменена. Открываем публичный порт SSH ($port).${C_RESET}"
+            echo -e "${C_YELLOW}⚠️ Авторизация Tailscale не выполнена. Открываем публичный порт SSH ($port).${C_RESET}"
             ufw allow "$port"/tcp comment 'SSH Public Port'
         fi
     else
-        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
         ufw allow "$port"/tcp comment 'SSH Public Port'
     fi
 

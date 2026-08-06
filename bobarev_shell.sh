@@ -91,19 +91,44 @@ is_tailscale_web_active() {
     return 1
 }
 
-# Проверка занятости сетевого TCP-порта
+# Мульти-уровневая надежная проверка занятости сетевого TCP-порта
 is_port_free() {
-    local port="$1"
+    local port_raw="$1"
+    # Очищаем порт от любых нецифровых символов (пробелы, \r, \n)
+    local port
+    port=$(echo "$port_raw" | tr -dc '0-9')
+
+    if [ -z "$port" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        return 1
+    fi
+
+    # 1. Проверка через утилиту ss (если есть)
+    if command -v ss &>/dev/null; then
+        if ss -tuln 2>/dev/null | grep -qE ":${port}\b"; then
+            return 1 # Занят
+        fi
+        return 0 # Свободен
+    fi
+
+    # 2. Проверка через lsof (если есть)
+    if command -v lsof &>/dev/null; then
+        if lsof -iTCP:"$port" -sTCP:LISTEN &>/dev/null; then
+            return 1 # Занят
+        fi
+        return 0 # Свободен
+    fi
+
+    # 3. Резервная проверка через Python socket
     python3 - "$port" << 'PY' 2>/dev/null
 import sys, socket
-port = int(sys.argv)
 try:
+    port = int(sys.argv.strip())
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('0.0.0.0', port))
     s.close()
     sys.exit(0) # Свободен
-except OSError:
+except Exception:
     sys.exit(1) # Занят
 PY
 }
@@ -164,16 +189,16 @@ prompt_yn() {
 
     while true; do
         read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} $yn_text (0 - Назад): ")" choice < /dev/tty
-        choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
+        choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]' | tr -d '\r\n\t ')
         if [ "$choice" = "0" ] || [ "$choice" = "b" ] || [ "$choice" = "back" ] || [ "$choice" = "назад" ]; then
             echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
             MODULE_CANCELED=true
             return 1
         elif [ -z "$choice" ]; then
             if [ "$default_yes" = "true" ]; then return 0; else return 1; fi
-        elif [ "$choice" = "y" ] || [ "$choice" = "yes" ]; then
+        elif [ "$choice" = "y" ] || [ "$choice" = "yes" ] || [ "$choice" = "у" ] || [ "$choice" = "да" ]; then
             return 0
-        elif [ "$choice" = "n" ] || [ "$choice" = "no" ]; then
+        elif [ "$choice" = "n" ] || [ "$choice" = "no" ] || [ "$choice" = "н" ] || [ "$choice" = "нет" ]; then
             return 1
         fi
         echo "Пожалуйста, введите 'y' (да), 'n' (нет) или '0' (назад)."
@@ -186,6 +211,7 @@ prompt_default() {
     local var_name="$3"
     local val
     read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} [$default_val] (0 - Назад): ")" val < /dev/tty
+    val=$(echo "$val" | tr -d '\r\n\t ')
     if [ "$val" = "0" ] || [ "$val" = "b" ] || [ "$val" = "back" ] || [ "$val" = "назад" ]; then
         echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
         MODULE_CANCELED=true
@@ -199,6 +225,7 @@ prompt_clean() {
     local var_name="$2"
     local val
     read -r -p "$(echo -e "${C_BOLD}$prompt${C_RESET} (0 - Назад): ")" val < /dev/tty
+    val=$(echo "$val" | tr -d '\r\n\t ')
     if [ "$val" = "0" ] || [ "$val" = "b" ] || [ "$val" = "back" ] || [ "$val" = "назад" ]; then
         echo -e "${C_YELLOW}↩️ Отмена модуля. Возврат в главное меню...${C_RESET}"
         MODULE_CANCELED=true
@@ -438,18 +465,27 @@ mod_ssh_config() {
     backup_file "/etc/ssh/sshd_config"
     local active_ssh_port
     active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
 
     local port=""
     while true; do
-        prompt_clean "Введите порт SSH (Enter - $active_ssh_port)" port
+        prompt_clean "Введите порт SSH (Enter - ${active_ssh_port:-22})" port
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        port="${port:-$active_ssh_port}"
+        port="${port:-${active_ssh_port:-22}}"
+        port=$(echo "$port" | tr -dc '0-9')
 
-        # Интеллектуальная проверка доступности порта
-        if [ "$port" != "$active_ssh_port" ] && ! is_port_free "$port"; then
-            echo -e "${C_RED}⚠️ ВНИМАНИЕ: Порт $port уже ЗАНЯТ другим процессом в системе!${C_RESET}"
-            echo -e "${C_YELLOW}Пожалуйста, выберите другой порт.${C_RESET}"
+        if [ -z "$port" ]; then
+            echo -e "${C_RED}❌ Ошибка: Введен нечисловой порт! Попробуйте снова.${C_RESET}"
             continue
+        fi
+
+        # Проверка доступности порта (с неблокирующим диалогом)
+        if [ "$port" != "$active_ssh_port" ] && ! is_port_free "$port"; then
+            echo -e "${C_YELLOW}⚠️ ВНИМАНИЕ: Порт $port возможно занят другим процессом.${C_RESET}"
+            if ! prompt_yn "Вы всё равно хотите использовать порт $port?" false; then
+                if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+                continue
+            fi
         fi
         break
     done
@@ -605,16 +641,21 @@ mod_ufw() {
     
     local active_ssh_port
     active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
 
     local port=""
     while true; do
-        prompt_clean "Введите порт SSH для разрешения в UFW (Enter - $active_ssh_port)" port
+        prompt_clean "Введите порт SSH для разрешения в UFW (Enter - ${active_ssh_port:-22})" port
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        port="${port:-$active_ssh_port}"
+        port="${port:-${active_ssh_port:-22}}"
+        port=$(echo "$port" | tr -dc '0-9')
 
         if [ "$port" != "$active_ssh_port" ] && ! is_port_free "$port"; then
-            echo -e "${C_RED}⚠️ ВНИМАНИЕ: Порт $port уже ЗАНЯТ другим процессом!${C_RESET}"
-            continue
+            echo -e "${C_YELLOW}⚠️ ВНИМАНИЕ: Порт $port возможно занят другим процессом!${C_RESET}"
+            if ! prompt_yn "Вы всё равно хотите использовать порт $port?" false; then
+                if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+                continue
+            fi
         fi
         break
     done

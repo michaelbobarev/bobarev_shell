@@ -17,6 +17,9 @@ C_RESET='\033[0m'
 # Флаг отмены модуля
 MODULE_CANCELED=false
 
+# Гарантируем наличие /usr/sbin и /sbin в PATH для вызова sshd
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 # Определение типа системы (VPS, SBC/Armbian, ПК/Десктоп)
 SYSTEM_TYPE="Cloud_VPS"
 if [ -f /etc/armbian-release ] || [ -f /etc/default/armbian-zram ] || grep -q -i "armbian\|nanopi\|raspberry" /etc/os-release 2>/dev/null; then
@@ -29,6 +32,19 @@ fi
 
 # Динамическое определение сетевых интерфейсов
 DEFAULT_WAN_IF=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
+
+# Поиск исполняемого файла sshd в системе
+get_sshd_cmd() {
+    if command -v sshd &>/dev/null; then
+        echo "sshd"
+    elif [ -x /usr/sbin/sshd ]; then
+        echo "/usr/sbin/sshd"
+    elif [ -x /sbin/sshd ]; then
+        echo "/sbin/sshd"
+    else
+        echo ""
+    fi
+}
 
 # Динамическое определение активного пользователя системы
 get_active_user() {
@@ -136,7 +152,7 @@ is_port_free() {
     python3 - "$port" << 'PY' 2>/dev/null
 import sys, socket
 try:
-    port = int(sys.argv.strip())
+    port = int(sys.argv[1].strip())
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('0.0.0.0', port))
@@ -490,8 +506,13 @@ mod_ssh_config() {
     # Закоментируем старые директивы в основном sshd_config, чтобы они не перекрывали sshd_config.d (First-Match-Wins в OpenSSH)
     sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config 2>/dev/null || true
 
-    local active_ssh_port
-    active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    local sshd_cmd
+    sshd_cmd=$(get_sshd_cmd)
+
+    local active_ssh_port="22"
+    if [ -n "$sshd_cmd" ]; then
+        active_ssh_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    fi
     active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
 
     local port=""
@@ -522,12 +543,16 @@ mod_ssh_config() {
 
     if prompt_yn "Отключить вход по паролю (разрешить ТОЛЬКО SSH-ключи)?" false; then
         local has_any_key=false
-        for user_home in /root /home/*; do
-            if [ -s "$user_home/.ssh/authorized_keys" ]; then
-                has_any_key=true
-                break
-            fi
-        done
+        if [ -s /root/.ssh/authorized_keys ]; then
+            has_any_key=true
+        else
+            for user_home in /home/*; do
+                if [ -s "$user_home/.ssh/authorized_keys" ]; then
+                    has_any_key=true
+                    break
+                fi
+            done
+        fi
 
         if [ "$has_any_key" = true ]; then
             pass_auth_val="no"
@@ -584,16 +609,25 @@ PrintMotd no
 TCPKeepAlive yes
 SSH_HARDENING_EOF
 
-    if sshd -t; then
+    local test_ok=false
+    if [ -n "$sshd_cmd" ]; then
+        if $sshd_cmd -t 2>/dev/null; then
+            test_ok=true
+        fi
+    else
+        test_ok=true
+    fi
+
+    if [ "$test_ok" = true ]; then
         systemctl disable --now ssh.socket 2>/dev/null || true
-        systemctl enable --now ssh.service
-        systemctl restart sshd
+        systemctl enable --now ssh.service 2>/dev/null || true
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 
         if [ "$restrict_choice" = true ]; then
             if ensure_tailscale_installed; then
                 if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-                    ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only' 2>/dev/null || true
-                    ufw delete allow "$port"/tcp 2>/dev/null || true
+                    ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only' >/dev/null 2>&1 || true
+                    ufw delete allow "$port"/tcp >/dev/null 2>&1 || true
                     echo -e "${C_GREEN}✅ SSH доступ ограничен: разрешен ТОЛЬКО через сеть Tailscale.${C_RESET}"
                 else
                     echo -e "${C_BLUE}ℹ️ Ограничение SSH сохранено. Правило будет задействовано при включении UFW в Модуле 8.${C_RESET}"
@@ -601,12 +635,12 @@ SSH_HARDENING_EOF
             else
                 echo -e "${C_YELLOW}⚠️ Установка Tailscale отменена. SSH настроен в обычном режиме (порт $port).${C_RESET}"
                 if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-                    ufw allow "$port"/tcp comment 'SSH Public Port' 2>/dev/null || true
+                    ufw allow "$port"/tcp comment 'SSH Public Port' >/dev/null 2>&1 || true
                 fi
             fi
         else
             if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-                ufw allow "$port"/tcp comment 'SSH Public Port' 2>/dev/null || true
+                ufw allow "$port"/tcp comment 'SSH Public Port' >/dev/null 2>&1 || true
             fi
         fi
 
@@ -675,8 +709,13 @@ HARDENING_EOF
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/18. НАСТРОЙКА FIREWALL (UFW) ===${C_RESET}"
     
-    local active_ssh_port
-    active_ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    local sshd_cmd
+    sshd_cmd=$(get_sshd_cmd)
+
+    local active_ssh_port="22"
+    if [ -n "$sshd_cmd" ]; then
+        active_ssh_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    fi
     active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
 
     local port=""
@@ -696,16 +735,16 @@ mod_ufw() {
         break
     done
 
-    ufw --force reset
-    ufw default deny incoming
-    ufw default allow outgoing
+    ufw --force reset >/dev/null 2>&1 || true
+    ufw default deny incoming >/dev/null 2>&1 || true
+    ufw default allow outgoing >/dev/null 2>&1 || true
 
     if prompt_yn "Разрешить маршрутизацию пакетов (FORWARD ACCEPT)? (Нужно для роутеров и Tailscale Exit-Node)" true; then
-        ufw default allow routed
+        ufw default allow routed >/dev/null 2>&1 || true
         sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
     else
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        ufw default deny routed
+        ufw default deny routed >/dev/null 2>&1 || true
         sed -i 's/DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw 2>/dev/null || true
     fi
 
@@ -729,27 +768,27 @@ mod_ufw() {
 
     if [ "$do_restrict" = true ]; then
         if ensure_tailscale_installed; then
-            ufw allow in on tailscale0 comment 'Allow inside Tailscale' 2>/dev/null || true
-            ufw allow 41641/udp comment 'Tailscale Direct P2P' 2>/dev/null || true
+            ufw allow in on tailscale0 comment 'Allow inside Tailscale' >/dev/null 2>&1 || true
+            ufw allow 41641/udp comment 'Tailscale Direct P2P' >/dev/null 2>&1 || true
 
             local netdev="$DEFAULT_WAN_IF"
             [ -z "$netdev" ] && netdev=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
             if [ -n "$netdev" ]; then
-                ufw route allow in on tailscale0 out on "$netdev" 2>/dev/null || true
-                ufw route allow in on "$netdev" out on tailscale0 2>/dev/null || true
+                ufw route allow in on tailscale0 out on "$netdev" >/dev/null 2>&1 || true
+                ufw route allow in on "$netdev" out on tailscale0 >/dev/null 2>&1 || true
             fi
-            ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+            ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only' >/dev/null 2>&1 || true
             echo -e "${C_GREEN}✅ Настроено правило UFW: доступ к SSH (порт $port) разрешен ТОЛЬКО из сети Tailscale.${C_RESET}"
         else
             echo -e "${C_YELLOW}⚠️ Авторизация Tailscale не выполнена. Открываем публичный порт SSH ($port).${C_RESET}"
-            ufw allow "$port"/tcp comment 'SSH Public Port'
+            ufw allow "$port"/tcp comment 'SSH Public Port' >/dev/null 2>&1 || true
         fi
     else
-        ufw allow "$port"/tcp comment 'SSH Public Port'
+        ufw allow "$port"/tcp comment 'SSH Public Port' >/dev/null 2>&1 || true
     fi
 
-    ufw --force enable
-    ufw logging off 2>/dev/null || true
+    ufw --force enable >/dev/null 2>&1 || true
+    ufw logging off >/dev/null 2>&1 || true
     echo -e "${C_GREEN}✅ Межсетевой экран UFW включен (логирование UFW отключено).${C_RESET}"
 }
 
@@ -800,7 +839,7 @@ mod_tailscale() {
             echo -e " Внешний Exit-Node:          ${C_BLUE}$ts_exit${C_RESET} | Анонс Exit-Node: ${C_BLUE}$adv_exit_fmt${C_RESET}"
             echo -e " Свои подсети (LAN):         ${C_BLUE}$adv_routes_fmt${C_RESET}"
             echo -e " Прием подсетей из Tailscale: ${C_BLUE}$accept_fmt${C_RESET}"
-            echo -e " Стелс-режим:                ${C_BLUE}$stealth_fmt${C_RESET}"
+            echo -e " Стелс-режим:                ${C_BLUE}$ts_stealth${C_RESET}"
             echo -e " Веб-интерфейс Tailscale Web:${C_BLUE}$ts_web_fmt${C_RESET}"
         else
             echo -e " Статус: ${C_YELLOW}Пакет Tailscale еще не установлен в системе.${C_RESET}"
@@ -1116,7 +1155,7 @@ if command -v warp-cli &> /dev/null; then
 fi
 
 if command -v ufw &>/dev/null; then
-    ufw logging off 2>/dev/null || true
+    ufw logging off >/dev/null 2>&1 || true
     echo "✅ Логирование UFW отключено."
 fi
 
@@ -1196,7 +1235,7 @@ if fstab_path.exists():
             new_lines.append(line)
             continue
         parts = line.split()
-        if len(parts) >= 4 and parts == "/":
+        if len(parts) >= 4 and parts[1] == "/":
             opts = parts[3].split(",")
             if "noatime" not in opts:
                 opts.append("noatime")
@@ -1457,20 +1496,43 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 2. Пользователи и SSH-доступ ---${C_RESET}"
     echo -e "  • Активный sudo-пользователь: ${C_GREEN}$active_user${C_RESET}"
     
-    local ssh_port
-    ssh_port=$(sshd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    local sshd_cmd
+    sshd_cmd=$(get_sshd_cmd)
+
+    local ssh_port="22"
+    local root_ssh="yes"
+    local pass_auth="yes"
+
+    if [ -n "$sshd_cmd" ]; then
+        local sshd_dump
+        sshd_dump=$($sshd_cmd -T 2>/dev/null || echo "")
+        if [ -n "$sshd_dump" ]; then
+            ssh_port=$(echo "$sshd_dump" | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+            root_ssh=$(echo "$sshd_dump" | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1 || echo "yes")
+            pass_auth=$(echo "$sshd_dump" | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1 || echo "yes")
+        fi
+    fi
+
+    # Резервное напрямую считывание параметров из 99-server-security.conf
+    if [ -f /etc/ssh/sshd_config.d/99-server-security.conf ]; then
+        local conf_port conf_root conf_pass
+        conf_port=$(grep -i "^Port " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
+        conf_root=$(grep -i "^PermitRootLogin " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
+        conf_pass=$(grep -i "^PasswordAuthentication " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
+
+        [ -n "$conf_port" ] && ssh_port="$conf_port"
+        [ -n "$conf_root" ] && root_ssh="$conf_root"
+        [ -n "$conf_pass" ] && pass_auth="$conf_pass"
+    fi
+
     echo -e "  • Порт SSH: ${C_GREEN}$ssh_port${C_RESET}"
 
-    local root_ssh
-    root_ssh=$(sshd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' || echo "yes")
     if [ "$root_ssh" = "no" ]; then
         echo -e "  • Вход root по SSH: ${C_GREEN}✅ Запрещен${C_RESET}"
     else
         echo -e "  • Вход root по SSH: ${C_RED}❌ Разрешен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Настройте Пункт 6)${C_RESET}"
     fi
 
-    local pass_auth
-    pass_auth=$(sshd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' || echo "yes")
     if [ "$pass_auth" = "no" ]; then
         echo -e "  • Вход по паролю SSH: ${C_GREEN}✅ Отключен (Только ключи)${C_RESET}"
     else
@@ -1763,7 +1825,7 @@ EOF
 import sys
 from pathlib import Path
 
-lan_iface = sys.argv
+lan_iface = sys.argv[1]
 wan_iface = sys.argv[2]
 ts_iface = sys.argv[3]
 

@@ -75,6 +75,24 @@ print(f"{ts_name}|{ts_user}")
 ' 2>/dev/null || echo "N/A|N/A"
 }
 
+# Проверка авторизованности узла в сети Tailscale
+is_tailscale_authenticated() {
+    if ! command -v tailscale &>/dev/null; then
+        return 1
+    fi
+    local ts_ip
+    ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+    if [ -n "$ts_ip" ]; then
+        return 0
+    fi
+    local status_out
+    status_out=$(tailscale status --peers=false 2>/dev/null || echo "Logged out")
+    if echo "$status_out" | grep -q -iE "Logged out|NeedsLogin|Stopped"; then
+        return 1
+    fi
+    return 0
+}
+
 # Проверка активности веб-интерфейса Tailscale Web через нативный статус CLI
 is_tailscale_web_active() {
     local web_val
@@ -135,7 +153,7 @@ get_interface_subnet() {
     ip -4 addr show dev "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1 | cut -d. -f1-3 || echo ""
 }
 
-# Автоматическая установка и авторизация Tailscale
+# Установка и интеллектуальная авторизация Tailscale
 ensure_tailscale_installed() {
     if ! command -v tailscale &>/dev/null; then
         echo -e "${C_BLUE}📦 Установка пакета Tailscale в систему...${C_RESET}"
@@ -157,7 +175,14 @@ TS_EOF
         sysctl --system > /dev/null
     fi
 
-    echo -e "${C_CYAN}🔑 Запуск авторизации и подключения узла (tailscale up)...${C_RESET}"
+    if is_tailscale_authenticated; then
+        local current_ip
+        current_ip=$(tailscale ip -4 2>/dev/null || echo "100.x.x.x")
+        echo -e "${C_GREEN}✅ Tailscale уже установлен и авторизован (IP: $current_ip).${C_RESET}"
+        return 0
+    fi
+
+    echo -e "${C_CYAN}🔑 Первичный запуск и авторизация узла (tailscale up)...${C_RESET}"
     local authkey=""
     prompt_clean "Tailscale Auth Key (Enter для авторизации по ссылке)" authkey
     if [ "$MODULE_CANCELED" = true ]; then
@@ -767,7 +792,27 @@ mod_tailscale() {
         
         case "$ts_choice" in
             1)
-                ensure_tailscale_installed
+                if is_tailscale_authenticated; then
+                    local cur_ip
+                    cur_ip=$(tailscale ip -4 2>/dev/null || echo "100.x.x.x")
+                    echo -e "${C_GREEN}✅ Узел уже авторизован в Tailscale (IP: $cur_ip).${C_RESET}"
+                    if prompt_yn "Вы хотите выполнить ПОВТОРНУЮ авторизацию (force-reauth)?" false; then
+                        local authkey=""
+                        prompt_clean "Tailscale Auth Key (Enter для авторизации по ссылке)" authkey
+                        if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
+                        if [ -n "$authkey" ]; then
+                            tailscale up --authkey="$authkey" --force-reauth || true
+                        else
+                            tailscale up --force-reauth || true
+                            echo ""
+                            read -r -p "Нажмите Enter ПОСЛЕ авторизации узла в веб-панели Tailscale..." < /dev/tty
+                        fi
+                    else
+                        if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
+                    fi
+                else
+                    ensure_tailscale_installed
+                fi
                 pause_enter
                 ;;
             2)

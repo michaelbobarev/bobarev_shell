@@ -96,7 +96,7 @@ is_port_free() {
     local port="$1"
     python3 - "$port" << 'PY' 2>/dev/null
 import sys, socket
-port = int(sys.argv[1])
+port = int(sys.argv)
 try:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -128,6 +128,7 @@ Wants=network-online.target
 TS_OVERRIDE
         systemctl daemon-reload
 
+        mkdir -p /etc/sysctl.d
         tee /etc/sysctl.d/99-tailscale-forward.conf > /dev/null << 'TS_EOF'
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
@@ -479,6 +480,12 @@ mod_ssh_config() {
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
     fi
 
+    # Гарантируем существование директории sshd_config.d и директивы Include
+    mkdir -p /etc/ssh/sshd_config.d
+    if [ -f /etc/ssh/sshd_config ] && ! grep -q -i "Include /etc/ssh/sshd_config.d/\*.conf" /etc/ssh/sshd_config; then
+        echo -e "\nInclude /etc/ssh/sshd_config.d/*.conf" >> /etc/ssh/sshd_config
+    fi
+
     tee /etc/ssh/sshd_config.d/99-server-security.conf > /dev/null << SSH_HARDENING_EOF
 # Server Security Hardening Configuration
 Port $port
@@ -546,6 +553,7 @@ mod_hardening() {
     # Попытка подгрузить модуль BBR в ядре
     modprobe tcp_bbr 2>/dev/null || true
 
+    mkdir -p /etc/sysctl.d
     tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << 'HARDENING_EOF'
 # Kernel Security Hardening
 kernel.dmesg_restrict = 1
@@ -1045,6 +1053,7 @@ mod_ram_flash_opt() {
     backup_file "/etc/fstab"
 
     # 1. Буферизация записи грязных страниц в RAM для ресурса Flash
+    mkdir -p /etc/sysctl.d
     cat << 'EOF' > /etc/sysctl.d/99-ram-opt.conf
 # Оптимизация ресурса памяти MicroSD / eMMC / SSD
 vm.swappiness=1
@@ -1072,7 +1081,7 @@ if fstab_path.exists():
             new_lines.append(line)
             continue
         parts = line.split()
-        if len(parts) >= 4 and parts[1] == "/":
+        if len(parts) >= 4 and parts == "/":
             opts = parts[3].split(",")
             if "noatime" not in opts:
                 opts.append("noatime")
@@ -1588,6 +1597,7 @@ mod_router_sbc() {
 
     echo -e "${C_BLUE}🌐 [1/4] Включение IP Forwarding в ядре...${C_RESET}"
     backup_file "/etc/sysctl.d/99-tailscale-forward.conf"
+    mkdir -p /etc/sysctl.d
     cat > /etc/sysctl.d/99-tailscale-forward.conf <<EOF
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
@@ -1614,6 +1624,7 @@ EOF
     echo -e "${C_BLUE}📦 [3/4] Настройка DHCP/DNS сервера (dnsmasq)...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     apt update && apt install -y dnsmasq
+    mkdir -p /etc/dnsmasq.d
     backup_file "/etc/dnsmasq.d/lan-dhcp.conf"
     cat > /etc/dnsmasq.d/lan-dhcp.conf <<EOF
 interface=$lan_iface
@@ -1637,8 +1648,8 @@ EOF
 import sys
 from pathlib import Path
 
-lan_iface = sys.argv[1]
-wan_iface = sys.argv[2]
+lan_iface = sys.argv
+wan_iface = sys.argv
 ts_iface = sys.argv[3]
 
 path = Path("/etc/ufw/before.rules")

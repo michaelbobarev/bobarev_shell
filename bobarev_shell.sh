@@ -125,6 +125,39 @@ is_tailscale_web_active() {
     return 1
 }
 
+# Включение GRO-оптимизации для Tailscale
+enable_tailscale_gro() {
+    cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
+#!/bin/bash
+while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do
+    sleep 2
+done
+NETDEV=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+if [ -n "$NETDEV" ]; then
+    ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off || true
+fi
+ETHTOOL_SCRIPT_EOF
+    chmod +x /usr/local/bin/tailscale-gro.sh
+
+    tee /etc/systemd/system/tailscale-gro.service > /dev/null << 'ETHTOOL_SVC_EOF'
+[Unit]
+Description=Ethtool rx-udp-gro-forwarding for Tailscale
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/tailscale-gro.sh
+
+[Install]
+WantedBy=multi-user.target
+ETHTOOL_SVC_EOF
+    systemctl daemon-reload
+    systemctl enable --now tailscale-gro.service 2>/dev/null || true
+    echo -e "${C_GREEN}✅ Служба GRO-оптимизации tailscale-gro.service включена.${C_RESET}"
+}
+
 # Мульти-уровневая надежная проверка занятости сетевого TCP-порта
 is_port_free() {
     local port_raw="$1"
@@ -811,6 +844,7 @@ mod_tailscale() {
     if [ "$mode" = "auto" ]; then
         echo -e "${C_CYAN}🔗 === 10/18. ПЕРВИЧНАЯ НАСТРОЙКА И ПРОВЕРКА TAILSCALE ===${C_RESET}"
         ensure_tailscale_installed || true
+        enable_tailscale_gro || true
         return 0
     fi
 
@@ -875,7 +909,7 @@ mod_tailscale() {
                     local cur_ip
                     cur_ip=$(tailscale ip -4 2>/dev/null || echo "100.x.x.x")
                     echo -e "${C_GREEN}✅ Узел уже авторизован в Tailscale (IP: $cur_ip).${C_RESET}"
-                    if prompt_yn "Вы хотите выполнить ПОВТОРНУЮ авторизацию (force-reauth)?" false; then
+                    if prompt_yn "Вы хотите выполнить ПОВТОРНАЮ авторизацию (force-reauth)?" false; then
                         local authkey=""
                         prompt_clean "Tailscale Auth Key (Enter для авторизации по ссылке)" authkey
                         if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
@@ -993,35 +1027,7 @@ mod_tailscale() {
                 read -r -p "Ваш выбор [0-2]: " gro_choice < /dev/tty
                 case "$gro_choice" in
                     1)
-                        cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
-#!/bin/bash
-while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do
-    sleep 2
-done
-NETDEV=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
-if [ -n "$NETDEV" ]; then
-    ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off || true
-fi
-ETHTOOL_SCRIPT_EOF
-                        chmod +x /usr/local/bin/tailscale-gro.sh
-
-                        tee /etc/systemd/system/tailscale-gro.service > /dev/null << 'ETHTOOL_SVC_EOF'
-[Unit]
-Description=Ethtool rx-udp-gro-forwarding for Tailscale
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/tailscale-gro.sh
-
-[Install]
-WantedBy=multi-user.target
-ETHTOOL_SVC_EOF
-                        systemctl daemon-reload
-                        systemctl enable --now tailscale-gro.service
-                        echo -e "${C_GREEN}✅ Служба GRO-оптимизации tailscale-gro.service включена.${C_RESET}"
+                        enable_tailscale_gro
                         ;;
                     2)
                         systemctl disable --now tailscale-gro.service 2>/dev/null || true
@@ -1983,7 +1989,10 @@ while true; do
                 fi
             done
             if [ "$local_aborted" = false ]; then
-                echo -e "${C_GREEN}🎉 ВСЕ СЕРВЕРНЫЕ МОДУЛИ УСПЕШНО ВЫПОЛНЕНЫ!${C_RESET}"
+                echo -e "\n${C_GREEN}🎉 ВСЕ СЕРВЕРНЫЕ МОДУЛИ УСПЕШНО ВЫПОЛНЕНЫ!${C_RESET}"
+                echo -e "${C_CYAN}📋 Запуск итогового полного аудита системы...${C_RESET}\n"
+                sleep 1
+                mod_server_audit
             fi
             pause_enter
             ;;

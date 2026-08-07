@@ -805,6 +805,15 @@ mod_lock_root() {
 
 # 10. Tailscale, GRO-оптимизация, Нативный Web UI & Интерактивная безопасность
 mod_tailscale() {
+    local mode="${1:-}"
+
+    # Если модуль вызывается в режиме авто-настройки (например, из пункта меню 'A')
+    if [ "$mode" = "auto" ]; then
+        echo -e "${C_CYAN}🔗 === 10/18. ПЕРВИЧНАЯ НАСТРОЙКА И ПРОВЕРКА TAILSCALE ===${C_RESET}"
+        ensure_tailscale_installed || true
+        return 0
+    fi
+
     while true; do
         clear
         echo -e "${C_CYAN}🔗 === 10/18. УПРАВЛЕНИЕ И НАСТРОЙКА TAILSCALE CLI ===${C_RESET}"
@@ -839,7 +848,7 @@ mod_tailscale() {
             echo -e " Внешний Exit-Node:          ${C_BLUE}$ts_exit${C_RESET} | Анонс Exit-Node: ${C_BLUE}$adv_exit_fmt${C_RESET}"
             echo -e " Свои подсети (LAN):         ${C_BLUE}$adv_routes_fmt${C_RESET}"
             echo -e " Прием подсетей из Tailscale: ${C_BLUE}$accept_fmt${C_RESET}"
-            echo -e " Стелс-режим:                ${C_BLUE}$ts_stealth${C_RESET}"
+            echo -e " Стелс-режим:                ${C_BLUE}$stealth_fmt${C_RESET}"
             echo -e " Веб-интерфейс Tailscale Web:${C_BLUE}$ts_web_fmt${C_RESET}"
         else
             echo -e " Статус: ${C_YELLOW}Пакет Tailscale еще не установлен в системе.${C_RESET}"
@@ -1922,8 +1931,8 @@ while true; do
     echo " 10) 🔗 Настройка Tailscale и GRO-оптимизация"
     echo " 11) 🧹 Отключение системного логирования"
     echo " 12) ⚡ Оптимизация RAM / Flash"
-    echo " 13) 💾 Управление файлом подкачки"
     echo " --- [PC / РОУТЕР / ДИАГНОСТИКА] ---"
+    echo " 13) 💾 Управление файлом подкачки"
     echo " 14) 🖥️  PC-утилиты (WiFi, Звук, Bluetooth, Батарея) и автозапуск"
     echo " 15) 📺 Программный сброс HDMI (LightDM)"
     echo " 16) ⏱️  Диагностика времени загрузки системы"
@@ -1959,7 +1968,10 @@ while true; do
         a|A)
             echo "🚀 ЗАПУСК ПОЛНОЙ ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ СЕРВЕРА..."
             local_aborted=false
-            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root mod_tailscale mod_disable_logging mod_ram_flash_opt; do
+            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root "mod_tailscale auto" mod_disable_logging mod_ram_flash_opt; do
+                MODULE_CANCELED=false
+                $m
+                 mod_ram_flash_opt; do
                 MODULE_CANCELED=false
                 $m
                 if [ "$MODULE_CANCELED" = true ]; then

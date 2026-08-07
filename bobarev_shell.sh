@@ -1192,27 +1192,19 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (Оставлен оригинальный текстовый вывод с цветами)
+# 17. Полный аудит сервера (Компактный и интеллектуальный)
 mod_server_audit() {
-    echo -e "${C_CYAN}🔍 === 17/18. ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ АУДИТ И ДИАГНОСТИКА ===${C_RESET}\n"
+    clear
+    echo -e "${C_CYAN}=================================================================${C_RESET}"
+    echo -e "${C_BOLD}       🔍  ИНТЕЛЛЕКТУАЛЬНЫЙ АУДИТ И СОСТОЯНИЕ СИСТЕМЫ     ${C_RESET}"
+    echo -e "${C_CYAN}=================================================================${C_RESET}"
+
     local active_user
     active_user=$(get_active_user)
-
-    echo -e "${C_BOLD}--- 1. Базовая система и параметры хоста ---${C_RESET}"
     local current_tz
     current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
-    echo -e "  • Часовой пояс: ${C_GREEN}$current_tz${C_RESET}"
-    echo -e "  • Имя хоста:    ${C_GREEN}$(hostname)${C_RESET}"
-    
-    if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
-        echo -e "  • Авто-обновления безопасности: ${C_GREEN}✅ Включены${C_RESET}"
-    else
-        echo -e "  • Авто-обновления безопасности: ${C_RED}❌ Отключены${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 3)${C_RESET}"
-    fi
 
-    echo -e "\n${C_BOLD}--- 2. Пользователи и SSH-доступ ---${C_RESET}"
-    echo -e "  • Активный sudo-пользователь: ${C_GREEN}$active_user${C_RESET}"
-    
+    # Сбор параметров SSH
     local ssh_port="22" root_ssh="yes" pass_auth="yes"
     if [ -f /etc/ssh/sshd_config.d/99-server-security.conf ]; then
         local conf_port conf_root conf_pass
@@ -1224,29 +1216,43 @@ mod_server_audit() {
         [ -n "$conf_pass" ] && pass_auth="$conf_pass"
     fi
 
-    echo -e "  • Порт SSH: ${C_GREEN}$ssh_port${C_RESET}"
-
-    if [ "$root_ssh" = "no" ]; then echo -e "  • Вход root по SSH: ${C_GREEN}✅ Запрещен${C_RESET}"; else echo -e "  • Вход root по SSH: ${C_RED}❌ Разрешен${C_RESET}"; fi
-    if [ "$pass_auth" = "no" ]; then echo -e "  • Вход по паролю SSH: ${C_GREEN}✅ Отключен (Только ключи)${C_RESET}"; else echo -e "  • Вход по паролю SSH: ${C_YELLOW}⚠️ Включен${C_RESET}"; fi
-
-    echo -e "\n${C_BOLD}--- 3. Сетевая безопасность и Firewall (UFW) ---${C_RESET}"
+    # Проверка UFW
+    local ufw_st="${C_RED}Отключен${C_RESET}"
     if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-        echo -e "  • Статус UFW: ${C_GREEN}✅ Активен${C_RESET}"
-    else
-        echo -e "  • Статус UFW: ${C_RED}❌ Не активен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Включите UFW в Пункте 8)${C_RESET}"
+        ufw_st="${C_GREEN}Активен${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 4. Состояние и настройки сети Tailscale ---${C_RESET}"
+    # Проверка Tailscale
+    local ts_st="${C_YELLOW}Не установлен${C_RESET}"
+    local ts_ip="N/A"
     if command -v tailscale &>/dev/null; then
-        echo -e "  • Пакет Tailscale: ${C_GREEN}✅ Установлен${C_RESET}"
-        local ts_ip
-        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
-        echo -e "  • IP-адрес Tailscale:        ${C_BLUE}$ts_ip${C_RESET}"
-    else
-        echo -e "  • Пакет Tailscale: ${C_YELLOW}⚠️ Не установлен${C_RESET}"
+        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "Не подключен")
+        ts_st="${C_GREEN}Активен ($ts_ip)${C_RESET}"
     fi
 
-    echo -e "\n${C_CYAN}=================================================================${C_RESET}"
+    # Проверка логирования
+    local journal_st="${C_YELLOW}Включено${C_RESET}"
+    local journal_storage=$(grep -E "^\s*Storage=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 || echo "auto")
+    [ "$journal_storage" = "none" ] && journal_st="${C_GREEN}Отключено (Экономия диска)${C_RESET}"
+
+    # Проверка Swap
+    local swap_st=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "Отключен")
+    [ -z "$swap_st" ] && swap_st="Отключен"
+
+    # Вывод компактного отчета
+    echo -e " 💻 ${C_BOLD}Хост:${C_RESET}          $(hostname) ($SYSTEM_TYPE)"
+    echo -e " 🌐 ${C_BOLD}Часовой пояс:${C_RESET}  $current_tz"
+    echo -e " 👤 ${C_BOLD}Администратор:${C_RESET} $active_user"
+    echo -e "${C_CYAN}-----------------------------------------------------------------${C_RESET}"
+    echo -e " 🔒 ${C_BOLD}Порт SSH:${C_RESET}      $ssh_port"
+    echo -e " 🚫 ${C_BOLD}Вход root по SSH:${C_RESET} $( [ "$root_ssh" = "no" ] && echo -e "${C_GREEN}Запрещен${C_RESET}" || echo -e "${C_RED}Разрешен${C_RESET}" )"
+    echo -e " 🔑 ${C_BOLD}Вход по паролю:${C_RESET}   $( [ "$pass_auth" = "no" ] && echo -e "${C_GREEN}Отключен (Только ключи)${C_RESET}" || echo -e "${C_YELLOW}Включен${C_RESET}" )"
+    echo -e "${C_CYAN}-----------------------------------------------------------------${C_RESET}"
+    echo -e " 🧱 ${C_BOLD}Брандмауэр UFW:${C_RESET} $ufw_st"
+    echo -e " 🔗 ${C_BOLD}Сеть Tailscale:${C_RESET} $ts_st"
+    echo -e " 🧹 ${C_BOLD}Журналы ОС:${C_RESET}    $journal_st"
+    echo -e " 💾 ${C_BOLD}Файл подкачки:${C_RESET}  $swap_st"
+    echo -e "${C_CYAN}=================================================================${C_RESET}"
 }
 
 # 18. Роутер-режим Одноплатного компьютера

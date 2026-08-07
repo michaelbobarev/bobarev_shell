@@ -1110,6 +1110,11 @@ ETHTOOL_SVC_EOF
     done
 }
 
+# Вспомогательная функция для авто-вызова Tailscale из опции A
+mod_tailscale_auto() {
+    mod_tailscale "auto"
+}
+
 # 11. Отключение системного логирования (С АВТО-ОЧИСТКОЙ ПРИ ПЕРЕЗАГРУЗКЕ И APT)
 mod_disable_logging() {
     echo -e "${C_CYAN}🧹 === 11/18. ОТКЛЮЧЕНИЕ СИСТЕМНОГО ЛОГИРОВАНИЯ И АУДИТА ===${C_RESET}"
@@ -1968,10 +1973,7 @@ while true; do
         a|A)
             echo "🚀 ЗАПУСК ПОЛНОЙ ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ СЕРВЕРА..."
             local_aborted=false
-            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root "mod_tailscale auto" mod_disable_logging mod_ram_flash_opt; do
-                MODULE_CANCELED=false
-                $m
-                 mod_ram_flash_opt; do
+            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root mod_tailscale_auto mod_disable_logging mod_ram_flash_opt; do
                 MODULE_CANCELED=false
                 $m
                 if [ "$MODULE_CANCELED" = true ]; then

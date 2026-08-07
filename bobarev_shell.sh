@@ -1192,20 +1192,43 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (Компактный и интеллектуальный)
+# 17. Полный аудит сервера (Детальная интеллектуальная диагностика)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
-    echo -e "${C_BOLD}       🔍  ИНТЕЛЛЕКТУАЛЬНЫЙ АУДИТ И СОСТОЯНИЕ СИСТЕМЫ     ${C_RESET}"
-    echo -e "${C_CYAN}=================================================================${C_RESET}"
-
+    echo -e "${C_BOLD}       🔍  ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ АУДИТ И ДИАГНОСТИКА     ${C_RESET}"
+    echo -e "${C_CYAN}=================================================================${C_RESET}\n"
+    
     local active_user
     active_user=$(get_active_user)
+
+    echo -e "${C_BOLD}--- 1. Базовая система и параметры хоста ---${C_RESET}"
     local current_tz
     current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+    echo -e "  • Часовой пояс: ${C_GREEN}$current_tz${C_RESET}"
+    echo -e "  • Имя хоста:    ${C_GREEN}$(hostname)${C_RESET}"
+    
+    if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
+        echo -e "  • Авто-обновления безопасности: ${C_GREEN}✅ Включены${C_RESET}"
+    else
+        echo -e "  • Авто-обновления безопасности: ${C_RED}❌ Отключены${C_RESET} ${C_YELLOW}(💡 Рекомендация: Выполните Пункт 3)${C_RESET}"
+    fi
 
-    # Сбор параметров SSH
+    echo -e "\n${C_BOLD}--- 2. Пользователи и SSH-доступ ---${C_RESET}"
+    echo -e "  • Активный sudo-пользователь: ${C_GREEN}$active_user${C_RESET}"
+    
     local ssh_port="22" root_ssh="yes" pass_auth="yes"
+    local sshd_cmd=$(get_sshd_cmd)
+
+    if [ -n "$sshd_cmd" ]; then
+        local sshd_dump=$($sshd_cmd -T 2>/dev/null || echo "")
+        if [ -n "$sshd_dump" ]; then
+            ssh_port=$(echo "$sshd_dump" | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+            root_ssh=$(echo "$sshd_dump" | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1 || echo "yes")
+            pass_auth=$(echo "$sshd_dump" | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1 || echo "yes")
+        fi
+    fi
+
     if [ -f /etc/ssh/sshd_config.d/99-server-security.conf ]; then
         local conf_port conf_root conf_pass
         conf_port=$(grep -i "^Port " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
@@ -1216,43 +1239,94 @@ mod_server_audit() {
         [ -n "$conf_pass" ] && pass_auth="$conf_pass"
     fi
 
-    # Проверка UFW
-    local ufw_st="${C_RED}Отключен${C_RESET}"
+    echo -e "  • Порт SSH: ${C_GREEN}$ssh_port${C_RESET}"
+    if [ "$root_ssh" = "no" ]; then
+        echo -e "  • Вход root по SSH: ${C_GREEN}✅ Запрещен${C_RESET}"
+    else
+        echo -e "  • Вход root по SSH: ${C_RED}❌ Разрешен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Настройте Пункт 6)${C_RESET}"
+    fi
+
+    if [ "$pass_auth" = "no" ]; then
+        echo -e "  • Вход по паролю SSH: ${C_GREEN}✅ Отключен (Только ключи)${C_RESET}"
+    else
+        echo -e "  • Вход по паролю SSH: ${C_YELLOW}⚠️ Включен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Отключите в Пункте 6)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 3. Защита ядра, сети и BBR (sysctl) ---${C_RESET}"
+    local sysctl_ok=true
+    check_sysctl_param() {
+        local param="$1" expected="$2" name="$3"
+        local val=$(sysctl -n "$param" 2>/dev/null || echo "0")
+        if [ "$val" = "$expected" ]; then
+            echo -e "  • $name ($param = $val): ${C_GREEN}✅ В норме${C_RESET}"
+        else
+            echo -e "  • $name ($param = $val, ожидается $expected): ${C_RED}❌ Не настроено${C_RESET}"
+            sysctl_ok=false
+        fi
+    }
+
+    check_sysctl_param "kernel.dmesg_restrict" "1" "Ограничение dmesg"
+    check_sysctl_param "kernel.kptr_restrict" "2" "Скрытие указателей ядра"
+    check_sysctl_param "net.ipv4.tcp_syncookies" "1" "SYN Cookies"
+    check_sysctl_param "net.ipv4.tcp_congestion_control" "bbr" "Ускорение TCP Google BBR"
+    check_sysctl_param "fs.protected_symlinks" "1" "Защита симлинков"
+
+    if [ "$sysctl_ok" = false ]; then
+        echo -e "  ${C_YELLOW}💡 Рекомендация: Примените защиту ядра и сети в Пункте 7${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 4. Сетевая безопасность и Firewall (UFW) ---${C_RESET}"
     if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-        ufw_st="${C_GREEN}Активен${C_RESET}"
+        echo -e "  • Статус UFW: ${C_GREEN}✅ Активен${C_RESET}"
+    else
+        echo -e "  • Статус UFW: ${C_RED}❌ Не активен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Включите UFW в Пункте 8)${C_RESET}"
     fi
 
-    # Проверка Tailscale
-    local ts_st="${C_YELLOW}Не установлен${C_RESET}"
-    local ts_ip="N/A"
+    echo -e "\n${C_BOLD}--- 5. Состояние учетных записей ---${C_RESET}"
+    local root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "P")
+    if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
+        echo -e "  • Статус пароля root: ${C_GREEN}✅ Заблокирован${C_RESET}"
+    else
+        echo -e "  • Статус пароля root: ${C_RED}❌ Активен${C_RESET} ${C_YELLOW}(💡 Рекомендация: Заблокируйте в Пункте 9)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 6. Настройки сети Tailscale ---${C_RESET}"
     if command -v tailscale &>/dev/null; then
-        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "Не подключен")
-        ts_st="${C_GREEN}Активен ($ts_ip)${C_RESET}"
+        echo -e "  • Пакет Tailscale: ${C_GREEN}✅ Установлен${C_RESET}"
+        local ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
+        echo -e "  • IP-адрес Tailscale: ${C_BLUE}$ts_ip${C_RESET}"
+        if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
+            echo -e "  • Служба GRO-оптимизации: ${C_GREEN}✅ Активна${C_RESET}"
+        else
+            echo -e "  • Служба GRO-оптимизации: ${C_YELLOW}⚠️ Не активна${C_RESET}"
+        fi
+    else
+        echo -e "  • Пакет Tailscale: ${C_YELLOW}⚠️ Не установлен${C_RESET}"
     fi
 
-    # Проверка логирования
-    local journal_st="${C_YELLOW}Включено${C_RESET}"
+    echo -e "\n${C_BOLD}--- 7. Логирование и дисковое пространство ---${C_RESET}"
     local journal_storage=$(grep -E "^\s*Storage=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 || echo "auto")
-    [ "$journal_storage" = "none" ] && journal_st="${C_GREEN}Отключено (Экономия диска)${C_RESET}"
+    if [ "$journal_storage" = "none" ]; then
+        echo -e "  • Логирование journald: ${C_GREEN}✅ Отключено (Экономия ресурса)${C_RESET}"
+    else
+        echo -e "  • Логирование journald: ${C_YELLOW}⚠️ Включено${C_RESET}"
+    fi
+    local var_log_size=$(du -sh /var/log 2>/dev/null | awk '{print $1}' || echo "0")
+    echo -e "  • Размер папки /var/log: ${C_BLUE}$var_log_size${C_RESET}"
 
-    # Проверка Swap
-    local swap_st=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "Отключен")
-    [ -z "$swap_st" ] && swap_st="Отключен"
+    echo -e "\n${C_BOLD}--- 8. Память, Флеш-накопитель и Swap ---${C_RESET}"
+    local swap_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "60")
+    echo -e "  • Параметр swappiness: ${C_BLUE}$swap_swappiness${C_RESET}"
+    if mount | grep " / " | grep -q "noatime"; then
+        echo -e "  • Флаг noatime на корень (/): ${C_GREEN}✅ Включен${C_RESET}"
+    else
+        echo -e "  • Флаг noatime на корень (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET}"
+    fi
+    local current_swap=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "")
+    [ -z "$current_swap" ] && current_swap="Отключен"
+    echo -e "  • Состояние Swap: ${C_BLUE}$current_swap${C_RESET}"
 
-    # Вывод компактного отчета
-    echo -e " 💻 ${C_BOLD}Хост:${C_RESET}          $(hostname) ($SYSTEM_TYPE)"
-    echo -e " 🌐 ${C_BOLD}Часовой пояс:${C_RESET}  $current_tz"
-    echo -e " 👤 ${C_BOLD}Администратор:${C_RESET} $active_user"
-    echo -e "${C_CYAN}-----------------------------------------------------------------${C_RESET}"
-    echo -e " 🔒 ${C_BOLD}Порт SSH:${C_RESET}      $ssh_port"
-    echo -e " 🚫 ${C_BOLD}Вход root по SSH:${C_RESET} $( [ "$root_ssh" = "no" ] && echo -e "${C_GREEN}Запрещен${C_RESET}" || echo -e "${C_RED}Разрешен${C_RESET}" )"
-    echo -e " 🔑 ${C_BOLD}Вход по паролю:${C_RESET}   $( [ "$pass_auth" = "no" ] && echo -e "${C_GREEN}Отключен (Только ключи)${C_RESET}" || echo -e "${C_YELLOW}Включен${C_RESET}" )"
-    echo -e "${C_CYAN}-----------------------------------------------------------------${C_RESET}"
-    echo -e " 🧱 ${C_BOLD}Брандмауэр UFW:${C_RESET} $ufw_st"
-    echo -e " 🔗 ${C_BOLD}Сеть Tailscale:${C_RESET} $ts_st"
-    echo -e " 🧹 ${C_BOLD}Журналы ОС:${C_RESET}    $journal_st"
-    echo -e " 💾 ${C_BOLD}Файл подкачки:${C_RESET}  $swap_st"
-    echo -e "${C_CYAN}=================================================================${C_RESET}"
+    echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
 # 18. Роутер-режим Одноплатного компьютера

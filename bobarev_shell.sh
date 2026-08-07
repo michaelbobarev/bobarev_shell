@@ -825,15 +825,71 @@ mod_ufw() {
     echo -e "${C_GREEN}✅ Межсетевой экран UFW включен (логирование UFW отключено).${C_RESET}"
 }
 
-# 9. Блокировка Root
+# 9. Блокировка и управление паролем Root
 mod_lock_root() {
-    echo -e "${C_CYAN}🔐 === 9/18. БЛОКИРОВКА ПАРОЛЯ ROOT ===${C_RESET}"
-    if [ $(getent group sudo | cut -d: -f4 | tr ',' ' ' | wc -w) -gt 0 ]; then
-        passwd -l root
-        echo -e "${C_GREEN}✅ Пароль root заблокирован.${C_RESET}"
-    else
-        echo -e "${C_YELLOW}⚠️ ВНИМАНИЕ: В группе sudo нет пользователей! Запрет root отменен.${C_RESET}"
+    local mode="${1:-}"
+
+    # Режим автоматической проходки в пункте A
+    if [ "$mode" = "auto" ]; then
+        echo -e "${C_CYAN}🔐 === 9/18. БЛОКИРОВКА ПАРОЛЯ ROOT ===${C_RESET}"
+        if prompt_yn "Заблокировать пароль пользователя root (passwd -l root)?" true; then
+            if [ $(getent group sudo | cut -d: -f4 | tr ',' ' ' | wc -w) -gt 0 ]; then
+                passwd -l root >/dev/null 2>&1 || true
+                echo -e "${C_GREEN}✅ Пароль root заблокирован.${C_RESET}"
+            else
+                echo -e "${C_YELLOW}⚠️ ВНИМАНИЕ: В группе sudo нет пользователей! Запрет root отменен во избежание блокировки доступа.${C_RESET}"
+            fi
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+            echo -e "${C_BLUE}ℹ️ Пароль root оставлен активным по выбору пользователя.${C_RESET}"
+        fi
+        return 0
     fi
+
+    # Обычный интерактивный режим Модуля 9 из Главного Меню
+    echo -e "${C_CYAN}🔐 === 9/18. УПРАВЛЕНИЕ ДОСТУПОМ ROOT ===${C_RESET}"
+    local root_locked
+    root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "P")
+    if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
+        echo -e " Текущий статус пароля root: ${C_GREEN}Заблокирован${C_RESET}"
+    else
+        echo -e " Текущий статус пароля root: ${C_RED}Активен (Разблокирован)${C_RESET}"
+    fi
+
+    echo " Выберите действие:"
+    echo "  1) 🔐 Заблокировать пользователя root (passwd -l root)"
+    echo "  2) 🔓 Разблокировать пользователя root (passwd -u root)"
+    echo "  0) ↩️ Назад"
+    
+    local root_choice
+    read -r -p "Ваш выбор [0-2]: " root_choice < /dev/tty
+    root_choice=$(echo "$root_choice" | tr -d '\r\n\t ')
+
+    case "$root_choice" in
+        1)
+            if [ $(getent group sudo | cut -d: -f4 | tr ',' ' ' | wc -w) -gt 0 ]; then
+                passwd -l root >/dev/null 2>&1 || true
+                echo -e "${C_GREEN}✅ Пароль root заблокирован.${C_RESET}"
+            else
+                echo -e "${C_YELLOW}⚠️ ВНИМАНИЕ: В группе sudo нет пользователей! Запрет root отменен.${C_RESET}"
+            fi
+            ;;
+        2)
+            passwd -u root >/dev/null 2>&1 || true
+            echo -e "${C_GREEN}✅ Пароль root разблокирован.${C_RESET}"
+            ;;
+        0|b|back|назад)
+            echo -e "${C_YELLOW}↩️ Возврат в главное меню...${C_RESET}"
+            ;;
+        *)
+            echo "Пропущено."
+            ;;
+    esac
+}
+
+# Вспомогательная функция для авто-вызова Модуля 9 из опции A
+mod_lock_root_auto() {
+    mod_lock_root "auto"
 }
 
 # 10. Tailscale, GRO-оптимизация, Нативный Web UI & Интерактивная безопасность
@@ -909,7 +965,7 @@ mod_tailscale() {
                     local cur_ip
                     cur_ip=$(tailscale ip -4 2>/dev/null || echo "100.x.x.x")
                     echo -e "${C_GREEN}✅ Узел уже авторизован в Tailscale (IP: $cur_ip).${C_RESET}"
-                    if prompt_yn "Вы хотите выполнить ПОВТОРНАЮ авторизацию (force-reauth)?" false; then
+                    if prompt_yn "Вы хотите выполнить ПОВТОРНУЮ авторизацию (force-reauth)?" false; then
                         local authkey=""
                         prompt_clean "Tailscale Auth Key (Enter для авторизации по ссылке)" authkey
                         if [ "$MODULE_CANCELED" = true ]; then MODULE_CANCELED=false; continue; fi
@@ -1979,7 +2035,7 @@ while true; do
         a|A)
             echo "🚀 ЗАПУСК ПОЛНОЙ ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ СЕРВЕРА..."
             local_aborted=false
-            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root mod_tailscale_auto mod_disable_logging mod_ram_flash_opt; do
+            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_disable_logging mod_ram_flash_opt; do
                 MODULE_CANCELED=false
                 $m
                 if [ "$MODULE_CANCELED" = true ]; then

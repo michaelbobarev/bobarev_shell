@@ -1301,34 +1301,51 @@ mod_server_audit() {
 
     echo -e "\n${C_BOLD}--- 6. Закрытая меш-сеть Tailscale ---${C_RESET}"
     if command -v tailscale &>/dev/null; then
-        echo -e "  • Пакет Tailscale:           ${C_GREEN}✅ Установлен в системе${C_RESET}"
+        echo -e "  • Пакет Tailscale:           ${C_GREEN}✅ Установлен и работает${C_RESET}"
         local ts_name ts_ip ts_exit ts_adv_exit ts_accept ts_stealth
         IFS="|" read -r ts_name _ <<< "$(get_tailscale_whoami)"
-        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "N/A")
-        ts_exit=$(tailscale get exit-node 2>/dev/null || echo "none")
+        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "Нет IP")
+        
+        # Перевод технических данных на человеческий язык
+        ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
+        local ts_exit_human
+        if [ -z "$ts_exit" ] || [ "$ts_exit" = "none" ] || [ "$ts_exit" = "false" ]; then
+            ts_exit_human="Свой интернет (напрямую)"
+        else
+            ts_exit_human="Через чужой узел ($ts_exit)"
+        fi
+        
         ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
+        local ts_adv_exit_human
+        [ "$ts_adv_exit" = "true" ] && ts_adv_exit_human="${C_GREEN}Да (работает как VPN-сервер)${C_RESET}" || ts_adv_exit_human="${C_BLUE}Нет${C_RESET}"
+        
         ts_accept=$(tailscale get accept-routes 2>/dev/null || echo "false")
+        local ts_accept_human
+        [ "$ts_accept" = "true" ] && ts_accept_human="${C_GREEN}Да (видит чужие локалки)${C_RESET}" || ts_accept_human="${C_BLUE}Нет${C_RESET}"
+        
         ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
+        local ts_stealth_human
+        [ "$ts_stealth" = "true" ] && ts_stealth_human="${C_GREEN}Включен (блокирует входящие)${C_RESET}" || ts_stealth_human="${C_BLUE}Выключен (открыт для своих)${C_RESET}"
 
-        echo -e "  • Имя узла (Tailnet Name):   ${C_BLUE}$ts_name${C_RESET}"
-        echo -e "  • Назначенный Tailscale IP:  ${C_BLUE}$ts_ip${C_RESET}"
-        echo -e "  • Внешний Exit-Node:         ${C_BLUE}$ts_exit${C_RESET}"
-        echo -e "  • Анонс Exit-Node сервером:  ${C_BLUE}$ts_adv_exit${C_RESET}"
-        echo -e "  • Прием подсетей (routes):   ${C_BLUE}$ts_accept${C_RESET}"
-        echo -e "  • Стелс-режим (filtering):   ${C_BLUE}$ts_stealth${C_RESET}"
+        echo -e "  • Имя устройства в сети:     ${C_BLUE}$ts_name${C_RESET}"
+        echo -e "  • Внутренний IP-адрес:       ${C_BLUE}$ts_ip${C_RESET}"
+        echo -e "  • Выход в интернет:          ${C_BLUE}$ts_exit_human${C_RESET}"
+        echo -e "  • Раздает свой интернет:     $ts_adv_exit_human"
+        echo -e "  • Доступ к чужим сетям:      $ts_accept_human"
+        echo -e "  • Режим невидимки (Stealth): $ts_stealth_human"
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
-            echo -e "  • Служба GRO-ускорения:      ${C_GREEN}✅ Активна (tailscale-gro.service)${C_RESET}"
+            echo -e "  • Ускорение трафика (GRO):   ${C_GREEN}✅ Работает${C_RESET}"
         else
-            echo -e "  • Служба GRO-ускорения:      ${C_YELLOW}⚠️ Не активна${C_RESET}"
+            echo -e "  • Ускорение трафика (GRO):   ${C_YELLOW}⚠️ Отключено${C_RESET}"
         fi
         if is_tailscale_web_active; then
-            echo -e "  • Встроенный Web UI:         ${C_GREEN}✅ Включен${C_RESET}"
+            echo -e "  • Веб-панель управления:     ${C_GREEN}✅ Доступна по IP${C_RESET}"
         else
-            echo -e "  • Встроенный Web UI:         ${C_BLUE}ℹ️ Отключен${C_RESET}"
+            echo -e "  • Веб-панель управления:     ${C_BLUE}ℹ️ Отключена${C_RESET}"
         fi
     else
-        echo -e "  • Пакет Tailscale:           ${C_YELLOW}⚠️ Не установлен${C_RESET}"
+        echo -e "  • Программа Tailscale:       ${C_YELLOW}⚠️ Не установлена${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 7. Системное логирование и аудит ---${C_RESET}"

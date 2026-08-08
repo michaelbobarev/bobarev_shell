@@ -1560,7 +1560,14 @@ while true; do
     if command -v tailscale &>/dev/null; then
         if is_tailscale_web_active; then ts_main_status="Активна (включая веб-панель)"; else ts_main_status="Активна"; fi
     fi
-    ufw_status=$(ufw status 2>/dev/null | head -n 1 || echo "Неизвестно")
+    
+    # Человекоподобный статус UFW
+    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+        ufw_status="Активен"
+    else
+        ufw_status="Не активен"
+    fi
+    
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
 
     choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ НАСТРОЙКИ СЕРВЕРА И ПК (Bobarev.com)" \

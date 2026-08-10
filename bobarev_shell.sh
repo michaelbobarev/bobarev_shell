@@ -242,7 +242,6 @@ TS_EOF
         silent_run tailscale up --authkey="$authkey" --force-reauth
     else
         echo -e "${C_BLUE}ℹ️ Запрос ссылки авторизации...${C_RESET}"
-        # Убрали silent_run, чтобы Tailscale смог напечатать ссылку на экран!
         tailscale up --force-reauth || true
         echo ""
         read -r -p "Нажмите Enter ПОСЛЕ подтверждения в браузере..." < /dev/tty
@@ -254,16 +253,18 @@ TS_EOF
 }
 
 # ------------------------------------------------------------------------------
-# ФУНКЦИИ ВВОДА ЧЕРЕЗ WHIPTAIL (Безопасность + UX)
+# ФУНКЦИИ ВВОДА ЧЕРЕЗ WHIPTAIL (Безопасность + UX + Адаптивность)
 # ------------------------------------------------------------------------------
 
 prompt_yn() {
     local prompt="$1"
     local default_yes="$2"
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
     if [ "$default_yes" = "true" ]; then
-        if whiptail --title "Подтверждение" --yesno "$prompt" 10 60; then return 0; else return 1; fi
+        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $wt_width; then return 0; else return 1; fi
     else
-        if whiptail --title "Подтверждение" --yesno "$prompt" 10 60 --defaultno; then return 0; else return 1; fi
+        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $wt_width --defaultno; then return 0; else return 1; fi
     fi
 }
 
@@ -272,7 +273,9 @@ prompt_default() {
     local default_val="$2"
     local var_name="$3"
     local val
-    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 60 "$default_val" 3>&1 1>&2 2>&3)
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $wt_width "$default_val" 3>&1 1>&2 2>&3)
     if [ $? -eq 0 ]; then
         printf -v "$var_name" "%s" "${val:-$default_val}"
         return 0
@@ -287,7 +290,9 @@ prompt_clean() {
     local prompt="$1"
     local var_name="$2"
     local val
-    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 60 3>&1 1>&2 2>&3)
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $wt_width 3>&1 1>&2 2>&3)
     if [ $? -eq 0 ]; then
         printf -v "$var_name" "%s" "$val"
         return 0
@@ -409,13 +414,16 @@ mod_user_setup() {
     fi
     usermod -aG sudo "$username"
 
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     local pass
-    pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (оставьте пустым для отмены):" 10 60 3>&1 1>&2 2>&3)
+    pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (оставьте пустым для отмены):" 10 $wt_width 3>&1 1>&2 2>&3)
     if [ $? -ne 0 ] || [ -z "$pass" ]; then
         echo -e "${C_YELLOW}ℹ️ Смена пароля пропущена.${C_RESET}"
     else
         local pass_confirm
-        pass_confirm=$(whiptail --title "Подтверждение" --passwordbox "Повторите пароль:" 10 60 3>&1 1>&2 2>&3)
+        pass_confirm=$(whiptail --title "Подтверждение" --passwordbox "Повторите пароль:" 10 $wt_width 3>&1 1>&2 2>&3)
         if [ "$pass" != "$pass_confirm" ]; then
             echo -e "${C_RED}❌ Введенные пароли не совпадают. Попробуйте снова.${C_RESET}"
         else
@@ -465,8 +473,11 @@ mod_ssh_key() {
         fi
     fi
 
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     if [ -z "$pubkey" ]; then
-        pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 60 3>&1 1>&2 2>&3)
+        pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 $wt_width 3>&1 1>&2 2>&3)
         if [ $? -ne 0 ] || [ -z "$pubkey" ]; then
             echo -e "${C_YELLOW}↩️ Отмена. Возврат в главное меню...${C_RESET}"
             return 0
@@ -475,7 +486,7 @@ mod_ssh_key() {
 
     if [ -n "$pubkey" ]; then
         local mode_choice
-        mode_choice=$(whiptail --title "Параметры сохранения" --menu "Выберите действие:" 12 60 2 \
+        mode_choice=$(whiptail --title "Параметры сохранения" --menu "Выберите действие:" 12 $wt_width 2 \
         "1" "Добавить ключ в существующий список" \
         "2" "Полностью перезаписать список ключей" 3>&1 1>&2 2>&3)
         
@@ -504,16 +515,19 @@ mod_ssh_key() {
     echo -e "${C_GREEN}✅ Права доступа к директории ключей проверены и настроены.${C_RESET}"
 }
 
-# 6. Конфигурация SSH
+# 6. Конфигурация SSH (Безопасный drop-in метод)
 mod_ssh_config() {
     echo -e "${C_CYAN}🔒 === 6/18. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
+    
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     backup_file "/etc/ssh/sshd_config"
 
+    # Безопасное отключение старых параметров в главном конфиге для избежания конфликтов
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
 
-    local sshd_cmd
-    sshd_cmd=$(get_sshd_cmd)
-
+    local sshd_cmd=$(get_sshd_cmd)
     local active_ssh_port="22"
     if [ -n "$sshd_cmd" ]; then
         active_ssh_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
@@ -527,7 +541,7 @@ mod_ssh_config() {
         port=$(echo "$port" | tr -dc '0-9')
 
         if [ -z "$port" ]; then
-            whiptail --msgbox "Ошибка: Значение порта должно состоять только из цифр. Попробуйте снова." 8 40
+            whiptail --msgbox "Ошибка: Значение порта должно состоять только из цифр. Попробуйте снова." 8 $wt_width
             continue
         fi
 
@@ -540,30 +554,33 @@ mod_ssh_config() {
         break
     done
 
+    local active_user=$(get_active_user)
+    local user_home=$(getent passwd "$active_user" | cut -d: -f6)
+    [ -z "$user_home" ] && user_home="/home/$active_user"
+    
     local pass_auth_val="yes"
     local kbd_auth_val="yes"
 
-    if prompt_yn "Отключить авторизацию по паролю (разрешить доступ ТОЛЬКО по привязанным ключам)?" "false"; then
-        local has_any_key=false
-        if [ -s /root/.ssh/authorized_keys ]; then
-            has_any_key=true
-        else
-            for user_home in /home/*; do
-                if [ -s "$user_home/.ssh/authorized_keys" ]; then
-                    has_any_key=true
-                    break
-                fi
-            done
-        fi
-
-        if [ "$has_any_key" = true ]; then
+    if [ -s "$user_home/.ssh/authorized_keys" ] || [ -s "/root/.ssh/authorized_keys" ]; then
+        if whiptail --title "Подтверждение" --yesno "Отключить авторизацию по паролю\n(разрешить доступ ТОЛЬКО по привязанным ключам)?" 11 $wt_width; then
             pass_auth_val="no"
             kbd_auth_val="no"
-            echo -e "${C_GREEN}✅ Привязанные ключи найдены. Вход по паролю будет отключен.${C_RESET}"
+            echo -e "${C_GREEN}✅ Выбрано: Вход по паролю будет отключен.${C_RESET}"
         else
-            whiptail --msgbox "Внимание: На сервере не найдено ни одного привязанного ключа безопасности!\nВход по паролю ОСТАЕТСЯ ВКЛЮЧЕННЫМ для предотвращения полной потери доступа." 10 60
-            echo -e "${C_YELLOW}⚠️ Вход по паролю сохранен.${C_RESET}"
+            echo -e "${C_YELLOW}⚠️ Выбрано: Вход по паролю оставлен включенным.${C_RESET}"
         fi
+    else
+        whiptail --msgbox "Внимание: На сервере не найдено ни одного привязанного ключа безопасности!\nВход по паролю ОСТАЕТСЯ ВКЛЮЧЕННЫМ для предотвращения полной потери доступа." 11 $wt_width
+        echo -e "${C_YELLOW}⚠️ Вход по паролю сохранен.${C_RESET}"
+    fi
+
+    local disable_root="no"
+    if whiptail --title "Подтверждение" --yesno "Запретить прямой вход для пользователя root по SSH?" 11 $wt_width; then
+        disable_root="no"
+        echo -e "${C_GREEN}✅ Выбрано: Вход для root запрещен.${C_RESET}"
+    else
+        disable_root="yes"
+        echo -e "${C_YELLOW}⚠️ Выбрано: Вход для root разрешен.${C_RESET}"
     fi
 
     mkdir -p /etc/ssh/sshd_config.d
@@ -579,11 +596,14 @@ mod_ssh_config() {
         ts_restrict_comment="# SSH via Tailscale only"
     fi
 
-    tee /etc/ssh/sshd_config.d/99-server-security.conf > /dev/null << SSH_HARDENING_EOF
+    echo -e "${C_BLUE}⚙️ Применение параметров безопасности...${C_RESET}"
+    local conf_file="/etc/ssh/sshd_config.d/99-server-security.conf"
+    
+    tee "$conf_file" > /dev/null << SSH_HARDENING_EOF
 # Server Security Hardening Configuration
 $ts_restrict_comment
 Port $port
-PermitRootLogin no
+PermitRootLogin $disable_root
 PubkeyAuthentication yes
 PasswordAuthentication $pass_auth_val
 KbdInteractiveAuthentication $kbd_auth_val
@@ -636,7 +656,8 @@ SSH_HARDENING_EOF
         echo -e "${C_GREEN}✅ Служба удаленного доступа успешно перезапущена с новыми параметрами.${C_RESET}"
     else
         echo -e "${C_RED}❌ Ошибка применения параметров безопасности! Выполнен откат изменений...${C_RESET}"
-        rm -f /etc/ssh/sshd_config.d/99-server-security.conf
+        rm -f "$conf_file"
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
     fi
 }
 
@@ -762,8 +783,12 @@ mod_lock_root() {
     fi
 
     echo -e "${C_CYAN}🔐 === 9/18. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
+    
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     local root_choice
-    root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 60 2 \
+    root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $wt_width 2 \
     "1" "Заблокировать" \
     "2" "Разблокировать" 3>&1 1>&2 2>&3)
     
@@ -792,9 +817,12 @@ mod_tailscale() {
         return 0
     fi
 
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     while true; do
         local ts_choice
-        ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 75 9 \
+        ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $wt_width 9 \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза (Exit Node)" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -827,7 +855,7 @@ mod_tailscale() {
                 pause_enter
                 ;;
             2)
-                local en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 60 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3)
+                local en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $wt_width 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3)
                 if [ $? -eq 0 ]; then
                     case "$en_choice" in
                         1) silent_run tailscale set --advertise-exit-node=true; echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" ;;
@@ -1034,7 +1062,10 @@ PY
 
 # 13. Менеджер Swap
 mod_swap_manager() {
-    local swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 60 3 \
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
+    local swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 $wt_width 3 \
     "1" "Создать базовый объем (2 Гигабайта)" \
     "2" "Указать собственный объем" \
     "3" "Полностью отключить файл подкачки" 3>&1 1>&2 2>&3)
@@ -1073,9 +1104,13 @@ mod_swap_manager() {
 mod_desktop_apps() {
     echo -e "${C_CYAN}🖥️ === 14/18. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
+    # 📱 АДАПТИВНОСТЬ: Вычисляем ширину для мобильных устройств
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     # --- 1. Настройка CPU Governor ---
-    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "Выберите желаемый режим работы (Governor):\nТекущий режим напрямую влияет на скорость работы, нагрев и энергопотребление." 15 75 4 \
-    "1" "⚡ Performance (Максимум, для роутера и высоких нагрузок)" \
+    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "Выберите желаемый режим работы (Governor):\nТекущий режим напрямую влияет на скорость работы, нагрев и энергопотребление." 15 $wt_width 4 \
+    "1" "⚡ Performance (Максимум, для высоких нагрузок)" \
     "2" "⚖️ Ondemand (Нормальный/динамический режим)" \
     "3" "🍃 Powersave (Энергосбережение, низкий нагрев)" \
     "0" "⏭️ Оставить без изменений" 3>&1 1>&2 2>&3)
@@ -1095,11 +1130,9 @@ mod_desktop_apps() {
         silent_run apt-get update
         silent_run apt-get install -yq cpufrequtils
         
-        # Сохраняем настройку для работы после перезагрузки
         echo "GOVERNOR=\"$selected_gov\"" > /etc/default/cpufrequtils
         systemctl restart cpufrequtils 2>/dev/null || true
         
-        # Применяем мгновенно без перезагрузки
         for cpu in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
             [ -f "$cpu" ] && echo "$selected_gov" > "$cpu" 2>/dev/null
         done
@@ -1109,16 +1142,14 @@ mod_desktop_apps() {
     fi
 
     # --- 2. Установка трей-апплетов ---
-    if whiptail --title "Графическое окружение" --yesno "Установить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом, например, Debian XFCE)." 12 75; then
+    if whiptail --title "Графическое окружение" --yesno "Установить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом)." 12 $wt_width; then
         echo -e "${C_BLUE}📦 Установка утилит для графического интерфейса...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         silent_run apt-get update
         silent_run apt-get install -yq network-manager-gnome pasystray blueman cbatticon
 
-        local target_user
-        target_user=$(get_active_user)
-        local target_home
-        target_home=$(getent passwd "$target_user" | cut -d: -f6)
+        local target_user=$(get_active_user)
+        local target_home=$(getent passwd "$target_user" | cut -d: -f6)
         [ -z "$target_home" ] && target_home="/home/$target_user"
 
         local autostart_dir="$target_home/.config/autostart"
@@ -1131,7 +1162,6 @@ Name=Network Manager
 Exec=nm-applet
 X-GNOME-Autostart-enabled=true
 EOF
-
         cat <<EOF > "$autostart_dir/pasystray.desktop"
 [Desktop Entry]
 Type=Application
@@ -1139,7 +1169,6 @@ Name=PulseAudio Tray
 Exec=pasystray
 X-GNOME-Autostart-enabled=true
 EOF
-
         cat <<EOF > "$autostart_dir/blueman.desktop"
 [Desktop Entry]
 Type=Application
@@ -1147,7 +1176,6 @@ Name=Bluetooth Manager
 Exec=blueman-applet
 X-GNOME-Autostart-enabled=true
 EOF
-
         cat <<EOF > "$autostart_dir/cbatticon.desktop"
 [Desktop Entry]
 Type=Application
@@ -1242,12 +1270,10 @@ mod_server_audit() {
     echo -e "${C_BOLD}       🔍  ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ АУДИТ И ДИАГНОСТИКА     ${C_RESET}"
     echo -e "${C_CYAN}=================================================================${C_RESET}\n"
     
-    local active_user
-    active_user=$(get_active_user)
+    local active_user=$(get_active_user)
 
     echo -e "${C_BOLD}--- 1. Базовая система, хост и обновления ---${C_RESET}"
-    local current_tz
-    current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+    local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
     echo -e "  • Часовой пояс:              ${C_GREEN}$current_tz${C_RESET}"
     echo -e "  • Имя хоста:                 ${C_GREEN}$(hostname)${C_RESET}"
     echo -e "  • Тип системы (окружение):   ${C_BLUE}$SYSTEM_TYPE${C_RESET}"
@@ -1276,16 +1302,12 @@ mod_server_audit() {
     fi
 
     local cpu_gov="Неизвестно"
-    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
-        cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
-    fi
+    [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ] && cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
 
     local cpu_freq="Неизвестно"
     if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]; then
         local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)
-        if [ -n "$raw_freq" ]; then
-            cpu_freq="$(awk "BEGIN {printf \"%d MHz\", $raw_freq/1000}")"
-        fi
+        [ -n "$raw_freq" ] && cpu_freq="$(awk "BEGIN {printf \"%d MHz\", $raw_freq/1000}")"
     fi
     
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
@@ -1303,8 +1325,7 @@ mod_server_audit() {
         echo -e "  • Права Sudo для $active_user:  ${C_BLUE}ℹ️ Стандартный запрос пароля${C_RESET}"
     fi
 
-    local root_locked
-    root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "P")
+    local root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "P")
     if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
         echo -e "  • Статус учетной записи root: ${C_GREEN}✅ Заблокирована (безопасно)${C_RESET}"
     else
@@ -1314,10 +1335,9 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
     local ssh_port="22" root_ssh="yes" pass_auth="yes"
     if [ -f /etc/ssh/sshd_config.d/99-server-security.conf ]; then
-        local conf_port conf_root conf_pass
-        conf_port=$(grep -i "^Port " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
-        conf_root=$(grep -i "^PermitRootLogin " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
-        conf_pass=$(grep -i "^PasswordAuthentication " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
+        local conf_port=$(grep -i "^Port " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
+        local conf_root=$(grep -i "^PermitRootLogin " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
+        local conf_pass=$(grep -i "^PasswordAuthentication " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
         [ -n "$conf_port" ] && ssh_port="$conf_port"
         [ -n "$conf_root" ] && root_ssh="$conf_root"
         [ -n "$conf_pass" ] && pass_auth="$conf_pass"
@@ -1406,7 +1426,6 @@ mod_server_audit() {
             speed="Не определена"
         fi
         
-        # Читаем статистику прямо из ядра (суммируем rx и tx)
         local rx_err=$(cat /sys/class/net/"$iface"/statistics/rx_errors 2>/dev/null || echo "0")
         local tx_err=$(cat /sys/class/net/"$iface"/statistics/tx_errors 2>/dev/null || echo "0")
         local rx_drop=$(cat /sys/class/net/"$iface"/statistics/rx_dropped 2>/dev/null || echo "0")
@@ -1415,23 +1434,16 @@ mod_server_audit() {
         local total_err=$((rx_err + tx_err))
         local total_drop=$((rx_drop + tx_drop))
         
-        # Форматируем вывод с цветовой индикацией
         local err_str="${C_GREEN}0 ✅${C_RESET}"
-        if [ "$total_err" -gt 0 ]; then
-            err_str="${C_RED}$total_err ❌${C_RESET}"
-        fi
+        [ "$total_err" -gt 0 ] && err_str="${C_RED}$total_err ❌${C_RESET}"
         
         local drop_str="${C_GREEN}0 ✅${C_RESET}"
-        if [ "$total_drop" -gt 0 ]; then
-            # Для виртуальных интерфейсов дропы часто нормальны, поэтому предупреждение желтое, а не красное
-            drop_str="${C_YELLOW}$total_drop ⚠️${C_RESET}"
-        fi
+        [ "$total_drop" -gt 0 ] && drop_str="${C_YELLOW}$total_drop ⚠️${C_RESET}"
 
         echo -e "  • Интерфейс ${C_BLUE}$iface${C_RESET} (MTU: ${C_GREEN}$mtu${C_RESET}, Линк: ${C_GREEN}$speed${C_RESET})"
         echo -e "    └─ Пакеты: Ошибки (Errors) = $err_str | Отброшены (Dropped) = $drop_str"
     done
 
-    # Диагностика фиксации MTU/MSS для режима роутера
     echo -e ""
     if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then
         echo -e "  • Фиксация MSS (MSS Clamping): ${C_GREEN}✅ Работает (предотвращает зависание сайтов)${C_RESET}"
@@ -1462,7 +1474,9 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# === ЗАПУСК ГЛАВНОГО МЕНЮ ===
+# ==============================================================================
+# === 🚀 ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
+# ==============================================================================
 while true; do
     ts_main_status="Отсутствует"
     if command -v tailscale &>/dev/null; then
@@ -1478,7 +1492,7 @@ while true; do
     
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
 
-    # === 📱 АДАПТИВНЫЙ ИНТЕРФЕЙС ===
+    # 📱 АДАПТИВНОСТЬ ДЛЯ МЕНЮ
     TERM_COLS=$(tput cols 2>/dev/null || echo 85)
     TERM_LINES=$(tput lines 2>/dev/null || echo 27)
     
@@ -1488,7 +1502,7 @@ while true; do
     WT_MENU=$((WT_HEIGHT - 14))
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
-    choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (Bobarev.com)" \
+    choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz

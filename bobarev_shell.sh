@@ -1455,3 +1455,104 @@ mod_server_audit() {
 
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
+
+# === ЗАПУСК ГЛАВНОГО МЕНЮ ===
+while true; do
+    ts_main_status="Отсутствует"
+    if command -v tailscale &>/dev/null; then
+        if is_tailscale_web_active; then ts_main_status="Активна (включая веб-панель)"; else ts_main_status="Активна"; fi
+    fi
+    
+    # Человекоподобный статус UFW
+    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+        ufw_status="Активен"
+    else
+        ufw_status="Не активен"
+    fi
+    
+    tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+
+    # === 📱 АДАПТИВНЫЙ ИНТЕРФЕЙС ===
+    TERM_COLS=$(tput cols 2>/dev/null || echo 85)
+    TERM_LINES=$(tput lines 2>/dev/null || echo 27)
+    
+    if [ "$TERM_COLS" -lt 85 ]; then WT_WIDTH=$TERM_COLS; else WT_WIDTH=85; fi
+    if [ "$TERM_LINES" -lt 27 ]; then WT_HEIGHT=$TERM_LINES; else WT_HEIGHT=27; fi
+    
+    WT_MENU=$((WT_HEIGHT - 14))
+    if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
+
+    choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (Bobarev.com)" \
+    --menu "\n  💻 Системные данные:
+  • Хост: $(hostname) ($SYSTEM_TYPE)
+  • Часовой пояс: $tz
+  • Статус UFW: $ufw_status
+  • Сеть Tailscale: $ts_main_status
+
+  📌 Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU \
+    "1" "🌐 Часовой пояс" \
+    "2" "🏷️ Имя сервера" \
+    "3" "📦 Обновление компонентов" \
+    "4" "👤 Создание и настройка пользователя" \
+    "5" "🔑 Привязка ключа безопасности" \
+    "6" "🔒 Конфигурация удаленного доступа" \
+    "7" "🛡️ Настройка системной защиты" \
+    "8" "🔥 Управление брандмауэром" \
+    "9" "🔐 Блокировка доступа суперпользователя" \
+    "10" "🔗 Настройка закрытой сети Tailscale" \
+    "11" "🗑️ Отключение системных журналов" \
+    "12" "⚡ Оптимизация памяти" \
+    "13" "💾 Управление файлом подкачки" \
+    "14" "🖥️ Утилиты ПК и режим процессора" \
+    "15" "📺 Сброс видеовыхода HDMI" \
+    "16" "⏱️ Анализ времени загрузки" \
+    "17" "🔍 Интеллектуальный аудит системы" \
+    "18" "📡 Режим локального маршрутизатора" \
+    "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
+    "0" "❌ Завершить работу" 3>&1 1>&2 2>&3)
+
+    if [ $? -ne 0 ] || [ "$choice" = "0" ]; then
+        clear
+        echo "Работа скрипта завершена."
+        exit 0
+    fi
+
+    MODULE_CANCELED=false
+    clear
+
+    case "$choice" in
+        1) mod_timezone; pause_enter ;;
+        2) mod_hostname; pause_enter ;;
+        3) mod_apt_update; pause_enter ;;
+        4) mod_user_setup; pause_enter ;;
+        5) mod_ssh_key; pause_enter ;;
+        6) mod_ssh_config; pause_enter ;;
+        7) mod_hardening; pause_enter ;;
+        8) mod_ufw; pause_enter ;;
+        9) mod_lock_root; pause_enter ;;
+        10) mod_tailscale ;;
+        11) mod_disable_logging; pause_enter ;;
+        12) mod_ram_flash_opt; pause_enter ;;
+        13) mod_swap_manager; pause_enter ;;
+        14) mod_desktop_apps; pause_enter ;;
+        15) mod_hdmi_reset; pause_enter ;;
+        16) mod_boot_diag; pause_enter ;;
+        17) mod_server_audit; pause_enter ;;
+        18) mod_router_sbc; pause_enter ;;
+        A)
+            echo "🚀 ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
+            local_aborted=false
+            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_disable_logging mod_ram_flash_opt; do
+                MODULE_CANCELED=false
+                $m
+                if [ "$MODULE_CANCELED" = true ]; then
+                    echo -e "${C_YELLOW}🛑 Автоматическая настройка прервана.${C_RESET}"
+                    local_aborted=true
+                    break
+                fi
+            done
+            if [ "$local_aborted" = false ]; then echo -e "\n${C_GREEN}🎉 ВСЕ ЭТАПЫ НАСТРОЙКИ УСПЕШНО ЗАВЕРШЕНЫ!${C_RESET}"; fi
+            pause_enter
+            ;;
+    esac
+done

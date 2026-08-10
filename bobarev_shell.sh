@@ -1501,14 +1501,14 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Режим локального маршрутизатора (LAN-шлюз, DHCP, NAT, MSS Clamping)
+# 18. Режим локального маршрутизатора (LAN-шлюз, DHCP, NAT, MSS Clamping, Kill Switch)
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/18. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     
     local term_cols=$(tput cols 2>/dev/null || echo 75)
     local wt_width=$((term_cols < 75 ? term_cols : 75))
 
-    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping и защита от конфликтов. Трафик клиентов пойдет через Tailscale Exit-Node." 12 $wt_width; then
+    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $wt_width; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         return 0
     fi
@@ -1610,6 +1610,18 @@ EOF
     iptables -A FORWARD -i "$lan_if" -j ACCEPT
     iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
+    # 7.5. Параноидальный Kill Switch
+    local wan_if=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+    if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
+        echo -e "${C_BLUE}🛡️ Активация Kill Switch (блокировка прямого выхода через $wan_if)...${C_RESET}"
+        # Удаляем правило, если оно уже было, чтобы не дублировать
+        iptables -D FORWARD -i "$lan_if" -o "$wan_if" -j DROP 2>/dev/null || true
+        # Добавляем в начало цепочки, чтобы отсекать на корню
+        iptables -I FORWARD 1 -i "$lan_if" -o "$wan_if" -j DROP
+    else
+        echo -e "${C_YELLOW}⚠️ WAN интерфейс не определен, Kill Switch пропущен.${C_RESET}"
+    fi
+
     # 8. Сохранение правил брандмауэра
     echo -e "${C_BLUE}💾 Сохранение правил маршрутизации...${C_RESET}"
     mkdir -p /etc/iptables
@@ -1624,6 +1636,9 @@ EOF
     echo -e "  • Открытые порты:      ${C_GREEN}53 (DNS) и 67 (DHCP) разрешены${C_RESET}"
     echo -e "  • Маршрутизация (NAT): ${C_GREEN}Через сеть Tailscale${C_RESET}"
     echo -e "  • MSS Clamping:        ${C_GREEN}Включен (сжатие пакетов)${C_RESET}"
+    if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
+        echo -e "  • Kill Switch:         ${C_GREEN}Включен (Прямой выход через $wan_if заблокирован!)${C_RESET}"
+    fi
 }
 
 # ==============================================================================

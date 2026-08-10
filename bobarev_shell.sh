@@ -1392,7 +1392,7 @@ mod_server_audit() {
         echo -e "  • Программа Tailscale:       ${C_YELLOW}⚠️ Не установлена${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Диагностика Роутера ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Диагностика (Stats) ---${C_RESET}"
     local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}')
     for iface in $active_ifs; do
         local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")
@@ -1401,14 +1401,38 @@ mod_server_audit() {
         if [ "$speed" != "N/A" ] && [ "$speed" -gt 0 ] 2>/dev/null; then
             speed="${speed} Мбит/с"
         elif [ "$iface" = "tailscale0" ] || [[ "$iface" == *"wg"* ]] || [[ "$iface" == *"lo"* ]]; then
-            speed="Виртуальный интерфейс"
+            speed="Виртуальный линк"
         else
             speed="Не определена"
         fi
-        echo -e "  • Интерфейс ${C_BLUE}$iface${C_RESET}: MTU = ${C_GREEN}$mtu${C_RESET} | Линк = ${C_GREEN}$speed${C_RESET}"
+        
+        # Читаем статистику прямо из ядра (суммируем rx и tx)
+        local rx_err=$(cat /sys/class/net/"$iface"/statistics/rx_errors 2>/dev/null || echo "0")
+        local tx_err=$(cat /sys/class/net/"$iface"/statistics/tx_errors 2>/dev/null || echo "0")
+        local rx_drop=$(cat /sys/class/net/"$iface"/statistics/rx_dropped 2>/dev/null || echo "0")
+        local tx_drop=$(cat /sys/class/net/"$iface"/statistics/tx_dropped 2>/dev/null || echo "0")
+        
+        local total_err=$((rx_err + tx_err))
+        local total_drop=$((rx_drop + tx_drop))
+        
+        # Форматируем вывод с цветовой индикацией
+        local err_str="${C_GREEN}0 ✅${C_RESET}"
+        if [ "$total_err" -gt 0 ]; then
+            err_str="${C_RED}$total_err ❌${C_RESET}"
+        fi
+        
+        local drop_str="${C_GREEN}0 ✅${C_RESET}"
+        if [ "$total_drop" -gt 0 ]; then
+            # Для виртуальных интерфейсов дропы часто нормальны, поэтому предупреждение желтое, а не красное
+            drop_str="${C_YELLOW}$total_drop ⚠️${C_RESET}"
+        fi
+
+        echo -e "  • Интерфейс ${C_BLUE}$iface${C_RESET} (MTU: ${C_GREEN}$mtu${C_RESET}, Линк: ${C_GREEN}$speed${C_RESET})"
+        echo -e "    └─ Пакеты: Ошибки (Errors) = $err_str | Отброшены (Dropped) = $drop_str"
     done
 
     # Диагностика фиксации MTU/MSS для режима роутера
+    echo -e ""
     if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then
         echo -e "  • Фиксация MSS (MSS Clamping): ${C_GREEN}✅ Работает (предотвращает зависание сайтов)${C_RESET}"
     else
@@ -1431,262 +1455,3 @@ mod_server_audit() {
 
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
-
-# 18. Роутер-режим Одноплатного компьютера
-mod_router_sbc() {
-    echo -e "${C_CYAN}📡 === 18/18. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА (LAN-ШЛЮЗ) ===${C_RESET}"
-
-    local default_lan_if
-    default_lan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | head -n 1 || echo "eth0")
-    local default_wan_if
-    default_wan_if=$(ip -br link show | grep -v -E 'lo|tailscale' | awk '{print $1}' | tail -n 1 || echo "eth1")
-
-    local lan_iface="" wan_iface="" ts_iface="" lan_ip="" lan_cidr="" dhcp_start="" dhcp_end=""
-    
-    prompt_default "LAN интерфейс (подсеть клиентов):" "$default_lan_if" lan_iface
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    prompt_default "WAN интерфейс (провайдер):" "$default_wan_if" wan_iface
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    prompt_default "Tailscale интерфейс:" "tailscale0" ts_iface
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    local wan_subnet
-    wan_subnet=$(get_interface_subnet "$wan_iface")
-
-    while true; do
-        local default_lan_ip="192.168.50.1"
-        if [ -n "$wan_subnet" ] && [ "$wan_subnet" = "192.168.50" ]; then
-            default_lan_ip="10.50.0.1"
-        fi
-
-        prompt_default "IP-адрес роутера в LAN:" "$default_lan_ip" lan_ip
-        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-        local lan_subnet
-        lan_subnet=$(echo "$lan_ip" | cut -d. -f1-3)
-
-        if [ -n "$wan_subnet" ] && [ "$wan_subnet" = "$lan_subnet" ]; then
-            whiptail --msgbox "⚠️ КОНФЛИКТ ПОДСЕТЕЙ!\nИнтерфейс WAN ($wan_iface) находится в подсети ${wan_subnet}.x, которая совпадает с LAN!\nУкажите другую подсеть для LAN." 10 60
-            continue
-        fi
-        break
-    done
-
-    prompt_default "Маска подсети LAN CIDR:" "24" lan_cidr
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    local lan_prefix
-    lan_prefix=$(echo "$lan_ip" | cut -d. -f1-3)
-
-    prompt_default "Начальный IP DHCP диапазона:" "${lan_prefix}.10" dhcp_start
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    prompt_default "Конечный IP DHCP диапазона:" "${lan_prefix}.254" dhcp_end
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-
-    echo -e "${C_BLUE}🌐 [1/4] Включение маршрутизации в ядре...${C_RESET}"
-    backup_file "/etc/sysctl.d/99-tailscale-forward.conf"
-    mkdir -p /etc/sysctl.d
-    cat > /etc/sysctl.d/99-tailscale-forward.conf <<EOF
-net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
-EOF
-    sysctl --system >/dev/null
-
-    echo -e "${C_BLUE}⚙️ [2/4] Настройка LAN-интерфейса...${C_RESET}"
-    mkdir -p /etc/systemd/network
-    backup_file "/etc/systemd/network/10-lan.network"
-    cat > /etc/systemd/network/10-lan.network <<EOF
-[Match]
-Name=$lan_iface
-
-[Link]
-IgnoreCarrier=yes
-
-[Network]
-Address=$lan_ip/$lan_cidr
-LinkLocalAddressing=no
-ConfigureWithoutCarrier=yes
-EOF
-    silent_run systemctl restart systemd-networkd
-
-    echo -e "${C_BLUE}📦 [3/4] Установка и настройка DHCP сервера (dnsmasq)...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    silent_run apt-get update
-    silent_run apt-get install -yq dnsmasq
-    mkdir -p /etc/dnsmasq.d
-    backup_file "/etc/dnsmasq.d/lan-dhcp.conf"
-    cat > /etc/dnsmasq.d/lan-dhcp.conf <<EOF
-interface=$lan_iface
-bind-interfaces
-dhcp-range=$dhcp_start,$dhcp_end,255.255.255.0,12h
-dhcp-option=3,$lan_ip
-dhcp-option=6,1.1.1.1,8.8.8.8
-EOF
-    silent_run systemctl restart dnsmasq
-
-    echo -e "${C_BLUE}🧱 [4/4] Настройка правил брандмауэра...${C_RESET}"
-    silent_run ufw allow in on "$lan_iface" to any port 67 proto udp
-    silent_run ufw allow in on "$lan_iface" to any port 53 proto udp
-    silent_run ufw allow in on "$lan_iface" to any port 53 proto tcp
-    silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
-
-    local before_rules="/etc/ufw/before.rules"
-    backup_file "$before_rules"
-
-    python3 - "$lan_iface" "$wan_iface" "$ts_iface" <<'PY'
-import sys
-from pathlib import Path
-lan_iface = sys.argv[1]
-wan_iface = sys.argv[2]
-ts_iface = sys.argv[3]
-path = Path("/etc/ufw/before.rules")
-content = path.read_text()
-start = content.find("# --- Router Rules BEGIN ---")
-if start != -1:
-    end = content.find("# --- Router Rules END ---", start)
-    if end != -1:
-        end += len("# --- Router Rules END ---")
-        content = content[:start] + content[end:]
-router_block = f"""# --- Router Rules BEGIN ---
-*mangle
-:PREROUTING ACCEPT [0:0]
-:INPUT ACCEPT [0:0]
-:FORWARD ACCEPT [0:0]
-:OUTPUT ACCEPT [0:0]
-:POSTROUTING ACCEPT [0:0]
--A FORWARD -o {ts_iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-COMMIT
-*nat
-:PREROUTING ACCEPT [0:0]
-:POSTROUTING ACCEPT [0:0]
--A POSTROUTING -o {ts_iface} -j MASQUERADE
-COMMIT
-*filter
-:ufw-before-input - [0:0]
-:ufw-before-output - [0:0]
-:ufw-before-forward - [0:0]
--A ufw-before-forward -i {ts_iface} -o {lan_iface} -m state --state RELATED,ESTABLISHED -j ACCEPT
--A ufw-before-forward -i {lan_iface} -o {ts_iface} -j ACCEPT
--A ufw-before-forward -i {lan_iface} -o {wan_iface} -j DROP
-COMMIT
-# --- Router Rules END ---
-"""
-content = router_block + "\n" + content
-path.write_text(content)
-PY
-
-    silent_run ufw reload
-    echo -e "${C_GREEN}✅ Конфигурация локального маршрутизатора применена.${C_RESET}"
-}
-
-# ==============================================================================
-# ГЛАВНОЕ МЕНЮ И ЦИКЛ УПРАВЛЕНИЯ (WHIPTAIL UI)
-# ==============================================================================
-
-while true; do
-    ts_main_status="Отсутствует"
-    if command -v tailscale &>/dev/null; then
-        if is_tailscale_web_active; then ts_main_status="Активна (включая веб-панель)"; else ts_main_status="Активна"; fi
-    fi
-    
-    # Человекоподобный статус UFW
-    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-        ufw_status="Активен"
-    else
-        ufw_status="Не активен"
-    fi
-    
-    tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
-
-    # === 📱 АДАПТИВНЫЙ ИНТЕРФЕЙС ===
-    # Считываем реальную ширину и высоту экрана SSH-клиента
-    TERM_COLS=$(tput cols 2>/dev/null || echo 85)
-    TERM_LINES=$(tput lines 2>/dev/null || echo 27)
-    
-    # Если экран телефона узкий, сжимаем окно. Иначе оставляем 85 (для ПК).
-    if [ "$TERM_COLS" -lt 85 ]; then WT_WIDTH=$TERM_COLS; else WT_WIDTH=85; fi
-    
-    # Если клавиатура съела высоту экрана, уменьшаем окно. Иначе 27.
-    if [ "$TERM_LINES" -lt 27 ]; then WT_HEIGHT=$TERM_LINES; else WT_HEIGHT=27; fi
-    
-    # Автоматически высчитываем место для пунктов меню
-    WT_MENU=$((WT_HEIGHT - 14))
-    if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
-
-    choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (Bobarev.com)" \
-    --menu "\n  💻 Системные данные:
-  • Хост: $(hostname) ($SYSTEM_TYPE)
-  • Часовой пояс: $tz
-  • Статус UFW: $ufw_status
-  • Сеть Tailscale: $ts_main_status
-
-  📌 Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU \
-    "1" "🌐 Часовой пояс" \
-    "2" "🏷️ Имя сервера" \
-    "3" "📦 Обновление компонентов" \
-    "4" "👤 Создание и настройка пользователя" \
-    "5" "🔑 Привязка ключа безопасности" \
-    "6" "🔒 Конфигурация удаленного доступа" \
-    "7" "🛡️ Настройка системной защиты" \
-    "8" "🔥 Управление брандмауэром" \
-    "9" "🔐 Блокировка доступа суперпользователя" \
-    "10" "🔗 Настройка закрытой сети Tailscale" \
-    "11" "🗑️ Отключение системных журналов" \
-    "12" "⚡ Оптимизация памяти" \
-    "13" "💾 Управление файлом подкачки" \
-    "14" "🖥️ Утилиты ПК и режим процессора" \
-    "15" "📺 Сброс видеовыхода HDMI" \
-    "16" "⏱️ Анализ времени загрузки" \
-    "17" "🔍 Интеллектуальный аудит системы" \
-    "18" "📡 Режим локального маршрутизатора" \
-    "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
-    "0" "❌ Завершить работу" 3>&1 1>&2 2>&3)
-
-    if [ $? -ne 0 ] || [ "$choice" = "0" ]; then
-        clear
-        echo "Работа скрипта завершена."
-        exit 0
-    fi
-
-    MODULE_CANCELED=false
-    clear
-
-    case "$choice" in
-        1) mod_timezone; pause_enter ;;
-        2) mod_hostname; pause_enter ;;
-        3) mod_apt_update; pause_enter ;;
-        4) mod_user_setup; pause_enter ;;
-        5) mod_ssh_key; pause_enter ;;
-        6) mod_ssh_config; pause_enter ;;
-        7) mod_hardening; pause_enter ;;
-        8) mod_ufw; pause_enter ;;
-        9) mod_lock_root; pause_enter ;;
-        10) mod_tailscale ;;
-        11) mod_disable_logging; pause_enter ;;
-        12) mod_ram_flash_opt; pause_enter ;;
-        13) mod_swap_manager; pause_enter ;;
-        14) mod_desktop_apps; pause_enter ;;
-        15) mod_hdmi_reset; pause_enter ;;
-        16) mod_boot_diag; pause_enter ;;
-        17) mod_server_audit; pause_enter ;;
-        18) mod_router_sbc; pause_enter ;;
-        A)
-            echo "🚀 ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
-            local_aborted=false
-            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_disable_logging mod_ram_flash_opt; do
-                MODULE_CANCELED=false
-                $m
-                if [ "$MODULE_CANCELED" = true ]; then
-                    echo -e "${C_YELLOW}🛑 Автоматическая настройка прервана.${C_RESET}"
-                    local_aborted=true
-                    break
-                fi
-            done
-            if [ "$local_aborted" = false ]; then echo -e "\n${C_GREEN}🎉 ВСЕ ЭТАПЫ НАСТРОЙКИ УСПЕШНО ЗАВЕРШЕНЫ!${C_RESET}"; fi
-            pause_enter
-            ;;
-    esac
-done

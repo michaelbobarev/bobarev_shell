@@ -1501,6 +1501,131 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
+# 18. Режим локального маршрутизатора (LAN-шлюз, DHCP, NAT, MSS Clamping)
+mod_router_sbc() {
+    echo -e "${C_CYAN}📡 === 18/18. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
+    
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
+    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping и защита от конфликтов. Трафик клиентов пойдет через Tailscale Exit-Node." 12 $wt_width; then
+        echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
+        return 0
+    fi
+
+    # 1. Поиск интерфейсов (исключаем lo, tailscale и виртуальные)
+    local available_ifs=$(ip -br link show | grep -vE "DOWN|tailscale0|lo|wg" | awk '{print $1}')
+    if [ -z "$available_ifs" ]; then
+        whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $wt_width
+        return 0
+    fi
+
+    local lan_if=""
+    prompt_clean "Введите имя LAN-интерфейса, к которому подключены клиенты (Доступно: $(echo $available_ifs | tr '\n' ' ')): " lan_if
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$lan_if" ]; then return 0; fi
+
+    # 2. Настройка подсети (Защита от конфликтов)
+    local lan_ip="192.168.199.1"
+    prompt_clean "Введите статический IP для этого шлюза (например, 192.168.199.1):" lan_ip
+    [ "$MODULE_CANCELED" = true ] && return 0
+
+    if [[ "$lan_ip" == 100.* ]]; then
+        whiptail --msgbox "⚠️ ВНИМАНИЕ: Подсеть 100.x.x.x конфликтует с адресацией Tailscale (CGNAT). Пожалуйста, используйте диапазоны 192.168.x.x или 10.x.x.x!" 10 $wt_width
+        return 0
+    fi
+
+    local subnet_prefix=$(echo "$lan_ip" | cut -d. -f1-3)
+    local dhcp_start="${subnet_prefix}.50"
+    local dhcp_end="${subnet_prefix}.200"
+
+    echo -e "${C_BLUE}📦 Установка необходимых пакетов (dnsmasq, iptables)...${C_RESET}"
+    export DEBIAN_FRONTEND=noninteractive
+    silent_run apt-get update
+    silent_run apt-get install -yq dnsmasq iptables iptables-persistent network-manager
+
+    # 3. Привязка статического IP к интерфейсу
+    echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
+    if command -v nmcli &>/dev/null; then
+        silent_run nmcli con delete "$lan_if" 2>/dev/null
+        silent_run nmcli con add type ethernet ifname "$lan_if" con-name "$lan_if" ipv4.method manual ipv4.addresses "$lan_ip/24" ipv4.dns "8.8.8.8,1.1.1.1"
+        silent_run nmcli con up "$lan_if"
+    else
+        ip addr flush dev "$lan_if" 2>/dev/null
+        ip addr add "$lan_ip/24" dev "$lan_if"
+        ip link set dev "$lan_if" up
+    fi
+
+    # 4. Настройка DHCP и DNS (dnsmasq)
+    echo -e "${C_BLUE}⚙️ Настройка сервера DHCP и DNS...${C_RESET}"
+    backup_file "/etc/dnsmasq.conf"
+    
+    if systemctl is-active --quiet systemd-resolved; then
+        sed -i 's/#DNSStubListener=yes/DNSStubListener=no/' /etc/systemd/resolved.conf 2>/dev/null
+        systemctl restart systemd-resolved 2>/dev/null
+    fi
+
+    cat <<EOF > /etc/dnsmasq.conf
+domain-needed
+bogus-priv
+interface=$lan_if
+bind-interfaces
+listen-address=$lan_ip
+dhcp-range=$dhcp_start,$dhcp_end,12h
+dhcp-option=3,$lan_ip
+dhcp-option=6,8.8.8.8,1.1.1.1
+EOF
+    systemctl unmask dnsmasq 2>/dev/null || true
+    systemctl enable dnsmasq 2>/dev/null
+    systemctl restart dnsmasq || echo -e "${C_YELLOW}⚠️ Ошибка запуска dnsmasq. Проверьте конфликты порта 53.${C_RESET}"
+
+    # 5. Открытие портов 53 (DNS) и 67 (DHCP) в брандмауэре
+    echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра для локальной сети...${C_RESET}"
+    if command -v ufw &>/dev/null; then
+        silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
+        silent_run ufw allow in on "$lan_if" to any port 53 proto udp comment 'LAN DNS (UDP)'
+        silent_run ufw allow in on "$lan_if" to any port 53 proto tcp comment 'LAN DNS (TCP)'
+    fi
+    
+    # Прямые правила iptables для приема локального трафика
+    iptables -D INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT 2>/dev/null || true
+    iptables -D INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+    iptables -I INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT
+    iptables -I INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT
+
+    # 6. Маршрутизация (IP Forwarding) и NAT
+    echo -e "${C_BLUE}⚙️ Включение маршрутизации и трансляции адресов (NAT)...${C_RESET}"
+    sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
+    sysctl -p /etc/sysctl.d/99-router.conf >/dev/null 2>&1
+
+    iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+    
+    # 7. Фиксация MSS (MSS Clamping) и FORWARD
+    if ! iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then
+        iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    fi
+    
+    iptables -D FORWARD -i "$lan_if" -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -i "$lan_if" -j ACCEPT
+    iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+    # 8. Сохранение правил брандмауэра
+    echo -e "${C_BLUE}💾 Сохранение правил маршрутизации...${C_RESET}"
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4
+    if command -v netfilter-persistent &>/dev/null; then
+        silent_run netfilter-persistent save
+    fi
+
+    echo -e "\n${C_GREEN}🎉 Режим маршрутизатора успешно развернут!${C_RESET}"
+    echo -e "  • LAN Интерфейс:       ${C_BLUE}$lan_if ($lan_ip)${C_RESET}"
+    echo -e "  • Пул адресов DHCP:    ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
+    echo -e "  • Открытые порты:      ${C_GREEN}53 (DNS) и 67 (DHCP) разрешены${C_RESET}"
+    echo -e "  • Маршрутизация (NAT): ${C_GREEN}Через сеть Tailscale${C_RESET}"
+    echo -e "  • MSS Clamping:        ${C_GREEN}Включен (сжатие пакетов)${C_RESET}"
+}
+
 # ==============================================================================
 # === 🚀 ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
 # ==============================================================================

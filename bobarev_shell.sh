@@ -1069,22 +1069,62 @@ mod_swap_manager() {
     esac
 }
 
-# 14. PC-утилиты
+# 14. Системные утилиты и режим процессора
 mod_desktop_apps() {
-    echo -e "${C_CYAN}🖥️ === 14/18. УТИЛИТЫ ДЛЯ ПК И АВТОЗАПУСК ===${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update && silent_run apt-get install -yq network-manager-gnome pasystray blueman cbatticon
+    echo -e "${C_CYAN}🖥️ === 14/18. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
-    local target_user
-    target_user=$(get_active_user)
-    local target_home
-    target_home=$(getent passwd "$target_user" | cut -d: -f6)
-    [ -z "$target_home" ] && target_home="/home/$target_user"
+    # --- 1. Настройка CPU Governor ---
+    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "Выберите желаемый режим работы (Governor):\nТекущий режим напрямую влияет на скорость работы, нагрев и энергопотребление." 15 75 4 \
+    "1" "⚡ Performance (Максимум, для роутера и высоких нагрузок)" \
+    "2" "⚖️ Ondemand (Нормальный/динамический режим)" \
+    "3" "🍃 Powersave (Энергосбережение, низкий нагрев)" \
+    "0" "⏭️ Оставить без изменений" 3>&1 1>&2 2>&3)
 
-    local autostart_dir="$target_home/.config/autostart"
-    mkdir -p "$autostart_dir"
+    if [ $? -eq 0 ] && [ "$gov_choice" != "0" ]; then
+        local selected_gov="ondemand"
+        local gov_name="Нормальный (Ondemand)"
+        
+        case "$gov_choice" in
+            1) selected_gov="performance"; gov_name="Максимальный (Performance)" ;;
+            2) selected_gov="ondemand"; gov_name="Нормальный (Ondemand)" ;;
+            3) selected_gov="powersave"; gov_name="Энергосберегающий (Powersave)" ;;
+        esac
 
-    cat <<EOF > "$autostart_dir/nm-applet.desktop"
+        echo -e "${C_BLUE}⚙️ Установка режима процессора: $gov_name...${C_RESET}"
+        export DEBIAN_FRONTEND=noninteractive
+        silent_run apt-get update
+        silent_run apt-get install -yq cpufrequtils
+        
+        # Сохраняем настройку для работы после перезагрузки
+        echo "GOVERNOR=\"$selected_gov\"" > /etc/default/cpufrequtils
+        systemctl restart cpufrequtils 2>/dev/null || true
+        
+        # Применяем мгновенно без перезагрузки
+        for cpu in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+            [ -f "$cpu" ] && echo "$selected_gov" > "$cpu" 2>/dev/null
+        done
+        echo -e "${C_GREEN}✅ Режим процессора изменен на '$selected_gov'.${C_RESET}"
+    else
+        echo -e "${C_YELLOW}⏭️ Настройка режима процессора пропущена.${C_RESET}"
+    fi
+
+    # --- 2. Установка трей-апплетов ---
+    if whiptail --title "Графическое окружение" --yesno "Установить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом, например, Debian XFCE)." 12 75; then
+        echo -e "${C_BLUE}📦 Установка утилит для графического интерфейса...${C_RESET}"
+        export DEBIAN_FRONTEND=noninteractive
+        silent_run apt-get update
+        silent_run apt-get install -yq network-manager-gnome pasystray blueman cbatticon
+
+        local target_user
+        target_user=$(get_active_user)
+        local target_home
+        target_home=$(getent passwd "$target_user" | cut -d: -f6)
+        [ -z "$target_home" ] && target_home="/home/$target_user"
+
+        local autostart_dir="$target_home/.config/autostart"
+        mkdir -p "$autostart_dir"
+
+        cat <<EOF > "$autostart_dir/nm-applet.desktop"
 [Desktop Entry]
 Type=Application
 Name=Network Manager
@@ -1092,7 +1132,7 @@ Exec=nm-applet
 X-GNOME-Autostart-enabled=true
 EOF
 
-    cat <<EOF > "$autostart_dir/pasystray.desktop"
+        cat <<EOF > "$autostart_dir/pasystray.desktop"
 [Desktop Entry]
 Type=Application
 Name=PulseAudio Tray
@@ -1100,7 +1140,7 @@ Exec=pasystray
 X-GNOME-Autostart-enabled=true
 EOF
 
-    cat <<EOF > "$autostart_dir/blueman.desktop"
+        cat <<EOF > "$autostart_dir/blueman.desktop"
 [Desktop Entry]
 Type=Application
 Name=Bluetooth Manager
@@ -1108,7 +1148,7 @@ Exec=blueman-applet
 X-GNOME-Autostart-enabled=true
 EOF
 
-    cat <<EOF > "$autostart_dir/cbatticon.desktop"
+        cat <<EOF > "$autostart_dir/cbatticon.desktop"
 [Desktop Entry]
 Type=Application
 Name=Battery Icon
@@ -1116,8 +1156,11 @@ Exec=cbatticon
 X-GNOME-Autostart-enabled=true
 EOF
 
-    silent_run chown -R "$target_user:$target_user" "$target_home/.config"
-    echo -e "${C_GREEN}✅ Инструменты графического окружения добавлены в автозапуск для $target_user.${C_RESET}"
+        silent_run chown -R "$target_user:$target_user" "$target_home/.config"
+        echo -e "${C_GREEN}✅ Инструменты графического окружения добавлены в автозапуск для $target_user.${C_RESET}"
+    else
+        echo -e "${C_YELLOW}⏭️ Установка графических утилит пропущена.${C_RESET}"
+    fi
 }
 
 # 15. Программный сброс HDMI
@@ -1211,12 +1254,48 @@ mod_server_audit() {
     echo -e "  • Режим загрузки (systemd):  ${C_BLUE}$(systemctl get-default 2>/dev/null || echo "N/A")${C_RESET}"
     
     if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
-        echo -e "  • Авто-обновления (security): ${C_GREEN}✅ Активны (unattended-upgrades)${C_RESET}"
+        echo -e "  • Авто-обновления (security): ${C_GREEN}✅ Активны${C_RESET}"
     else
         echo -e "  • Авто-обновления (security): ${C_RED}❌ Отключены${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 2. Учетные записи, пользователи и Sudo ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 2. Аппаратная часть (Процессор и Температура) ---${C_RESET}"
+    local cpu_temp="Нет сенсора"
+    if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+        local raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+        if [ -n "$raw_temp" ] && [ "$raw_temp" -gt 0 ]; then
+            cpu_temp=$(awk "BEGIN {printf \"%.1f°C\", $raw_temp/1000}")
+            if [ "$raw_temp" -gt 75000 ]; then
+                cpu_temp="${C_RED}🔥 $cpu_temp (Критический перегрев / Троттлинг!)${C_RESET}"
+            elif [ "$raw_temp" -gt 60000 ]; then
+                cpu_temp="${C_YELLOW}⚠️ $cpu_temp (Высокий нагрев)${C_RESET}"
+            else
+                cpu_temp="${C_GREEN}❄️ $cpu_temp (В норме)${C_RESET}"
+            fi
+        fi
+    fi
+
+    local cpu_gov="Неизвестно"
+    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+        cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+    fi
+
+    local cpu_freq="Неизвестно"
+    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]; then
+        local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)
+        if [ -n "$raw_freq" ]; then
+            cpu_freq="$(awk "BEGIN {printf \"%d MHz\", $raw_freq/1000}")"
+        fi
+    fi
+    
+    local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
+
+    echo -e "  • Температура CPU:           $cpu_temp"
+    echo -e "  • Режим процессора (Gov):    ${C_BLUE}$cpu_gov${C_RESET}"
+    echo -e "  • Текущая частота CPU:       ${C_BLUE}$cpu_freq${C_RESET}"
+    echo -e "  • Средняя нагрузка (Load):   ${C_BLUE}$load_avg${C_RESET}"
+
+    echo -e "\n${C_BOLD}--- 3. Учетные записи, пользователи и Sudo ---${C_RESET}"
     echo -e "  • Основной администратор:    ${C_GREEN}$active_user${C_RESET}"
     if [ -f "/etc/sudoers.d/$active_user" ]; then
         echo -e "  • Права Sudo для $active_user:  ${C_GREEN}✅ NOPASSWD (без пароля)${C_RESET}"
@@ -1227,26 +1306,13 @@ mod_server_audit() {
     local root_locked
     root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "P")
     if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
-        echo -e "  • Статус учетной записи root: ${C_GREEN}✅ Заблокирована (passwd -l)${C_RESET}"
+        echo -e "  • Статус учетной записи root: ${C_GREEN}✅ Заблокирована (безопасно)${C_RESET}"
     else
-        echo -e "  • Статус учетной записи root: ${C_RED}❌ Активна (разрешен вход по паролю)${C_RESET}"
+        echo -e "  • Статус учетной записи root: ${C_RED}❌ Активна (разрешен вход)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 3. Безопасность и конфигурация SSH ---${C_RESET}"
-    local ssh_port="22" root_ssh="yes" pass_auth="yes" kbd_auth="yes"
-    local sshd_cmd=$(get_sshd_cmd)
-
-    if [ -n "$sshd_cmd" ]; then
-        local sshd_dump
-        sshd_dump=$($sshd_cmd -T 2>/dev/null || echo "")
-        if [ -n "$sshd_dump" ]; then
-            ssh_port=$(echo "$sshd_dump" | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
-            root_ssh=$(echo "$sshd_dump" | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1 || echo "yes")
-            pass_auth=$(echo "$sshd_dump" | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1 || echo "yes")
-            kbd_auth=$(echo "$sshd_dump" | grep -i "^kbdinteractiveauthentication " | awk '{print $2}' | head -n 1 || echo "yes")
-        fi
-    fi
-
+    echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
+    local ssh_port="22" root_ssh="yes" pass_auth="yes"
     if [ -f /etc/ssh/sshd_config.d/99-server-security.conf ]; then
         local conf_port conf_root conf_pass
         conf_port=$(grep -i "^Port " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
@@ -1258,26 +1324,113 @@ mod_server_audit() {
     fi
 
     echo -e "  • Используемый порт SSH:     ${C_GREEN}$ssh_port${C_RESET}"
-    echo -e "  • Вход root по SSH:          $( [ "$root_ssh" = "no" ] && echo -e "${C_GREEN}✅ Запрещен (no)${C_RESET}" || echo -e "${C_RED}❌ Разрешен${C_RESET}" )"
+    echo -e "  • Вход root по SSH:          $( [ "$root_ssh" = "no" ] && echo -e "${C_GREEN}✅ Запрещен${C_RESET}" || echo -e "${C_RED}❌ Разрешен${C_RESET}" )"
     echo -e "  • Вход по паролю SSH:        $( [ "$pass_auth" = "no" ] && echo -e "${C_GREEN}✅ Отключен (только ключи)${C_RESET}" || echo -e "${C_YELLOW}⚠️ Включен${C_RESET}" )"
-    
-    if grep -q "SSH via Tailscale only" /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null; then
-        echo -e "  • Изоляция доступа SSH:      ${C_GREEN}✅ Разрешен ТОЛЬКО из сети Tailscale${C_RESET}"
-    else
-        echo -e "  • Изоляция доступа SSH:      ${C_BLUE}ℹ️ Открыт на внешнем сетевом интерфейсе${C_RESET}"
-    fi
 
-    echo -e "\n${C_BOLD}--- 4. Защита ядра и сетевые оптимизации (sysctl) ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации (sysctl) ---${C_RESET}"
     check_param() {
         local param="$1" expected="$2" name="$3"
-        local val
-        val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
+        local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
         if [ "$val" = "$expected" ]; then
-            echo -e "  • $name ($param = $val): ${C_GREEN}✅ OK${C_RESET}"
+            echo -e "  • $name: ${C_GREEN}✅ OK ($val)${C_RESET}"
         else
-            echo -e "  • $name ($param = $val, ожидалось $expected): ${C_YELLOW}⚠️ Отличается${C_RESET}"
+            echo -e "  • $name: ${C_YELLOW}⚠️ Отличается ($val)${C_RESET}"
         fi
     }
+    check_param "kernel.dmesg_restrict" "1" "Ограничение буфера ядра"
+    check_param "net.ipv4.tcp_syncookies" "1" "Защита SYN-cookies"
+    check_param "net.ipv4.tcp_congestion_control" "bbr" "Алгоритм TCP BBR"
+    check_param "net.ipv4.tcp_rfc1337" "1" "Защита Time-Wait (RFC1337)"
+
+    echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) ---${C_RESET}"
+    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+        echo -e "  • Статус брандмауэра UFW:    ${C_GREEN}✅ Активен${C_RESET}"
+    else
+        echo -e "  • Статус брандмауэра UFW:    ${C_RED}❌ Не активен${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 7. Закрытая меш-сеть Tailscale ---${C_RESET}"
+    if command -v tailscale &>/dev/null; then
+        echo -e "  • Пакет Tailscale:           ${C_GREEN}✅ Установлен и работает${C_RESET}"
+        local ts_name ts_ip ts_exit ts_adv_exit ts_accept ts_stealth
+        IFS="|" read -r ts_name _ <<< "$(get_tailscale_whoami)"
+        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "Нет IP")
+        
+        ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
+        local ts_exit_human
+        if [ -z "$ts_exit" ] || [ "$ts_exit" = "none" ] || [ "$ts_exit" = "false" ]; then
+            ts_exit_human="Свой интернет (напрямую)"
+        else
+            ts_exit_human="Через чужой узел ($ts_exit)"
+        fi
+        
+        ts_adv_exit=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
+        local ts_adv_exit_human
+        [ "$ts_adv_exit" = "true" ] && ts_adv_exit_human="${C_GREEN}Да (работает как VPN-сервер)${C_RESET}" || ts_adv_exit_human="${C_BLUE}Нет${C_RESET}"
+        
+        ts_accept=$(tailscale get accept-routes 2>/dev/null || echo "false")
+        local ts_accept_human
+        [ "$ts_accept" = "true" ] && ts_accept_human="${C_GREEN}Да (видит чужие локалки)${C_RESET}" || ts_accept_human="${C_BLUE}Нет${C_RESET}"
+        
+        ts_stealth=$(tailscale get stateful-filtering 2>/dev/null || echo "false")
+        local ts_stealth_human
+        [ "$ts_stealth" = "true" ] && ts_stealth_human="${C_GREEN}Включен (блокирует входящие)${C_RESET}" || ts_stealth_human="${C_BLUE}Выключен (открыт для своих)${C_RESET}"
+
+        echo -e "  • Имя устройства в сети:     ${C_BLUE}$ts_name${C_RESET}"
+        echo -e "  • Внутренний IP-адрес:       ${C_BLUE}$ts_ip${C_RESET}"
+        echo -e "  • Выход в интернет:          ${C_BLUE}$ts_exit_human${C_RESET}"
+        echo -e "  • Раздает свой интернет:     $ts_adv_exit_human"
+        echo -e "  • Доступ к чужим сетям:      $ts_accept_human"
+        echo -e "  • Режим невидимки (Stealth): $ts_stealth_human"
+
+        if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
+            echo -e "  • Ускорение трафика (GRO):   ${C_GREEN}✅ Работает${C_RESET}"
+        else
+            echo -e "  • Ускорение трафика (GRO):   ${C_YELLOW}⚠️ Отключено${C_RESET}"
+        fi
+    else
+        echo -e "  • Программа Tailscale:       ${C_YELLOW}⚠️ Не установлена${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Диагностика Роутера ---${C_RESET}"
+    local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}')
+    for iface in $active_ifs; do
+        local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")
+        local speed=$(cat /sys/class/net/"$iface"/speed 2>/dev/null || echo "N/A")
+        
+        if [ "$speed" != "N/A" ] && [ "$speed" -gt 0 ] 2>/dev/null; then
+            speed="${speed} Мбит/с"
+        elif [ "$iface" = "tailscale0" ] || [[ "$iface" == *"wg"* ]] || [[ "$iface" == *"lo"* ]]; then
+            speed="Виртуальный интерфейс"
+        else
+            speed="Не определена"
+        fi
+        echo -e "  • Интерфейс ${C_BLUE}$iface${C_RESET}: MTU = ${C_GREEN}$mtu${C_RESET} | Линк = ${C_GREEN}$speed${C_RESET}"
+    done
+
+    # Диагностика фиксации MTU/MSS для режима роутера
+    if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then
+        echo -e "  • Фиксация MSS (MSS Clamping): ${C_GREEN}✅ Работает (предотвращает зависание сайтов)${C_RESET}"
+    else
+        echo -e "  • Фиксация MSS (MSS Clamping): ${C_YELLOW}⚠️ Не обнаружена (возможны потери скорости)${C_RESET}"
+    fi
+
+    echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и Swap ---${C_RESET}"
+    local vm_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
+    echo -e "  • Параметр vm.swappiness:    ${C_BLUE}$vm_swappiness${C_RESET}"
+
+    if mount | grep " / " | grep -q "noatime"; then
+        echo -e "  • Опция noatime на корне (/): ${C_GREEN}✅ Активна (износ флеш-памяти снижен)${C_RESET}"
+    else
+        echo -e "  • Опция noatime на корне (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET}"
+    fi
+
+    local current_swap=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "")
+    [ -z "$current_swap" ] && current_swap="Отключен"
+    echo -e "  • Активный файл Swap:        ${C_BLUE}$current_swap${C_RESET}"
+
+    echo -e "\n${C_CYAN}=================================================================${C_RESET}"
+}
 
     check_param "kernel.dmesg_restrict" "1" "Ограничение буфера ядра"
     check_param "kernel.kptr_restrict" "2" "Скрытие указателей ядра"
@@ -1591,7 +1744,7 @@ while true; do
     "11" "🗑️ Отключение системных журналов" \
     "12" "⚡ Оптимизация памяти" \
     "13" "💾 Управление файлом подкачки" \
-    "14" "🖥️ Утилиты для ПК и автозапуск" \
+    "14" "🖥️ Утилиты ПК и режим процессора" \
     "15" "📺 Сброс видеовыхода HDMI" \
     "16" "⏱️ Анализ времени загрузки" \
     "17" "🔍 Интеллектуальный аудит системы" \

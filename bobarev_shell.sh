@@ -1334,18 +1334,45 @@ mod_server_audit() {
 
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
     local ssh_port="22" root_ssh="yes" pass_auth="yes"
-    if [ -f /etc/ssh/sshd_config.d/99-server-security.conf ]; then
-        local conf_port=$(grep -i "^Port " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
-        local conf_root=$(grep -i "^PermitRootLogin " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
-        local conf_pass=$(grep -i "^PasswordAuthentication " /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null | awk '{print $2}' | head -n 1 || echo "")
+    local sshd_cmd=$(get_sshd_cmd)
+
+    # Читаем реальную, действующую конфигурацию демона SSH
+    if [ -n "$sshd_cmd" ]; then
+        local conf_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1)
+        local conf_root=$($sshd_cmd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1)
+        local conf_pass=$($sshd_cmd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1)
+        
         [ -n "$conf_port" ] && ssh_port="$conf_port"
         [ -n "$conf_root" ] && root_ssh="$conf_root"
         [ -n "$conf_pass" ] && pass_auth="$conf_pass"
     fi
 
-    echo -e "  • Используемый порт SSH:     ${C_GREEN}$ssh_port${C_RESET}"
-    echo -e "  • Вход root по SSH:          $( [ "$root_ssh" = "no" ] && echo -e "${C_GREEN}✅ Запрещен${C_RESET}" || echo -e "${C_RED}❌ Разрешен${C_RESET}" )"
-    echo -e "  • Вход по паролю SSH:        $( [ "$pass_auth" = "no" ] && echo -e "${C_GREEN}✅ Отключен (только ключи)${C_RESET}" || echo -e "${C_YELLOW}⚠️ Включен${C_RESET}" )"
+    # Анализ порта на безопасность
+    local port_status_human
+    if [ "$ssh_port" = "22" ]; then
+        port_status_human="${C_YELLOW}⚠️ 22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
+    else
+        port_status_human="${C_GREEN}✅ $ssh_port${C_RESET}"
+    fi
+
+    # Переводим статус PermitRootLogin на человеческий
+    local root_status_human
+    case "${root_ssh,,}" in
+        no) root_status_human="${C_GREEN}✅ Запрещен${C_RESET}" ;;
+        prohibit-password|without-password) root_status_human="${C_GREEN}✅ Только по ключам${C_RESET}" ;;
+        yes|*) root_status_human="${C_RED}❌ Разрешен${C_RESET}" ;;
+    esac
+
+    # Переводим статус авторизации по паролю
+    local pass_status_human
+    case "${pass_auth,,}" in
+        no) pass_status_human="${C_GREEN}✅ Отключен (только ключи)${C_RESET}" ;;
+        yes|*) pass_status_human="${C_YELLOW}⚠️ Включен${C_RESET}" ;;
+    esac
+
+    echo -e "  • Используемый порт SSH:     $port_status_human"
+    echo -e "  • Вход root по SSH:          $root_status_human"
+    echo -e "  • Вход по паролю SSH:        $pass_status_human"
 
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации (sysctl) ---${C_RESET}"
     check_param() {

@@ -1602,13 +1602,13 @@ while true; do
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
 
     choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ НАСТРОЙКИ СЕРВЕРА И ПК (Bobarev.com)" \
-    --menu "\n    💻 Системные данные:
-    • Хост: $(hostname) ($SYSTEM_TYPE)
-    • Часовой пояс: $tz
-    • Статус UFW: $ufw_status
-    • Сеть Tailscale: $ts_main_status
+    --menu "\n💻 Системные данные:
+• Хост: $(hostname) ($SYSTEM_TYPE)
+• Часовой пояс: $tz
+• Статус UFW: $ufw_status
+• Сеть Tailscale: $ts_main_status
 
-    📌 Выберите желаемый этап настройки:" 27 85 11 \
+📌 Выберите желаемый этап настройки:" 27 85 11 \
     "1" "🌐 Часовой пояс" \
     "2" "🏷️ Имя сервера" \
     "3" "📦 Обновление компонентов" \

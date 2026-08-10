@@ -1444,9 +1444,15 @@ mod_server_audit() {
     echo -e "  • Параметр vm.swappiness:    ${C_BLUE}$vm_swappiness${C_RESET}"
 
     if mount | grep " / " | grep -q "noatime"; then
-        echo -e "  • Опция noatime на корне (/): ${C_GREEN}✅ Активна (износ флеш-памяти снижен)${C_RESET}"
+        echo -e "  • Метки времени (noatime):   ${C_GREEN}✅ Отключены (износ флеш-памяти снижен)${C_RESET}"
     else
-        echo -e "  • Опция noatime на корне (/): ${C_YELLOW}⚠️ Отсутствует${C_RESET}"
+        echo -e "  • Метки времени (noatime):   ${C_YELLOW}⚠️ Включены (лишняя нагрузка на диск)${C_RESET}"
+    fi
+
+    if mount | grep " / " | grep -q "commit=120"; then
+        echo -e "  • Отложенная запись (commit): ${C_GREEN}✅ 120 сек. (бережет накопитель от частых записей)${C_RESET}"
+    else
+        echo -e "  • Отложенная запись (commit): ${C_YELLOW}⚠️ Стандартная (повышенный износ флеш-памяти)${C_RESET}"
     fi
 
     local current_swap=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "")

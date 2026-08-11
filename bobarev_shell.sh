@@ -515,7 +515,7 @@ mod_ssh_key() {
     echo -e "${C_GREEN}✅ Права доступа к директории ключей проверены и настроены.${C_RESET}"
 }
 
-# 6. Конфигурация SSH (Безопасный drop-in метод)
+# 6. Конфигурация SSH (Безопасный drop-in метод с абсолютным приоритетом)
 mod_ssh_config() {
     echo -e "${C_CYAN}🔒 === 6/18. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
     
@@ -524,7 +524,7 @@ mod_ssh_config() {
 
     backup_file "/etc/ssh/sshd_config"
 
-    # Безопасное отключение старых параметров в главном конфиге для избежания конфликтов
+    # Безопасное отключение старых параметров в главном конфиге
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
 
     local sshd_cmd=$(get_sshd_cmd)
@@ -583,7 +583,9 @@ mod_ssh_config() {
         echo -e "${C_YELLOW}⚠️ Выбрано: Вход для root разрешен.${C_RESET}"
     fi
 
-    mkdir -p /etc/ssh/sshd_config.d
+    local conf_dir="/etc/ssh/sshd_config.d"
+    mkdir -p "$conf_dir"
+    
     if [ -f /etc/ssh/sshd_config ]; then
         silent_run sed -i '/^\s*Include \/etc\/ssh\/sshd_config\.d\/\*\.conf/d' /etc/ssh/sshd_config
         sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
@@ -597,7 +599,12 @@ mod_ssh_config() {
     fi
 
     echo -e "${C_BLUE}⚙️ Применение параметров безопасности...${C_RESET}"
-    local conf_file="/etc/ssh/sshd_config.d/99-server-security.conf"
+    
+    # 🧹 ЖЕСТКАЯ ЗАЧИСТКА: Удаляем все сторонние конфиги (cloud-init и т.д.)
+    echo -e "${C_BLUE}🧹 Очистка сторонних конфигураций SSH...${C_RESET}"
+    rm -f "$conf_dir"/*.conf 2>/dev/null
+    
+    local conf_file="$conf_dir/00-bobarev-security.conf"
     
     tee "$conf_file" > /dev/null << SSH_HARDENING_EOF
 # Server Security Hardening Configuration
@@ -653,7 +660,7 @@ SSH_HARDENING_EOF
         else
             silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
         fi
-        echo -e "${C_GREEN}✅ Служба удаленного доступа успешно перезапущена с новыми параметрами.${C_RESET}"
+        echo -e "${C_GREEN}✅ Служба удаленного доступа успешно перезапущена с абсолютным приоритетом параметров.${C_RESET}"
     else
         echo -e "${C_RED}❌ Ошибка применения параметров безопасности! Выполнен откат изменений...${C_RESET}"
         rm -f "$conf_file"
@@ -716,10 +723,11 @@ mod_ufw() {
     if [ -n "$sshd_cmd" ]; then
         active_ssh_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
     fi
+    active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
+    local port="${active_ssh_port:-22}"
 
-    local port=""
-    prompt_default "Сетевой порт для правила удаленного доступа:" "${active_ssh_port:-22}" port
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+    # ИСПРАВЛЕНИЕ: Больше не спрашиваем порт. Скрипт сам берет реальный порт SSH.
+    echo -e "${C_BLUE}ℹ️ Автоматически определен порт SSH: $port${C_RESET}"
 
     silent_run ufw --force reset
     silent_run ufw default deny incoming
@@ -733,8 +741,9 @@ mod_ufw() {
         silent_run sed -i 's/DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw
     fi
 
+    # ИСПРАВЛЕНИЕ: Проверяем новый файл 00-bobarev-security.conf
     local is_ts_restricted_in_mod6=false
-    if grep -q "SSH via Tailscale only" /etc/ssh/sshd_config.d/99-server-security.conf 2>/dev/null; then
+    if grep -q "SSH via Tailscale only" /etc/ssh/sshd_config.d/00-bobarev-security.conf 2>/dev/null; then
         is_ts_restricted_in_mod6=true
     fi
 
@@ -1263,7 +1272,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (Детальная интеллектуальная диагностика)
+# 17. Полный аудит сервера (Универсальная интеллектуальная диагностика)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1332,11 +1341,11 @@ mod_server_audit() {
         echo -e "  • Статус учетной записи root: ${C_RED}❌ Активна (разрешен вход)${C_RESET}"
     fi
 
+    # УНИВЕРСАЛЬНЫЙ БЛОК SSH: Запрашиваем данные напрямую у демона, игнорируя названия файлов
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
     local ssh_port="22" root_ssh="yes" pass_auth="yes"
     local sshd_cmd=$(get_sshd_cmd)
 
-    # Читаем реальную, действующую конфигурацию демона SSH
     if [ -n "$sshd_cmd" ]; then
         local conf_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1)
         local conf_root=$($sshd_cmd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1)
@@ -1347,7 +1356,6 @@ mod_server_audit() {
         [ -n "$conf_pass" ] && pass_auth="$conf_pass"
     fi
 
-    # Анализ порта на безопасность
     local port_status_human
     if [ "$ssh_port" = "22" ]; then
         port_status_human="${C_YELLOW}⚠️ 22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
@@ -1355,7 +1363,6 @@ mod_server_audit() {
         port_status_human="${C_GREEN}✅ $ssh_port${C_RESET}"
     fi
 
-    # Переводим статус PermitRootLogin на человеческий
     local root_status_human
     case "${root_ssh,,}" in
         no) root_status_human="${C_GREEN}✅ Запрещен${C_RESET}" ;;
@@ -1363,7 +1370,6 @@ mod_server_audit() {
         yes|*) root_status_human="${C_RED}❌ Разрешен${C_RESET}" ;;
     esac
 
-    # Переводим статус авторизации по паролю
     local pass_status_human
     case "${pass_auth,,}" in
         no) pass_status_human="${C_GREEN}✅ Отключен (только ключи)${C_RESET}" ;;
@@ -1377,6 +1383,7 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации (sysctl) ---${C_RESET}"
     check_param() {
         local param="$1" expected="$2" name="$3"
+        # Запрашиваем параметры напрямую из живого ядра
         local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
         if [ "$val" = "$expected" ]; then
             echo -e "  • $name: ${C_GREEN}✅ OK ($val)${C_RESET}"
@@ -1453,6 +1460,7 @@ mod_server_audit() {
             speed="Не определена"
         fi
         
+        # Читаем живую статистику пакетов прямо из ядра
         local rx_err=$(cat /sys/class/net/"$iface"/statistics/rx_errors 2>/dev/null || echo "0")
         local tx_err=$(cat /sys/class/net/"$iface"/statistics/tx_errors 2>/dev/null || echo "0")
         local rx_drop=$(cat /sys/class/net/"$iface"/statistics/rx_dropped 2>/dev/null || echo "0")
@@ -1494,6 +1502,7 @@ mod_server_audit() {
         echo -e "  • Отложенная запись (commit): ${C_YELLOW}⚠️ Стандартная (повышенный износ флеш-памяти)${C_RESET}"
     fi
 
+    # Проверяем живую конфигурацию файлов подкачки
     local current_swap=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "")
     [ -z "$current_swap" ] && current_swap="Отключен"
     echo -e "  • Активный файл Swap:        ${C_BLUE}$current_swap${C_RESET}"

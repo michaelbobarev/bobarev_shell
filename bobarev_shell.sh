@@ -409,10 +409,22 @@ mod_user_setup() {
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
 
     if ! id "$username" &>/dev/null; then
-        adduser --disabled-password --gecos "" "$username"
+        # Фикс: если группа уже существует (например, admin), используем группу users
+        if getent group "$username" &>/dev/null; then
+            adduser --disabled-password --gecos "" --ingroup users "$username" || true
+        else
+            adduser --disabled-password --gecos "" "$username" || true
+        fi
+        
+        # Надежный фоллбэк, если adduser всё равно не справился
+        if ! id "$username" &>/dev/null; then
+            useradd -m -s /bin/bash "$username" || true
+        fi
         echo -e "${C_GREEN}✅ Учетная запись $username создана.${C_RESET}"
     fi
-    usermod -aG sudo "$username"
+    
+    # Защита от прерывания скрипта
+    usermod -aG sudo "$username" || true
 
     local term_cols=$(tput cols 2>/dev/null || echo 75)
     local wt_width=$((term_cols < 75 ? term_cols : 75))
@@ -821,8 +833,13 @@ mod_lock_root_auto() { mod_lock_root "auto"; }
 mod_tailscale() {
     local mode="${1:-}"
     if [ "$mode" = "auto" ]; then
-        ensure_tailscale_installed || true
-        enable_tailscale_gro || true
+        # Добавлен запрос разрешения перед установкой в автоматическом режиме
+        if prompt_yn "Установить и настроить закрытую сеть Tailscale на этом сервере?" "true"; then
+            ensure_tailscale_installed || true
+            enable_tailscale_gro || true
+        else
+            echo -e "${C_YELLOW}⏭️ Установка Tailscale пропущена пользователем.${C_RESET}"
+        fi
         return 0
     fi
 

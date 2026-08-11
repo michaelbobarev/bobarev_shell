@@ -658,7 +658,8 @@ SSH_HARDENING_EOF
 
         if [ "$restrict_choice" = true ]; then
             if ensure_tailscale_installed; then
-                if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+                # ИСПРАВЛЕНО: точный поиск активного статуса
+                if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
                     silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
                     silent_run ufw delete allow "$port"/tcp
                     echo -e "${C_GREEN}✅ Сервер изолирован от интернета: удаленный доступ разрешен ТОЛЬКО из закрытой сети.${C_RESET}"
@@ -674,6 +675,7 @@ SSH_HARDENING_EOF
         fi
         echo -e "${C_GREEN}✅ Служба удаленного доступа успешно перезапущена с абсолютным приоритетом параметров.${C_RESET}"
     else
+
         echo -e "${C_RED}❌ Ошибка применения параметров безопасности! Выполнен откат изменений...${C_RESET}"
         rm -f "$conf_file"
         systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
@@ -1414,7 +1416,7 @@ mod_server_audit() {
     check_param "net.ipv4.tcp_rfc1337" "1" "Защита Time-Wait (RFC1337)"
 
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) ---${C_RESET}"
-    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         echo -e "  • Статус брандмауэра UFW:    ${C_GREEN}✅ Активен${C_RESET}"
     else
         echo -e "  • Статус брандмауэра UFW:    ${C_RED}❌ Не активен${C_RESET}"
@@ -1676,8 +1678,8 @@ while true; do
         if is_tailscale_web_active; then ts_main_status="Активна (включая веб-панель)"; else ts_main_status="Активна"; fi
     fi
     
-    # Человекоподобный статус UFW
-    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+    # Человекоподобный статус UFW (Исправленный поиск точного слова)
+    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         ufw_status="Активен"
     else
         ufw_status="Не активен"

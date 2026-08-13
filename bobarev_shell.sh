@@ -816,12 +816,18 @@ mod_lock_root_auto() { mod_lock_root "auto"; }
 mod_tailscale() {
     local mode="${1:-}"
     if [ "$mode" = "auto" ]; then
-        # Добавлен запрос разрешения перед установкой в автоматическом режиме
-        if prompt_yn "Установить и настроить закрытую сеть Tailscale на этом сервере?" "true"; then
+        # Проверяем, не установил ли уже Tailscale другой модуль (например, Модуль 6)
+        if command -v tailscale &>/dev/null; then
+            echo -e "${C_BLUE}ℹ️ Пакет Tailscale уже установлен. Применение дополнительных настроек...${C_RESET}"
             ensure_tailscale_installed || true
             enable_tailscale_gro || true
         else
-            echo -e "${C_YELLOW}⏭️ Установка Tailscale пропущена пользователем.${C_RESET}"
+            if prompt_yn "Установить и настроить закрытую сеть Tailscale на этом сервере?" "true"; then
+                ensure_tailscale_installed || true
+                enable_tailscale_gro || true
+            else
+                echo -e "${C_YELLOW}⏭️ Установка Tailscale пропущена пользователем.${C_RESET}"
+            fi
         fi
         return 0
     fi

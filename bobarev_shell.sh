@@ -359,7 +359,7 @@ mod_apt_update() {
         silent_run systemctl mask zramswap.service
     fi
 
-    apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq python3 python3-minimal $zram_pkg
+    apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq $zram_pkg
     silent_run dpkg-reconfigure --priority=low unattended-upgrades
     apt-get autoremove -yq && apt-get clean
     systemctl enable unattended-upgrades
@@ -1023,28 +1023,15 @@ kernel.dmesg_restrict=1
 EOF
     sysctl --system > /dev/null
 
-    python3 - << 'PY' 2>/dev/null || true
-from pathlib import Path
-fstab_path = Path("/etc/fstab")
-if fstab_path.exists():
-    lines = fstab_path.read_text().splitlines()
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            new_lines.append(line)
-            continue
-        parts = line.split()
-        if len(parts) >= 4 and parts[1] == "/":
-            opts = parts[3].split(",")
-            if "noatime" not in opts: opts.append("noatime")
-            if "commit=120" not in opts: opts.append("commit=120")
-            parts[3] = ",".join(opts)
-            new_lines.append("\t".join(parts))
-        else:
-            new_lines.append(line)
-    fstab_path.write_text("\n".join(new_lines) + "\n")
-PY
+    # Нативное редактирование /etc/fstab через awk (без Python)
+    awk '
+    BEGIN { OFS="\t" }
+    # Ищем строку монтирования корня (/), которая не закомментирована
+    !/^#/ && $2 == "/" {
+        if ($4 !~ /(^|,)noatime(,|$)/) $4 = $4 ",noatime"
+        if ($4 !~ /(^|,)commit=120(,|$)/) $4 = $4 ",commit=120"
+    }
+    { print }' /etc/fstab > /tmp/fstab.tmp && cat /tmp/fstab.tmp > /etc/fstab && rm -f /tmp/fstab.tmp
 
     local root_dev=$(df / 2>/dev/null | awk 'NR==2 {print $1}' || echo "")
     if [ -n "$root_dev" ] && command -v tune2fs >/dev/null 2>&1; then

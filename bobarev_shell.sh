@@ -63,37 +63,26 @@ get_active_user() {
     echo "$u"
 }
 
-# Парсинг имени узла и аккаунта Tailscale
+# Парсинг имени узла и аккаунта Tailscale (Нативные утилиты, без Python)
 get_tailscale_whoami() {
-    python3 -c '
-import subprocess, re
-try:
-    whoami_raw = subprocess.check_output(["tailscale", "whoami"], stderr=subprocess.STDOUT, text=True)
-except Exception:
-    whoami_raw = ""
-
-email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", whoami_raw)
-ts_user = email_match.group(0) if email_match else "N/A"
-
-ts_name = "N/A"
-fqdn_match = re.search(r"([a-zA-Z0-9\.-]+\.(?:ts|tailscale)\.net)", whoami_raw)
-if fqdn_match:
-    ts_name = fqdn_match.group(1)
-else:
-    node_sec = re.search(r"Node:\s*\n?\s*(?:Name:)?\s*([a-zA-Z0-9\.-]+)", whoami_raw, re.IGNORECASE)
-    if node_sec:
-        ts_name = node_sec.group(1)
-    else:
-        mac_sec = re.search(r"Machine:\s*([a-zA-Z0-9\.-]+)", whoami_raw, re.IGNORECASE)
-        if mac_sec:
-            ts_name = mac_sec.group(1)
-        else:
-            words = [w for w in whoami_raw.replace("\n", " ").split() if "@" not in w and not w.endswith(":") and w.lower() not in ["machine", "node", "user"]]
-            if words:
-                ts_name = words[0]
-
-print(f"{ts_name}|{ts_user}")
-' 2>/dev/null || echo "N/A|N/A"
+    local raw
+    raw=$(tailscale whoami 2>/dev/null || echo "")
+    local ts_user="N/A"
+    local ts_name="N/A"
+    
+    if [ -n "$raw" ]; then
+        # Ищем email (пользователя)
+        ts_user=$(echo "$raw" | grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' | head -n 1 || echo "N/A")
+        # Ищем FQDN (домен узла .ts.net)
+        ts_name=$(echo "$raw" | grep -oE '[a-zA-Z0-9.-]+\.(ts|tailscale)\.net' | head -n 1 || echo "N/A")
+        
+        # Если FQDN не найден, берем имя машины из status
+        if [ "$ts_name" = "N/A" ]; then
+            ts_name=$(tailscale status --peers=false 2>/dev/null | awk 'NR==1 {print $2}')
+            [ -z "$ts_name" ] && ts_name="N/A"
+        fi
+    fi
+    echo "${ts_name}|${ts_user}"
 }
 
 is_tailscale_authenticated() {
@@ -160,6 +149,7 @@ ETHTOOL_SVC_EOF
     echo -e "${C_GREEN}✅ Служба оптимизации маршрутизации включена.${C_RESET}"
 }
 
+# Проверка доступности порта (Native Bash + ss/lsof + procfs)
 is_port_free() {
     local port_raw="$1"
     local port
@@ -169,32 +159,24 @@ is_port_free() {
         return 1
     fi
 
+    # Вариант 1: Утилита ss (iproute2)
     if command -v ss &>/dev/null; then
-        if ss -tuln 2>/dev/null | grep -qE ":${port}\b"; then
-            return 1
-        fi
+        if ss -tuln 2>/dev/null | grep -qE ":${port}\b"; then return 1; fi
         return 0
     fi
 
+    # Вариант 2: Утилита lsof
     if command -v lsof &>/dev/null; then
-        if lsof -iTCP:"$port" -sTCP:LISTEN &>/dev/null; then
-            return 1
-        fi
+        if lsof -iTCP:"$port" -sTCP:LISTEN &>/dev/null; then return 1; fi
         return 0
     fi
 
-    python3 - "$port" << 'PY' 2>/dev/null
-import sys, socket
-try:
-    port = int(sys.argv[1].strip())
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('0.0.0.0', port))
-    s.close()
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-PY
+    # Вариант 3 (Ультимативный): Прямое чтение из ядра Linux
+    local hex_port
+    hex_port=$(printf '%04X' "$port")
+    if grep -qwi "$hex_port" /proc/net/tcp /proc/net/tcp6 2>/dev/null; then return 1; fi
+    
+    return 0
 }
 
 get_interface_subnet() {
@@ -658,7 +640,6 @@ SSH_HARDENING_EOF
 
         if [ "$restrict_choice" = true ]; then
             if ensure_tailscale_installed; then
-                # ИСПРАВЛЕНО: точный поиск активного статуса
                 if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
                     silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
                     silent_run ufw delete allow "$port"/tcp

@@ -1399,7 +1399,7 @@ mod_server_audit() {
     echo -e "  • Вход root по SSH:          $root_status_human"
     echo -e "  • Вход по паролю SSH:        $pass_status_human"
 
-    echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации (sysctl) ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
         local param="$1" expected="$2" name="$3" ok_msg="$4" err_msg="$5"
         # Запрашиваем параметры напрямую из живого ядра
@@ -1465,7 +1465,7 @@ mod_server_audit() {
         echo -e "  • Программа Tailscale:       ${C_YELLOW}⚠️ Не установлена${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Диагностика (Stats) ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Диагностика ---${C_RESET}"
     local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}')
     for iface in $active_ifs; do
         local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")

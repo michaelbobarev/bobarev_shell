@@ -1401,19 +1401,19 @@ mod_server_audit() {
 
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации (sysctl) ---${C_RESET}"
     check_param() {
-        local param="$1" expected="$2" name="$3"
+        local param="$1" expected="$2" name="$3" ok_msg="$4" err_msg="$5"
         # Запрашиваем параметры напрямую из живого ядра
         local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
         if [ "$val" = "$expected" ]; then
-            echo -e "  • $name: ${C_GREEN}✅ OK ($val)${C_RESET}"
+            echo -e "  • $name: ${C_GREEN}✅ $ok_msg${C_RESET}"
         else
-            echo -e "  • $name: ${C_YELLOW}⚠️ Отличается ($val)${C_RESET}"
+            echo -e "  • $name: ${C_YELLOW}⚠️ $err_msg (текущее значение: $val)${C_RESET}"
         fi
     }
-    check_param "kernel.dmesg_restrict" "1" "Ограничение буфера ядра"
-    check_param "net.ipv4.tcp_syncookies" "1" "Защита SYN-cookies"
-    check_param "net.ipv4.tcp_congestion_control" "bbr" "Алгоритм TCP BBR"
-    check_param "net.ipv4.tcp_rfc1337" "1" "Защита Time-Wait (RFC1337)"
+    check_param "kernel.dmesg_restrict" "1" "Ограничение буфера ядра" "Включено" "Отключено"
+    check_param "net.ipv4.tcp_syncookies" "1" "Защита SYN-cookies" "Включена" "Отключена"
+    check_param "net.ipv4.tcp_congestion_control" "bbr" "Алгоритм TCP BBR" "Активен" "Стандартный"
+    check_param "net.ipv4.tcp_rfc1337" "1" "Защита Time-Wait (RFC1337)" "Включена" "Отключена"
 
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
@@ -1506,8 +1506,19 @@ mod_server_audit() {
     fi
 
     echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и Swap ---${C_RESET}"
+    
     local vm_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
-    echo -e "  • Параметр vm.swappiness:    ${C_BLUE}$vm_swappiness${C_RESET}"
+    local swappiness_human
+    if [ "$vm_swappiness" = "1" ]; then
+        swappiness_human="${C_GREEN}✅ 1 (Максимальное сбережение накопителя)${C_RESET}"
+    elif [ "$vm_swappiness" = "60" ]; then
+        swappiness_human="${C_YELLOW}⚠️ 60 (Стандартное, частая запись на диск)${C_RESET}"
+    elif [ "$vm_swappiness" = "N/A" ]; then
+        swappiness_human="${C_RED}❌ Ошибка чтения${C_RESET}"
+    else
+        swappiness_human="${C_BLUE}$vm_swappiness (Пользовательское значение)${C_RESET}"
+    fi
+    echo -e "  • Параметр vm.swappiness:    $swappiness_human"
 
     if mount | grep " / " | grep -q "noatime"; then
         echo -e "  • Метки времени (noatime):   ${C_GREEN}✅ Отключены (износ флеш-памяти снижен)${C_RESET}"

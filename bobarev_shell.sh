@@ -1136,11 +1136,12 @@ mod_desktop_apps() {
     local wt_width=$((term_cols < 75 ? term_cols : 75))
 
     # --- 1. Настройка CPU Governor ---
-    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "Выберите желаемый режим работы (Governor):\nТекущий режим напрямую влияет на скорость работы, нагрев и энергопотребление." 15 $wt_width 4 \
-    "1" "⚡ Performance (Максимум, для высоких нагрузок)" \
-    "2" "⚖️ Ondemand (Нормальный/динамический режим)" \
-    "3" "🍃 Powersave (Энергосбережение, низкий нагрев)" \
-    "0" "⏭️ Оставить без изменений" 3>&1 1>&2 2>&3)
+    # ИСПРАВЛЕНО: Добавлен отступ сверху (\n), ручной перенос длинного текста и лаконичные пункты
+    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $wt_width 4 \
+    "1" "⚡ Performance (Максимальный)" \
+    "2" "⚖️ Ondemand (Нормальный)" \
+    "3" "🍃 Powersave (Эко-режим)" \
+    "0" "⏭️ Без изменений" 3>&1 1>&2 2>&3)
 
     if [ $? -eq 0 ] && [ "$gov_choice" != "0" ]; then
         local selected_gov="ondemand"
@@ -1149,29 +1150,27 @@ mod_desktop_apps() {
         case "$gov_choice" in
             1) selected_gov="performance"; gov_name="Максимальный (Performance)" ;;
             2) selected_gov="ondemand"; gov_name="Нормальный (Ondemand)" ;;
-            3) selected_gov="powersave"; gov_name="Энергосберегающий (Powersave)" ;;
+            3) selected_gov="powersave"; gov_name="Эко-режим (Powersave)" ;;
         esac
 
         echo -e "${C_BLUE}⚙️ Установка режима процессора: $gov_name...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
-        
-        # Обновленный блок применения настроек
         silent_run apt-get update
-        silent_run apt-get install -yq cpufrequtils 
-        echo "GOVERNOR=$selected_gov" > /etc/default/cpufrequtils 
-        silent_run systemctl restart cpufrequtils 
+        silent_run apt-get install -yq cpufrequtils
+        
+        echo "GOVERNOR=$selected_gov" > /etc/default/cpufrequtils
+        silent_run systemctl restart cpufrequtils 2>/dev/null || true
         
         for cpu in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
             [ -f "$cpu" ] && echo "$selected_gov" > "$cpu" 2>/dev/null
         done
-        
-        echo -e "${C_GREEN}✅ Режим процессора успешно изменен на $gov_name.${C_RESET}" 
+        echo -e "${C_GREEN}✅ Режим процессора успешно изменен на $gov_name.${C_RESET}"
     else
         echo -e "${C_YELLOW}⏭️ Настройка режима процессора пропущена.${C_RESET}"
     fi
 
     # --- 2. Установка трей-апплетов ---
-    if whiptail --title "Графическое окружение" --yesno "Установить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом)." 12 $wt_width; then
+    if whiptail --title "Графическое окружение" --yesno "\nУстановить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом)." 13 $wt_width; then
         echo -e "${C_BLUE}📦 Установка утилит для графического интерфейса...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         silent_run apt-get update

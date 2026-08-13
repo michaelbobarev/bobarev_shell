@@ -2,21 +2,10 @@
 set -euo pipefail
 
 # ==============================================================================
-# ПРОВЕРКА БЕЗОПАСНОСТИ И СОВМЕСТИМОСТИ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ, ANSI-ЦВЕТА И АВТООПРЕДЕЛЕНИЕ
 # ==============================================================================
-if [ "$EUID" -ne 0 ]; then
-    echo -e "\033[0;31m❌ Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).\033[0m" >&2
-    exit 1
-fi
 
-if [ ! -f /etc/debian_version ]; then 
-    echo -e "\033[0;31m❌ Ошибка: Этот скрипт предназначен только для систем Debian или Ubuntu.\033[0m" 
-    exit 1 
-fi
-
-# ==============================================================================
-# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ И АВТООПРЕДЕЛЕНИЕ
-# ==============================================================================
+# ANSI-цвета для терминала (оставлены для вывода логов модулей)
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
 C_RED='\033[0;31m'
@@ -25,9 +14,13 @@ C_CYAN='\033[0;36m'
 C_BOLD='\033[1m'
 C_RESET='\033[0m'
 
+# Флаг отмены модуля
 MODULE_CANCELED=false
+
+# Гарантируем наличие /usr/sbin и /sbin в PATH для вызова sshd
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
+# Определение типа системы
 SYSTEM_TYPE="Cloud_VPS"
 if [ -f /etc/armbian-release ] || [ -f /etc/default/armbian-zram ] || grep -q -i "armbian\|nanopi\|raspberry" /etc/os-release 2>/dev/null; then
     SYSTEM_TYPE="SBC_Armbian"
@@ -37,73 +30,110 @@ elif [ "$(systemctl get-default 2>/dev/null)" = "graphical.target" ] || command 
     SYSTEM_TYPE="Desktop_PC"
 fi
 
+# Динамическое определение сетевых интерфейсов
 DEFAULT_WAN_IF=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
 
-# Кэширование размеров терминала для whiptail (будет обновляться в главном цикле)
-export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
-export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
-export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
-export WT_HEIGHT=$((TERM_LINES < 27 ? TERM_LINES : 27))
-
-# ==============================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ==============================================================================
-silent_run() { "$@" >/dev/null 2>&1 || true; }
-
-get_sshd_cmd() {
-    if command -v sshd &>/dev/null; then echo "sshd"
-    elif [ -x /usr/sbin/sshd ]; then echo "/usr/sbin/sshd"
-    elif [ -x /sbin/sshd ]; then echo "/sbin/sshd"
-    else echo ""; fi
+# Обертка для тихого выполнения команд
+silent_run() {
+    "$@" >/dev/null 2>&1 || true
 }
 
+# Поиск исполняемого файла sshd в системе
+get_sshd_cmd() {
+    if command -v sshd &>/dev/null; then
+        echo "sshd"
+    elif [ -x /usr/sbin/sshd ]; then
+        echo "/usr/sbin/sshd"
+    elif [ -x /sbin/sshd ]; then
+        echo "/sbin/sshd"
+    else
+        echo ""
+    fi
+}
+
+# Динамическое определение активного пользователя системы
 get_active_user() {
     local u="${SUDO_USER:-${LOGNAME:-${USER:-}}}"
     if [ -z "$u" ] || [ "$u" = "root" ]; then
         u=$(getent passwd | awk -F: '$3>=1000 && $3<60000 && $1!="nobody" {print $1; exit}' || echo "")
     fi
-    if [ -z "$u" ]; then u=$(id -nu 2>/dev/null || logname 2>/dev/null || echo "nobody"); fi
+    if [ -z "$u" ]; then
+        u=$(id -nu 2>/dev/null || logname 2>/dev/null || echo "nobody")
+    fi
     echo "$u"
 }
 
-# Парсинг Tailscale (Нативные утилиты, без Python)
+# Парсинг имени узла и аккаунта Tailscale
 get_tailscale_whoami() {
-    local raw=$(tailscale whoami 2>/dev/null || echo "")
-    local ts_user="N/A"
-    local ts_name="N/A"
-    
-    if [ -n "$raw" ]; then
-        ts_user=$(echo "$raw" | grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' | head -n 1 || echo "N/A")
-        ts_name=$(echo "$raw" | grep -oE '[a-zA-Z0-9.-]+\.(ts|tailscale)\.net' | head -n 1 || echo "N/A")
-        if [ "$ts_name" = "N/A" ]; then
-            ts_name=$(tailscale status --peers=false 2>/dev/null | awk 'NR==1 {print $2}')
-            [ -z "$ts_name" ] && ts_name="N/A"
-        fi
-    fi
-    echo "${ts_name}|${ts_user}"
+    python3 -c '
+import subprocess, re
+try:
+    whoami_raw = subprocess.check_output(["tailscale", "whoami"], stderr=subprocess.STDOUT, text=True)
+except Exception:
+    whoami_raw = ""
+
+email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", whoami_raw)
+ts_user = email_match.group(0) if email_match else "N/A"
+
+ts_name = "N/A"
+fqdn_match = re.search(r"([a-zA-Z0-9\.-]+\.(?:ts|tailscale)\.net)", whoami_raw)
+if fqdn_match:
+    ts_name = fqdn_match.group(1)
+else:
+    node_sec = re.search(r"Node:\s*\n?\s*(?:Name:)?\s*([a-zA-Z0-9\.-]+)", whoami_raw, re.IGNORECASE)
+    if node_sec:
+        ts_name = node_sec.group(1)
+    else:
+        mac_sec = re.search(r"Machine:\s*([a-zA-Z0-9\.-]+)", whoami_raw, re.IGNORECASE)
+        if mac_sec:
+            ts_name = mac_sec.group(1)
+        else:
+            words = [w for w in whoami_raw.replace("\n", " ").split() if "@" not in w and not w.endswith(":") and w.lower() not in ["machine", "node", "user"]]
+            if words:
+                ts_name = words[0]
+
+print(f"{ts_name}|{ts_user}")
+' 2>/dev/null || echo "N/A|N/A"
 }
 
 is_tailscale_authenticated() {
-    ! command -v tailscale &>/dev/null && return 1
-    local ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
-    [ -n "$ts_ip" ] && return 0
-    local status_out=$(tailscale status --peers=false 2>/dev/null || echo "Logged out")
-    echo "$status_out" | grep -q -iE "Logged out|NeedsLogin|Stopped" && return 1
+    if ! command -v tailscale &>/dev/null; then
+        return 1
+    fi
+    local ts_ip
+    ts_ip=$(tailscale ip -4 2>/dev/null || echo "")
+    if [ -n "$ts_ip" ]; then
+        return 0
+    fi
+    local status_out
+    status_out=$(tailscale status --peers=false 2>/dev/null || echo "Logged out")
+    if echo "$status_out" | grep -q -iE "Logged out|NeedsLogin|Stopped"; then
+        return 1
+    fi
     return 0
 }
 
 is_tailscale_web_active() {
-    local web_val=$(tailscale get webclient 2>/dev/null || echo "false")
-    [ "$web_val" = "true" ] && return 0
-    systemctl is-active --quiet tailscale-web.service 2>/dev/null && return 0
-    ps aux 2>/dev/null | grep -v grep | grep -q -iE "tailscale.*web" && return 0
+    local web_val
+    web_val=$(tailscale get webclient 2>/dev/null || echo "false")
+    if [ "$web_val" = "true" ]; then
+        return 0
+    fi
+    if systemctl is-active --quiet tailscale-web.service 2>/dev/null; then
+        return 0
+    fi
+    if ps aux 2>/dev/null | grep -v grep | grep -q -iE "tailscale.*web"; then
+        return 0
+    fi
     return 1
 }
 
 enable_tailscale_gro() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
-while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do sleep 2; done
+while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do
+    sleep 2
+done
 NETDEV=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
     ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off || true
@@ -116,10 +146,12 @@ ETHTOOL_SCRIPT_EOF
 Description=Ethtool rx-udp-gro-forwarding for Tailscale
 After=network-online.target
 Wants=network-online.target
+
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/tailscale-gro.sh
+
 [Install]
 WantedBy=multi-user.target
 ETHTOOL_SVC_EOF
@@ -128,23 +160,41 @@ ETHTOOL_SVC_EOF
     echo -e "${C_GREEN}✅ Служба оптимизации маршрутизации включена.${C_RESET}"
 }
 
-# Проверка доступности порта (Native Bash + ss/lsof + procfs)
 is_port_free() {
-    local port=$(echo "$1" | tr -dc '0-9')
-    [ -z "$port" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] && return 1
+    local port_raw="$1"
+    local port
+    port=$(echo "$port_raw" | tr -dc '0-9')
+
+    if [ -z "$port" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        return 1
+    fi
 
     if command -v ss &>/dev/null; then
-        ss -tuln 2>/dev/null | grep -qE ":${port}\b" && return 1
-        return 0
-    fi
-    if command -v lsof &>/dev/null; then
-        lsof -iTCP:"$port" -sTCP:LISTEN &>/dev/null && return 1
+        if ss -tuln 2>/dev/null | grep -qE ":${port}\b"; then
+            return 1
+        fi
         return 0
     fi
 
-    local hex_port=$(printf '%04X' "$port")
-    grep -qwi "$hex_port" /proc/net/tcp /proc/net/tcp6 2>/dev/null && return 1
-    return 0
+    if command -v lsof &>/dev/null; then
+        if lsof -iTCP:"$port" -sTCP:LISTEN &>/dev/null; then
+            return 1
+        fi
+        return 0
+    fi
+
+    python3 - "$port" << 'PY' 2>/dev/null
+import sys, socket
+try:
+    port = int(sys.argv[1].strip())
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('0.0.0.0', port))
+    s.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
 }
 
 get_interface_subnet() {
@@ -174,7 +224,8 @@ TS_EOF
     fi
 
     if is_tailscale_authenticated; then
-        local current_ip=$(tailscale ip -4 2>/dev/null || echo "100.x.x.x")
+        local current_ip
+        current_ip=$(tailscale ip -4 2>/dev/null || echo "100.x.x.x")
         echo -e "${C_GREEN}✅ Узел уже подключен к сети (IP: $current_ip).${C_RESET}"
         return 0
     fi
@@ -201,13 +252,19 @@ TS_EOF
     return 0
 }
 
+# ------------------------------------------------------------------------------
+# ФУНКЦИИ ВВОДА ЧЕРЕЗ WHIPTAIL (Безопасность + UX + Адаптивность)
+# ------------------------------------------------------------------------------
+
 prompt_yn() {
     local prompt="$1"
     local default_yes="$2"
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
     if [ "$default_yes" = "true" ]; then
-        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $WT_WIDTH; then return 0; else return 1; fi
+        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $wt_width; then return 0; else return 1; fi
     else
-        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $WT_WIDTH --defaultno; then return 0; else return 1; fi
+        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $wt_width --defaultno; then return 0; else return 1; fi
     fi
 }
 
@@ -216,7 +273,9 @@ prompt_default() {
     local default_val="$2"
     local var_name="$3"
     local val
-    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $WT_WIDTH "$default_val" 3>&1 1>&2 2>&3)
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $wt_width "$default_val" 3>&1 1>&2 2>&3)
     if [ $? -eq 0 ]; then
         printf -v "$var_name" "%s" "${val:-$default_val}"
         return 0
@@ -231,7 +290,9 @@ prompt_clean() {
     local prompt="$1"
     local var_name="$2"
     local val
-    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $wt_width 3>&1 1>&2 2>&3)
     if [ $? -eq 0 ]; then
         printf -v "$var_name" "%s" "$val"
         return 0
@@ -255,6 +316,11 @@ pause_enter() {
     read -r -p "Нажмите Enter для возврата в меню..." < /dev/tty
 }
 
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${C_RED}❌ Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).${C_RESET}" >&2
+    exit 1
+fi
+
 # ==============================================================================
 # МОДУЛИ НАСТРОЙКИ
 # ==============================================================================
@@ -262,7 +328,8 @@ pause_enter() {
 # 1. Часовой пояс
 mod_timezone() {
     echo -e "${C_CYAN}🌐 === 1/18. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
-    local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Europe/Moscow")
+    local current_tz
+    current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Europe/Moscow")
     echo "Текущий часовой пояс: $current_tz"
     local tz=""
     prompt_default "Введите новый часовой пояс:" "$current_tz" tz
@@ -281,6 +348,7 @@ mod_hostname() {
     case "$SYSTEM_TYPE" in
         SBC_Armbian) default_brand_host="Server_SBC" ;;
         Desktop_PC|Laptop_PC) default_brand_host="Server_PC" ;;
+        *) default_brand_host="Server_VPS" ;;
     esac
 
     local new_host=""
@@ -309,12 +377,13 @@ mod_apt_update() {
         silent_run systemctl mask zramswap.service
     fi
 
-    apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq $zram_pkg
+    apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq python3 python3-minimal $zram_pkg
     silent_run dpkg-reconfigure --priority=low unattended-upgrades
     apt-get autoremove -yq && apt-get clean
     systemctl enable unattended-upgrades
 
-    local current_target=$(systemctl get-default)
+    local current_target
+    current_target=$(systemctl get-default)
     echo "Текущий режим загрузки: $current_target"
 
     if [ "$current_target" = "graphical.target" ]; then
@@ -330,36 +399,43 @@ mod_apt_update() {
     echo -e "${C_GREEN}✅ Система успешно обновлена, необходимые базовые утилиты установлены.${C_RESET}"
 }
 
-# 4. Пользователь и Sudo (с защитой от существующих групп)
+# 4. Пользователь и Sudo
 mod_user_setup() {
     echo -e "${C_CYAN}👤 === 4/18. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
-    local active_user=$(get_active_user)
+    local active_user
+    active_user=$(get_active_user)
     local username=""
     prompt_default "Имя администратора:" "$active_user" username
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
 
     if ! id "$username" &>/dev/null; then
+        # Фикс: если группа уже существует (например, admin), используем группу users
         if getent group "$username" &>/dev/null; then
             adduser --disabled-password --gecos "" --ingroup users "$username" || true
         else
             adduser --disabled-password --gecos "" "$username" || true
         fi
         
+        # Надежный фоллбэк, если adduser всё равно не справился
         if ! id "$username" &>/dev/null; then
             useradd -m -s /bin/bash "$username" || true
         fi
         echo -e "${C_GREEN}✅ Учетная запись $username создана.${C_RESET}"
     fi
     
+    # Защита от прерывания скрипта
     usermod -aG sudo "$username" || true
 
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     local pass
-    pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (оставьте пустым для отмены):" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
+    pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (оставьте пустым для отмены):" 10 $wt_width 3>&1 1>&2 2>&3)
     if [ $? -ne 0 ] || [ -z "$pass" ]; then
         echo -e "${C_YELLOW}ℹ️ Смена пароля пропущена.${C_RESET}"
     else
         local pass_confirm
-        pass_confirm=$(whiptail --title "Подтверждение" --passwordbox "Повторите пароль:" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
+        pass_confirm=$(whiptail --title "Подтверждение" --passwordbox "Повторите пароль:" 10 $wt_width 3>&1 1>&2 2>&3)
         if [ "$pass" != "$pass_confirm" ]; then
             echo -e "${C_RED}❌ Введенные пароли не совпадают. Попробуйте снова.${C_RESET}"
         else
@@ -382,7 +458,8 @@ mod_user_setup() {
 # 5. SSH-ключи
 mod_ssh_key() {
     echo -e "${C_CYAN}🔑 === 5/18. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
-    local active_user=$(get_active_user)
+    local active_user
+    active_user=$(get_active_user)
     local target_user=""
     prompt_default "Для какого пользователя привязать ключ?" "$active_user" target_user
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
@@ -393,21 +470,26 @@ mod_ssh_key() {
         usermod -aG sudo "$target_user"
     fi
 
-    local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    local target_home
+    target_home=$(getent passwd "$target_user" | cut -d: -f6)
     [ -z "$target_home" ] && target_home="/home/$target_user"
 
     mkdir -p "$target_home/.ssh"
 
     local pubkey=""
     if [ -f /root/.ssh/authorized_keys ] && [ -s /root/.ssh/authorized_keys ]; then
-        local root_key=$(head -n 1 /root/.ssh/authorized_keys)
+        local root_key
+        root_key=$(head -n 1 /root/.ssh/authorized_keys)
         if prompt_yn "Скопировать существующий ключ безопасности из профиля root?" "true"; then
             pubkey="$root_key"
         fi
     fi
 
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     if [ -z "$pubkey" ]; then
-        pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
+        pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 $wt_width 3>&1 1>&2 2>&3)
         if [ $? -ne 0 ] || [ -z "$pubkey" ]; then
             echo -e "${C_YELLOW}↩️ Отмена. Возврат в главное меню...${C_RESET}"
             return 0
@@ -416,7 +498,7 @@ mod_ssh_key() {
 
     if [ -n "$pubkey" ]; then
         local mode_choice
-        mode_choice=$(whiptail --title "Параметры сохранения" --menu "Выберите действие:" 12 $WT_WIDTH 2 \
+        mode_choice=$(whiptail --title "Параметры сохранения" --menu "Выберите действие:" 12 $wt_width 2 \
         "1" "Добавить ключ в существующий список" \
         "2" "Полностью перезаписать список ключей" 3>&1 1>&2 2>&3)
         
@@ -448,8 +530,13 @@ mod_ssh_key() {
 # 6. Конфигурация SSH (Безопасный drop-in метод с абсолютным приоритетом)
 mod_ssh_config() {
     echo -e "${C_CYAN}🔒 === 6/18. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
+    
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
 
     backup_file "/etc/ssh/sshd_config"
+
+    # Безопасное отключение старых параметров в главном конфиге
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
 
     local sshd_cmd=$(get_sshd_cmd)
@@ -466,12 +553,12 @@ mod_ssh_config() {
         port=$(echo "$port" | tr -dc '0-9')
 
         if [ -z "$port" ]; then
-            whiptail --msgbox "Ошибка: Значение порта должно состоять только из цифр." 8 $WT_WIDTH
+            whiptail --msgbox "Ошибка: Значение порта должно состоять только из цифр. Попробуйте снова." 8 $wt_width
             continue
         fi
 
         if [ "$port" != "$active_ssh_port" ] && ! is_port_free "$port"; then
-            if ! prompt_yn "Внимание: Указанный порт, возможно, занят. Вы всё равно хотите его использовать?" "false"; then
+            if ! prompt_yn "Внимание: Указанный порт, возможно, занят другим приложением. Вы всё равно хотите его использовать?" "false"; then
                 if [ "$MODULE_CANCELED" = true ]; then return 0; fi
                 continue
             fi
@@ -487,7 +574,7 @@ mod_ssh_config() {
     local kbd_auth_val="yes"
 
     if [ -s "$user_home/.ssh/authorized_keys" ] || [ -s "/root/.ssh/authorized_keys" ]; then
-        if whiptail --title "Подтверждение" --yesno "Отключить авторизацию по паролю\n(разрешить доступ ТОЛЬКО по привязанным ключам)?" 11 $WT_WIDTH; then
+        if whiptail --title "Подтверждение" --yesno "Отключить авторизацию по паролю\n(разрешить доступ ТОЛЬКО по привязанным ключам)?" 11 $wt_width; then
             pass_auth_val="no"
             kbd_auth_val="no"
             echo -e "${C_GREEN}✅ Выбрано: Вход по паролю будет отключен.${C_RESET}"
@@ -495,12 +582,12 @@ mod_ssh_config() {
             echo -e "${C_YELLOW}⚠️ Выбрано: Вход по паролю оставлен включенным.${C_RESET}"
         fi
     else
-        whiptail --msgbox "Внимание: На сервере не найдено ни одного привязанного ключа безопасности!\nВход по паролю ОСТАЕТСЯ ВКЛЮЧЕННЫМ для предотвращения полной потери доступа." 11 $WT_WIDTH
+        whiptail --msgbox "Внимание: На сервере не найдено ни одного привязанного ключа безопасности!\nВход по паролю ОСТАЕТСЯ ВКЛЮЧЕННЫМ для предотвращения полной потери доступа." 11 $wt_width
         echo -e "${C_YELLOW}⚠️ Вход по паролю сохранен.${C_RESET}"
     fi
 
     local disable_root="no"
-    if whiptail --title "Подтверждение" --yesno "Запретить прямой вход для пользователя root по SSH?" 11 $WT_WIDTH; then
+    if whiptail --title "Подтверждение" --yesno "Запретить прямой вход для пользователя root по SSH?" 11 $wt_width; then
         disable_root="no"
         echo -e "${C_GREEN}✅ Выбрано: Вход для root запрещен.${C_RESET}"
     else
@@ -525,6 +612,7 @@ mod_ssh_config() {
 
     echo -e "${C_BLUE}⚙️ Применение параметров безопасности...${C_RESET}"
     
+    # 🧹 ЖЕСТКАЯ ЗАЧИСТКА: Удаляем все сторонние конфиги (cloud-init и т.д.)
     echo -e "${C_BLUE}🧹 Очистка сторонних конфигураций SSH...${C_RESET}"
     rm -f "$conf_dir"/*.conf 2>/dev/null
     
@@ -570,6 +658,7 @@ SSH_HARDENING_EOF
 
         if [ "$restrict_choice" = true ]; then
             if ensure_tailscale_installed; then
+                # ИСПРАВЛЕНО: точный поиск активного статуса
                 if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
                     silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
                     silent_run ufw delete allow "$port"/tcp
@@ -586,6 +675,7 @@ SSH_HARDENING_EOF
         fi
         echo -e "${C_GREEN}✅ Служба удаленного доступа успешно перезапущена с абсолютным приоритетом параметров.${C_RESET}"
     else
+
         echo -e "${C_RED}❌ Ошибка применения параметров безопасности! Выполнен откат изменений...${C_RESET}"
         rm -f "$conf_file"
         systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
@@ -650,6 +740,7 @@ mod_ufw() {
     active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
     local port="${active_ssh_port:-22}"
 
+    # ИСПРАВЛЕНИЕ: Больше не спрашиваем порт. Скрипт сам берет реальный порт SSH.
     echo -e "${C_BLUE}ℹ️ Автоматически определен порт SSH: $port${C_RESET}"
 
     silent_run ufw --force reset
@@ -664,6 +755,7 @@ mod_ufw() {
         silent_run sed -i 's/DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw
     fi
 
+    # ИСПРАВЛЕНИЕ: Проверяем новый файл 00-bobarev-security.conf
     local is_ts_restricted_in_mod6=false
     if grep -q "SSH via Tailscale only" /etc/ssh/sshd_config.d/00-bobarev-security.conf 2>/dev/null; then
         is_ts_restricted_in_mod6=true
@@ -671,7 +763,7 @@ mod_ufw() {
 
     local do_restrict=false
     if [ "$is_ts_restricted_in_mod6" = true ]; then
-        echo -e "${C_BLUE}ℹ️ Ограничение удаленного доступа применено автоматически.${C_RESET}"
+        echo -e "${C_BLUE}ℹ️ Ограничение удаленного доступа применено автоматически (на основе вашего выбора в Модуле 6).${C_RESET}"
         do_restrict=true
     elif prompt_yn "Разрешить подключения к серверу ТОЛЬКО участникам вашей закрытой сети Tailscale?" "true"; then
         do_restrict=true
@@ -715,8 +807,11 @@ mod_lock_root() {
 
     echo -e "${C_CYAN}🔐 === 9/18. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     local root_choice
-    root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
+    root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $wt_width 2 \
     "1" "Заблокировать" \
     "2" "Разблокировать" 3>&1 1>&2 2>&3)
     
@@ -740,6 +835,7 @@ mod_lock_root_auto() { mod_lock_root "auto"; }
 mod_tailscale() {
     local mode="${1:-}"
     if [ "$mode" = "auto" ]; then
+        # Добавлен запрос разрешения перед установкой в автоматическом режиме
         if prompt_yn "Установить и настроить закрытую сеть Tailscale на этом сервере?" "true"; then
             ensure_tailscale_installed || true
             enable_tailscale_gro || true
@@ -749,9 +845,12 @@ mod_tailscale() {
         return 0
     fi
 
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     while true; do
         local ts_choice
-        ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
+        ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $wt_width 9 \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза (Exit Node)" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -784,7 +883,7 @@ mod_tailscale() {
                 pause_enter
                 ;;
             2)
-                local en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3)
+                local en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $wt_width 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3)
                 if [ $? -eq 0 ]; then
                     case "$en_choice" in
                         1) silent_run tailscale set --advertise-exit-node=true; echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" ;;
@@ -854,17 +953,71 @@ mod_tailscale() {
 }
 mod_tailscale_auto() { mod_tailscale "auto"; }
 
-# 11. Безопасная настройка логов
-mod_safe_logging() { 
-    echo -e "${C_CYAN}🧹 === 11/18. БЕЗОПАСНАЯ НАСТРОЙКА ЖУРНАЛОВ ===${C_RESET}" 
-    
+# 11. Отключение системного логирования
+mod_disable_logging() {
+    echo -e "${C_CYAN}🧹 === 11/18. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     backup_file "/etc/systemd/journald.conf"
-    
-    silent_run sed -i -E 's/^\s*#?\s*SystemMaxUse=.*/SystemMaxUse=100M/' /etc/systemd/journald.conf 
-    silent_run sed -i -E 's/^\s*#?\s*MaxRetentionSec=.*/MaxRetentionSec=1month/' /etc/systemd/journald.conf 
-    
-    silent_run systemctl restart systemd-journald 
-    echo -e "${C_GREEN}✅ Журналы безопасно ограничены по размеру (100M) и времени хранения (1 месяц).${C_RESET}" 
+
+    cat << 'DISABLE_LOGS_EOF' > /usr/local/bin/disable-logging.sh
+#!/bin/bash
+set -euo pipefail
+sed -i -E '/^\s*#?\s*(Storage|ForwardToSyslog|ForwardToKMsg|ForwardToConsole|ForwardToWall)=/d' /etc/systemd/journald.conf
+cat << 'CONF' >> /etc/systemd/journald.conf
+[Journal]
+Storage=none
+ForwardToSyslog=no
+ForwardToKMsg=no
+ForwardToConsole=no
+ForwardToWall=no
+CONF
+
+journalctl --rotate 2>/dev/null || true
+journalctl --vacuum-time=1s 2>/dev/null || true
+systemctl restart systemd-journald
+
+for svc in rsyslog auditd armbian-hardware-monitor; do
+  if systemctl list-unit-files | grep -q "^${svc}.service"; then
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
+    systemctl mask "$svc" 2>/dev/null || true
+  fi
+done
+[ -x "$(command -v auditctl)" ] && auditctl -e 0 2>/dev/null || true
+[ -x "$(command -v warp-cli)" ] && warp-cli log disable 2>/dev/null || true
+[ -x "$(command -v ufw)" ] && ufw logging off >/dev/null 2>&1 || true
+
+mkdir -p /etc/apt/apt.conf.d
+cat << 'APT_CLEAN_EOF' > /etc/apt/apt.conf.d/99clean-logs
+DPkg::Post-Invoke {"truncate -s 0 /var/log/dpkg.log /var/log/alternatives.log /var/log/apt/*.log 2>/dev/null || true";};
+APT_CLEAN_EOF
+
+find /var/log -type f \( -name "*.log*" -o -name "syslog*" -o -name "auth.log*" -o -name "kern.log*" -o -name "ufw.log*" -o -name "dpkg*" -o -name "wtmp*" -o -name "btmp*" -o -name "lastlog*" \) -exec truncate -s 0 {} + 2>/dev/null || true
+find /var/log -type f \( -name "*.[0-9]" -o -name "*.gz" \) -delete 2>/dev/null || true
+rm -rf /var/log/journal /run/log/journal 2>/dev/null || true
+journalctl --vacuum-size=1M 2>/dev/null || true
+DISABLE_LOGS_EOF
+
+    chmod +x /usr/local/bin/disable-logging.sh
+
+    tee /etc/systemd/system/clean-logs-boot.service > /dev/null << 'BOOT_CLEAN_SVC_EOF'
+[Unit]
+Description=Automated System Log Cleanup on Boot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/disable-logging.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BOOT_CLEAN_SVC_EOF
+
+    systemctl daemon-reload
+    silent_run systemctl enable clean-logs-boot.service
+
+    /usr/local/bin/disable-logging.sh
+    echo -e "${C_GREEN}✅ Полное отключение системного журналирования успешно настроено.${C_RESET}"
 }
 
 # 12. Оптимизация RAM / Flash
@@ -937,7 +1090,10 @@ PY
 
 # 13. Менеджер Swap
 mod_swap_manager() {
-    local swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 $WT_WIDTH 3 \
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
+    local swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 $wt_width 3 \
     "1" "Создать базовый объем (2 Гигабайта)" \
     "2" "Указать собственный объем" \
     "3" "Полностью отключить файл подкачки" 3>&1 1>&2 2>&3)
@@ -976,8 +1132,12 @@ mod_swap_manager() {
 mod_desktop_apps() {
     echo -e "${C_CYAN}🖥️ === 14/18. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
     # --- 1. Настройка CPU Governor ---
-    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
+    # ИСПРАВЛЕНО: Добавлен отступ сверху (\n), ручной перенос длинного текста и лаконичные пункты
+    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $wt_width 4 \
     "1" "⚡ Performance (Максимальный)" \
     "2" "⚖️ Ondemand (Нормальный)" \
     "3" "🍃 Powersave (Эко-режим)" \
@@ -1010,7 +1170,7 @@ mod_desktop_apps() {
     fi
 
     # --- 2. Установка трей-апплетов ---
-    if whiptail --title "Графическое окружение" --yesno "\nУстановить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом)." 13 $WT_WIDTH; then
+    if whiptail --title "Графическое окружение" --yesno "\nУстановить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом)." 13 $wt_width; then
         echo -e "${C_BLUE}📦 Установка утилит для графического интерфейса...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         silent_run apt-get update
@@ -1097,13 +1257,16 @@ mod_boot_diag() {
         return
     fi
 
-    local target_user=$(get_active_user)
-    local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    local target_user
+    target_user=$(get_active_user)
+    local target_home
+    target_home=$(getent passwd "$target_user" | cut -d: -f6)
     [ -z "$target_home" ] && target_home="/home/$target_user"
 
     local output_dir="$target_home/Downloads"
     mkdir -p "$output_dir"
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
     local report_file="$output_dir/boot_report_${timestamp}.txt"
     local svg_file="$output_dir/boot_${timestamp}.svg"
 
@@ -1197,6 +1360,7 @@ mod_server_audit() {
         echo -e "  • Статус учетной записи root: ${C_RED}❌ Активна (разрешен вход)${C_RESET}"
     fi
 
+    # УНИВЕРСАЛЬНЫЙ БЛОК SSH: Запрашиваем данные напрямую у демона, игнорируя названия файлов
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
     local ssh_port="22" root_ssh="yes" pass_auth="yes"
     local sshd_cmd=$(get_sshd_cmd)
@@ -1238,6 +1402,7 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
         local param="$1" expected="$2" name="$3" ok_msg="$4" err_msg="$5"
+        # Запрашиваем параметры напрямую из живого ядра
         local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
         if [ "$val" = "$expected" ]; then
             echo -e "  • $name: ${C_GREEN}✅ $ok_msg${C_RESET}"
@@ -1314,6 +1479,7 @@ mod_server_audit() {
             speed="Не определена"
         fi
         
+        # Читаем живую статистику пакетов прямо из ядра
         local rx_err=$(cat /sys/class/net/"$iface"/statistics/rx_errors 2>/dev/null || echo "0")
         local tx_err=$(cat /sys/class/net/"$iface"/statistics/tx_errors 2>/dev/null || echo "0")
         local rx_drop=$(cat /sys/class/net/"$iface"/statistics/rx_dropped 2>/dev/null || echo "0")
@@ -1340,6 +1506,7 @@ mod_server_audit() {
     fi
 
     echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и Swap ---${C_RESET}"
+    
     local vm_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
     local swappiness_human
     if [ "$vm_swappiness" = "1" ]; then
@@ -1365,6 +1532,7 @@ mod_server_audit() {
         echo -e "  • Отложенная запись (commit): ${C_YELLOW}⚠️ Стандартная (повышенный износ флеш-памяти)${C_RESET}"
     fi
 
+    # Проверяем живую конфигурацию файлов подкачки
     local current_swap=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "")
     [ -z "$current_swap" ] && current_swap="Отключен"
     echo -e "  • Активный файл Swap:        ${C_BLUE}$current_swap${C_RESET}"
@@ -1376,14 +1544,18 @@ mod_server_audit() {
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/18. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     
-    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $WT_WIDTH; then
+    local term_cols=$(tput cols 2>/dev/null || echo 75)
+    local wt_width=$((term_cols < 75 ? term_cols : 75))
+
+    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $wt_width; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         return 0
     fi
 
+    # 1. Поиск интерфейсов (исключаем lo, tailscale и виртуальные)
     local available_ifs=$(ip -br link show | grep -vE "DOWN|tailscale0|lo|wg" | awk '{print $1}')
     if [ -z "$available_ifs" ]; then
-        whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
+        whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $wt_width
         return 0
     fi
 
@@ -1391,12 +1563,13 @@ mod_router_sbc() {
     prompt_clean "Введите имя LAN-интерфейса, к которому подключены клиенты (Доступно: $(echo $available_ifs | tr '\n' ' ')): " lan_if
     if [ "$MODULE_CANCELED" = true ] || [ -z "$lan_if" ]; then return 0; fi
 
+    # 2. Настройка подсети (Защита от конфликтов)
     local lan_ip="192.168.199.1"
     prompt_clean "Введите статический IP для этого шлюза (например, 192.168.199.1):" lan_ip
     [ "$MODULE_CANCELED" = true ] && return 0
 
     if [[ "$lan_ip" == 100.* ]]; then
-        whiptail --msgbox "⚠️ ВНИМАНИЕ: Подсеть 100.x.x.x конфликтует с адресацией Tailscale (CGNAT). Пожалуйста, используйте диапазоны 192.168.x.x или 10.x.x.x!" 10 $WT_WIDTH
+        whiptail --msgbox "⚠️ ВНИМАНИЕ: Подсеть 100.x.x.x конфликтует с адресацией Tailscale (CGNAT). Пожалуйста, используйте диапазоны 192.168.x.x или 10.x.x.x!" 10 $wt_width
         return 0
     fi
 
@@ -1409,6 +1582,7 @@ mod_router_sbc() {
     silent_run apt-get update
     silent_run apt-get install -yq dnsmasq iptables iptables-persistent network-manager
 
+    # 3. Привязка статического IP к интерфейсу
     echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
     if command -v nmcli &>/dev/null; then
         silent_run nmcli con delete "$lan_if" 2>/dev/null
@@ -1420,6 +1594,7 @@ mod_router_sbc() {
         ip link set dev "$lan_if" up
     fi
 
+    # 4. Настройка DHCP и DNS (dnsmasq)
     echo -e "${C_BLUE}⚙️ Настройка сервера DHCP и DNS...${C_RESET}"
     backup_file "/etc/dnsmasq.conf"
     
@@ -1442,6 +1617,7 @@ EOF
     systemctl enable dnsmasq 2>/dev/null
     systemctl restart dnsmasq || echo -e "${C_YELLOW}⚠️ Ошибка запуска dnsmasq. Проверьте конфликты порта 53.${C_RESET}"
 
+    # 5. Открытие портов 53 (DNS) и 67 (DHCP) в брандмауэре
     echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра для локальной сети...${C_RESET}"
     if command -v ufw &>/dev/null; then
         silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
@@ -1449,11 +1625,13 @@ EOF
         silent_run ufw allow in on "$lan_if" to any port 53 proto tcp comment 'LAN DNS (TCP)'
     fi
     
+    # Прямые правила iptables для приема локального трафика
     iptables -D INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT 2>/dev/null || true
     iptables -D INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
     iptables -I INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT
     iptables -I INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT
 
+    # 6. Маршрутизация (IP Forwarding) и NAT
     echo -e "${C_BLUE}⚙️ Включение маршрутизации и трансляции адресов (NAT)...${C_RESET}"
     sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
@@ -1462,6 +1640,7 @@ EOF
     iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
     iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
     
+    # 7. Фиксация MSS (MSS Clamping) и FORWARD
     if ! iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then
         iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     fi
@@ -1470,15 +1649,19 @@ EOF
     iptables -A FORWARD -i "$lan_if" -j ACCEPT
     iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
+    # 7.5. Параноидальный Kill Switch
     local wan_if=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
     if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
         echo -e "${C_BLUE}🛡️ Активация Kill Switch (блокировка прямого выхода через $wan_if)...${C_RESET}"
+        # Удаляем правило, если оно уже было, чтобы не дублировать
         iptables -D FORWARD -i "$lan_if" -o "$wan_if" -j DROP 2>/dev/null || true
+        # Добавляем в начало цепочки, чтобы отсекать на корню
         iptables -I FORWARD 1 -i "$lan_if" -o "$wan_if" -j DROP
     else
         echo -e "${C_YELLOW}⚠️ WAN интерфейс не определен, Kill Switch пропущен.${C_RESET}"
     fi
 
+    # 8. Сохранение правил брандмауэра
     echo -e "${C_BLUE}💾 Сохранение правил маршрутизации...${C_RESET}"
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/rules.v4
@@ -1506,6 +1689,7 @@ while true; do
         if is_tailscale_web_active; then ts_main_status="Активна (включая веб-панель)"; else ts_main_status="Активна"; fi
     fi
     
+    # Человекоподобный статус UFW (Исправленный поиск точного слова)
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         ufw_status="Активен"
     else
@@ -1514,11 +1698,13 @@ while true; do
     
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
 
-    # Пересчет размеров интерфейса на лету при возврате в меню
-    export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
-    export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
-    export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
-    export WT_HEIGHT=$((TERM_LINES < 27 ? TERM_LINES : 27))
+    # 📱 АДАПТИВНОСТЬ ДЛЯ МЕНЮ
+    TERM_COLS=$(tput cols 2>/dev/null || echo 85)
+    TERM_LINES=$(tput lines 2>/dev/null || echo 27)
+    
+    if [ "$TERM_COLS" -lt 85 ]; then WT_WIDTH=$TERM_COLS; else WT_WIDTH=85; fi
+    if [ "$TERM_LINES" -lt 27 ]; then WT_HEIGHT=$TERM_LINES; else WT_HEIGHT=27; fi
+    
     WT_MENU=$((WT_HEIGHT - 14))
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
@@ -1540,7 +1726,7 @@ while true; do
     "8" "🔥 Управление брандмауэром" \
     "9" "🔐 Блокировка доступа суперпользователя" \
     "10" "🔗 Настройка закрытой сети Tailscale" \
-    "11" "🧹 Безопасная настройка журналов" \
+    "11" "🗑️ Отключение системных журналов" \
     "12" "⚡ Оптимизация памяти" \
     "13" "💾 Управление файлом подкачки" \
     "14" "🖥️ Утилиты ПК и режим процессора" \
@@ -1571,7 +1757,7 @@ while true; do
         8) mod_ufw; pause_enter ;;
         9) mod_lock_root; pause_enter ;;
         10) mod_tailscale ;;
-        11) mod_safe_logging; pause_enter ;;
+        11) mod_disable_logging; pause_enter ;;
         12) mod_ram_flash_opt; pause_enter ;;
         13) mod_swap_manager; pause_enter ;;
         14) mod_desktop_apps; pause_enter ;;
@@ -1582,7 +1768,7 @@ while true; do
         A)
             echo "🚀 ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
             local_aborted=false
-            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_safe_logging mod_ram_flash_opt; do
+            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_disable_logging mod_ram_flash_opt; do
                 MODULE_CANCELED=false
                 $m
                 if [ "$MODULE_CANCELED" = true ]; then

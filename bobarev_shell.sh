@@ -1132,7 +1132,6 @@ mod_swap_manager() {
 mod_desktop_apps() {
     echo -e "${C_CYAN}🖥️ === 14/18. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
-    # 📱 АДАПТИВНОСТЬ: Вычисляем ширину для мобильных устройств
     local term_cols=$(tput cols 2>/dev/null || echo 75)
     local wt_width=$((term_cols < 75 ? term_cols : 75))
 
@@ -1155,16 +1154,18 @@ mod_desktop_apps() {
 
         echo -e "${C_BLUE}⚙️ Установка режима процессора: $gov_name...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
-        silent_run apt-get update
-        silent_run apt-get install -yq cpufrequtils
         
-        echo "GOVERNOR=\"$selected_gov\"" > /etc/default/cpufrequtils
-        systemctl restart cpufrequtils 2>/dev/null || true
+        # Обновленный блок применения настроек
+        silent_run apt-get update
+        silent_run apt-get install -yq cpufrequtils 
+        echo "GOVERNOR=$selected_gov" > /etc/default/cpufrequtils 
+        silent_run systemctl restart cpufrequtils 
         
         for cpu in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
             [ -f "$cpu" ] && echo "$selected_gov" > "$cpu" 2>/dev/null
         done
-        echo -e "${C_GREEN}✅ Режим процессора изменен на '$selected_gov'.${C_RESET}"
+        
+        echo -e "${C_GREEN}✅ Режим процессора успешно изменен на $gov_name.${C_RESET}" 
     else
         echo -e "${C_YELLOW}⏭️ Настройка режима процессора пропущена.${C_RESET}"
     fi

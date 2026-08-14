@@ -1270,7 +1270,9 @@ mod_server_audit() {
         echo -e "  • Права Sudo для $active_user:  ${C_BLUE}ℹ️ Стандартный запрос пароля${C_RESET}"
     fi
 
-    local root_locked=$(passwd -S root 2>/dev/null || awk '{print $2}' || echo "P")
+    # ИСПРАВЛЕННАЯ СТРОКА: Заменили || awk на | awk
+    local root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
+    
     if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
         echo -e "  • Статус учетной записи root: ${C_GREEN}✅ Заблокирована (безопасно)${C_RESET}"
     else

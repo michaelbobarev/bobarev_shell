@@ -18,7 +18,7 @@ MODULE_CANCELED=false
 # Безопасное добавление (а не перезапись) путей
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-# Глобальные переменные UI (первичная инициализация, обновляется в главном цикле)
+# Глобальные переменные UI (первичная инициализация)
 export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
 export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
 export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
@@ -285,7 +285,6 @@ mod_hostname() {
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
 
     hostnamectl set-hostname "$new_host"
-    # Гибкий Regex для безопасной замены с любыми пробелами/табуляциями
     if ! grep -q "$new_host" /etc/hosts; then
         silent_run sed -i -E "s/^127\.0\.0\.1[[:space:]]+localhost/& $new_host/" /etc/hosts
     fi
@@ -293,7 +292,7 @@ mod_hostname() {
     echo -e "${C_GREEN}✅ Имя сервера изменено на $new_host.${C_RESET}"
 }
 
-# 3. Обновление пакетов (Избавились от Python)
+# 3. Обновление пакетов
 mod_apt_update() {
     echo -e "${C_CYAN}📦 === 3/18. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
@@ -307,7 +306,6 @@ mod_apt_update() {
         silent_run systemctl mask zramswap.service
     fi
 
-    # Python исключен из зависимостей
     apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq $zram_pkg
     silent_run dpkg-reconfigure --priority=low unattended-upgrades
     apt-get autoremove -yq && apt-get clean
@@ -751,12 +749,12 @@ mod_tailscale() {
     while true; do
         local ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
         "1" "🔑 Авторизация" \
-        "2" "🌐 Настройка шлюза (Exit Node)" \
-        "3" "🔀 Трансляция локальных сетей" \
+        "2" "🌐 Шлюз (Exit Node)" \
+        "3" "🔀 Маршруты LAN" \
         "4" "🛡️ Прием маршрутов" \
         "5" "🔒 Стелс-режим" \
-        "6" "⚡ Оптимизация маршрутизации" \
-        "7" "💻 Локальный веб-интерфейс" \
+        "6" "⚡ Ускорение трафика" \
+        "7" "💻 Веб-интерфейс" \
         "8" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3)
 
@@ -782,7 +780,7 @@ mod_tailscale() {
                 pause_enter
                 ;;
             2)
-                local en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3)
+                local en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Сделать сервером" "2" "Отключить шлюз" "3" "Подключиться к шлюзу" "4" "Отключиться" 3>&1 1>&2 2>&3)
                 if [ $? -eq 0 ]; then
                     case "$en_choice" in
                         1) silent_run tailscale set --advertise-exit-node=true; echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" ;;
@@ -854,13 +852,13 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 
 # 11. Управление логированием (Интерактивный менеджер)
 mod_logging_manager() {
-    echo -e "${C_CYAN}🧹 === 11/18. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
+    echo -e "${C_CYAN}📝 === 11/18. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
-    local log_choice=$(whiptail --title "Управление логами" --menu "Выберите режим работы системных журналов:" 14 $WT_WIDTH 4 \
-    "1" "Безопасное ограничение (100 МБ / 1 месяц)" \
-    "2" "Указать свой лимит (Custom)" \
-    "3" "Полностью отключить логирование (Stealth)" \
-    "0" "Оставить без изменений" 3>&1 1>&2 2>&3)
+    local log_choice=$(whiptail --title "Управление логами" --menu "Режим работы логов:" 14 $WT_WIDTH 4 \
+    "1" "Ограничить (100 МБ)" \
+    "2" "Свой лимит" \
+    "3" "Отключить логи" \
+    "0" "Оставить как есть" 3>&1 1>&2 2>&3)
     
     if [ $? -ne 0 ] || [ "$log_choice" = "0" ]; then return 0; fi
     
@@ -869,7 +867,7 @@ mod_logging_manager() {
     if [ "$log_choice" = "1" ] || [ "$log_choice" = "2" ]; then
         local log_size="100M"
         if [ "$log_choice" = "2" ]; then
-            prompt_default "Введите максимальный размер логов (например: 50M, 200M, 1G):" "100M" log_size
+            prompt_default "Максимальный размер логов (50M, 200M, 1G):" "100M" log_size
             [ "$MODULE_CANCELED" = true ] && return 0
         fi
         
@@ -960,7 +958,7 @@ mod_logging_manager_auto() {
     silent_run systemctl restart systemd-journald
 }
 
-# 12. Оптимизация RAM / Flash (Полностью без Python)
+# 12. Оптимизация RAM / Flash
 mod_ram_flash_opt() {
     echo -e "${C_CYAN}⚡ === 12/18. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
@@ -976,7 +974,6 @@ kernel.dmesg_restrict=1
 EOF
     sysctl --system > /dev/null
 
-    # Нативное редактирование /etc/fstab через awk
     awk '
     BEGIN { OFS="\t" }
     !/^#/ && $2 == "/" {
@@ -1618,7 +1615,7 @@ while true; do
     "8" "🔥 Управление брандмауэром" \
     "9" "🔐 Блокировка доступа суперпользователя" \
     "10" "🔗 Настройка закрытой сети Tailscale" \
-    "11" "🧹 Управление системными журналами" \
+    "11" "📝 Управление системными журналами" \
     "12" "⚡ Оптимизация памяти" \
     "13" "💾 Управление файлом подкачки" \
     "14" "🖥️ Утилиты ПК и режим процессора" \

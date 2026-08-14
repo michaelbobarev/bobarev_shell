@@ -189,7 +189,7 @@ TS_EOF
 }
 
 # ------------------------------------------------------------------------------
-# БЕЗОПАСНЫЕ ФУНКЦИИ ВВОДА WHIPTAIL (Защита от вылетов set -e при отмене)
+# БЕЗОПАСНЫЕ ФУНКЦИИ ВВОДА WHIPTAIL
 # ------------------------------------------------------------------------------
 prompt_yn() {
     local prompt="$1"
@@ -783,7 +783,7 @@ mod_tailscale() {
                 ;;
             2)
                 local en_choice
-                if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Сделать этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
+                if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
                         1) silent_run tailscale set --advertise-exit-node=true; echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" ;;
                         2) silent_run tailscale set --advertise-exit-node=false; echo -e "${C_GREEN}✅ Функция сетевого шлюза отключена.${C_RESET}" ;;
@@ -1270,7 +1270,7 @@ mod_server_audit() {
         echo -e "  • Права Sudo для $active_user:  ${C_BLUE}ℹ️ Стандартный запрос пароля${C_RESET}"
     fi
 
-    local root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "P")
+    local root_locked=$(passwd -S root 2>/dev/null || awk '{print $2}' || echo "P")
     if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
         echo -e "  • Статус учетной записи root: ${C_GREEN}✅ Заблокирована (безопасно)${C_RESET}"
     else
@@ -1602,7 +1602,7 @@ while true; do
     WT_MENU=$((WT_HEIGHT - 14))
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
-    local choice
+    choice=""
     if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)

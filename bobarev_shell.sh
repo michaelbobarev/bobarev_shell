@@ -18,7 +18,7 @@ MODULE_CANCELED=false
 # Безопасное добавление (а не перезапись) путей
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-# Глобальные переменные UI (первичная инициализация)
+# Глобальные переменные UI
 export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
 export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
 export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
@@ -53,7 +53,6 @@ get_active_user() {
     echo "$u"
 }
 
-# Парсинг Tailscale (Нативный Bash + Regex, без Python)
 get_tailscale_whoami() {
     local raw=$(tailscale whoami 2>/dev/null || echo "")
     local ts_user="N/A"
@@ -116,7 +115,6 @@ ETHTOOL_SVC_EOF
     echo -e "${C_GREEN}✅ Служба оптимизации маршрутизации включена.${C_RESET}"
 }
 
-# Проверка порта (Нативная, с BPF-фильтром ядра через ss)
 is_port_free() {
     local port_raw="$1"
     local port=$(echo "$port_raw" | tr -dc '0-9')
@@ -191,7 +189,7 @@ TS_EOF
 }
 
 # ------------------------------------------------------------------------------
-# ФУНКЦИИ ВВОДА ЧЕРЕЗ WHIPTAIL (Используют глобальный $WT_WIDTH)
+# БЕЗОПАСНЫЕ ФУНКЦИИ ВВОДА WHIPTAIL (Защита от вылетов set -e при отмене)
 # ------------------------------------------------------------------------------
 prompt_yn() {
     local prompt="$1"
@@ -208,14 +206,13 @@ prompt_default() {
     local default_val="$2"
     local var_name="$3"
     local val
-    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $WT_WIDTH "$default_val" 3>&1 1>&2 2>&3)
-    if [ $? -eq 0 ]; then
+    if val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $WT_WIDTH "$default_val" 3>&1 1>&2 2>&3); then
         printf -v "$var_name" "%s" "${val:-$default_val}"
         return 0
     else
-        echo -e "${C_YELLOW}↩️ Отмена. Возврат в главное меню...${C_RESET}"
+        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
-        return 1
+        return 0
     fi
 }
 
@@ -223,14 +220,13 @@ prompt_clean() {
     local prompt="$1"
     local var_name="$2"
     local val
-    val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
-    if [ $? -eq 0 ]; then
+    if val=$(whiptail --title "Ввод данных" --inputbox "$prompt" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
         printf -v "$var_name" "%s" "$val"
         return 0
     else
-        echo -e "${C_YELLOW}↩️ Отмена. Возврат в главное меню...${C_RESET}"
+        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
-        return 1
+        return 0
     fi
 }
 
@@ -244,7 +240,7 @@ backup_file() {
 
 pause_enter() {
     echo ""
-    read -r -p "Нажмите Enter для возврата в меню..." < /dev/tty
+    read -r -p "Нажмите Enter для возврата в меню..." < /dev/tty || true
 }
 
 if [ "$EUID" -ne 0 ]; then
@@ -350,12 +346,16 @@ mod_user_setup() {
     
     usermod -aG sudo "$username" || true
 
-    local pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (пусто - отмена):" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ] || [ -z "$pass" ]; then
+    local pass
+    if ! pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (пусто - отмена):" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
+        echo -e "${C_YELLOW}ℹ️ Смена пароля отменена.${C_RESET}"
+    elif [ -z "$pass" ]; then
         echo -e "${C_YELLOW}ℹ️ Смена пароля пропущена.${C_RESET}"
     else
-        local pass_confirm=$(whiptail --title "Подтверждение" --passwordbox "Повторите пароль:" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
-        if [ "$pass" != "$pass_confirm" ]; then
+        local pass_confirm
+        if ! pass_confirm=$(whiptail --title "Подтверждение" --passwordbox "Повторите пароль:" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
+            echo -e "${C_RED}❌ Отмена. Пароль не изменен.${C_RESET}"
+        elif [ "$pass" != "$pass_confirm" ]; then
             echo -e "${C_RED}❌ Введенные пароли не совпадают. Попробуйте снова.${C_RESET}"
         else
             echo "$username:$pass" | chpasswd
@@ -402,19 +402,17 @@ mod_ssh_key() {
     fi
 
     if [ -z "$pubkey" ]; then
-        pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 $WT_WIDTH 3>&1 1>&2 2>&3)
-        if [ $? -ne 0 ] || [ -z "$pubkey" ]; then
+        if ! pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 $WT_WIDTH 3>&1 1>&2 2>&3) || [ -z "$pubkey" ]; then
             echo -e "${C_YELLOW}↩️ Отмена. Возврат в главное меню...${C_RESET}"
             return 0
         fi
     fi
 
     if [ -n "$pubkey" ]; then
-        local mode_choice=$(whiptail --title "Параметры сохранения" --menu "Выберите действие:" 12 $WT_WIDTH 2 \
+        local mode_choice
+        if ! mode_choice=$(whiptail --title "Параметры сохранения" --menu "Выберите действие:" 12 $WT_WIDTH 2 \
         "1" "Добавить ключ в существующий список" \
-        "2" "Полностью перезаписать список ключей" 3>&1 1>&2 2>&3)
-        
-        if [ $? -ne 0 ]; then
+        "2" "Полностью перезаписать список ключей" 3>&1 1>&2 2>&3); then
             echo -e "${C_YELLOW}↩️ Отмена сохранения.${C_RESET}"
             return 0
         fi
@@ -561,7 +559,7 @@ SSH_HARDENING_EOF
         silent_run systemctl restart ssh
 
         if [ "$restrict_choice" = true ]; then
-            if ensure_tailscale_installed; then
+            if ensure_tailscale_installed || true; then
                 if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
                     silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
                     silent_run ufw delete allow "$port"/tcp
@@ -670,7 +668,7 @@ mod_ufw() {
     fi
 
     if [ "$do_restrict" = true ]; then
-        if ensure_tailscale_installed; then
+        if ensure_tailscale_installed || true; then
             silent_run ufw allow in on tailscale0 comment 'Allow inside Tailscale'
             silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
             local netdev="$DEFAULT_WAN_IF"
@@ -707,11 +705,12 @@ mod_lock_root() {
 
     echo -e "${C_CYAN}🔐 === 9/18. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
-    local root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
+    local root_choice
+    if ! root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
     "1" "Заблокировать" \
-    "2" "Разблокировать" 3>&1 1>&2 2>&3)
-    
-    if [ $? -ne 0 ]; then return 0; fi
+    "2" "Разблокировать" 3>&1 1>&2 2>&3); then
+        return 0
+    fi
 
     case "$root_choice" in
         1)
@@ -747,18 +746,21 @@ mod_tailscale() {
     fi
 
     while true; do
-        local ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
+        local ts_choice
+        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
         "1" "🔑 Авторизация" \
-        "2" "🌐 Шлюз (Exit Node)" \
-        "3" "🔀 Маршруты LAN" \
+        "2" "🌐 Настройка шлюза (Exit Node)" \
+        "3" "🔀 Трансляция локальных сетей" \
         "4" "🛡️ Прием маршрутов" \
         "5" "🔒 Стелс-режим" \
-        "6" "⚡ Ускорение трафика" \
-        "7" "💻 Веб-интерфейс" \
+        "6" "⚡ Оптимизация маршрутизации" \
+        "7" "💻 Локальный веб-интерфейс" \
         "8" "🔄 Полный сброс" \
-        "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3)
+        "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
+            break
+        fi
 
-        if [ $? -ne 0 ] || [ "$ts_choice" = "0" ]; then break; fi
+        if [ "$ts_choice" = "0" ]; then break; fi
         clear
 
         case "$ts_choice" in
@@ -771,17 +773,17 @@ mod_tailscale() {
                             silent_run tailscale up --authkey="$authkey" --force-reauth
                         else
                             silent_run tailscale up --force-reauth
-                            read -r -p "Нажмите Enter ПОСЛЕ подтверждения в браузере..." < /dev/tty
+                            read -r -p "Нажмите Enter ПОСЛЕ подтверждения в браузере..." < /dev/tty || true
                         fi
                     fi
                 else
-                    ensure_tailscale_installed
+                    ensure_tailscale_installed || true
                 fi
                 pause_enter
                 ;;
             2)
-                local en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Сделать сервером" "2" "Отключить шлюз" "3" "Подключиться к шлюзу" "4" "Отключиться" 3>&1 1>&2 2>&3)
-                if [ $? -eq 0 ]; then
+                local en_choice
+                if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Сделать этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
                         1) silent_run tailscale set --advertise-exit-node=true; echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" ;;
                         2) silent_run tailscale set --advertise-exit-node=false; echo -e "${C_GREEN}✅ Функция сетевого шлюза отключена.${C_RESET}" ;;
@@ -854,20 +856,23 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 mod_logging_manager() {
     echo -e "${C_CYAN}📝 === 11/18. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
-    local log_choice=$(whiptail --title "Управление логами" --menu "Режим работы логов:" 14 $WT_WIDTH 4 \
-    "1" "Ограничить (100 МБ)" \
-    "2" "Свой лимит" \
-    "3" "Отключить логи" \
-    "0" "Оставить как есть" 3>&1 1>&2 2>&3)
+    local log_choice
+    if ! log_choice=$(whiptail --title "Управление логами" --menu "Выберите режим работы системных журналов:" 14 $WT_WIDTH 4 \
+    "1" "Безопасное ограничение (100 МБ / 1 месяц)" \
+    "2" "Указать свой лимит (Custom)" \
+    "3" "Полностью отключить логирование (Stealth)" \
+    "0" "Оставить без изменений" 3>&1 1>&2 2>&3); then
+        return 0
+    fi
     
-    if [ $? -ne 0 ] || [ "$log_choice" = "0" ]; then return 0; fi
+    if [ "$log_choice" = "0" ]; then return 0; fi
     
     backup_file "/etc/systemd/journald.conf"
     
     if [ "$log_choice" = "1" ] || [ "$log_choice" = "2" ]; then
         local log_size="100M"
         if [ "$log_choice" = "2" ]; then
-            prompt_default "Максимальный размер логов (50M, 200M, 1G):" "100M" log_size
+            prompt_default "Введите максимальный размер логов (например: 50M, 200M, 1G):" "100M" log_size
             [ "$MODULE_CANCELED" = true ] && return 0
         fi
         
@@ -882,7 +887,7 @@ mod_logging_manager() {
         fi
         
         silent_run systemctl restart systemd-journald
-        silent_run systemctl disable clean-logs-boot.service
+        silent_run systemctl disable clean-logs-boot.service 2>/dev/null || true
         rm -f /usr/local/bin/disable-logging.sh
         
         echo -e "${C_GREEN}✅ Системные журналы безопасно ограничены объемом $log_size.${C_RESET}"
@@ -1013,11 +1018,13 @@ EOF
 
 # 13. Менеджер Swap
 mod_swap_manager() {
-    local swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 $WT_WIDTH 3 \
+    local swap_choice
+    if ! swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 $WT_WIDTH 3 \
     "1" "Создать базовый объем (2 Гигабайта)" \
     "2" "Указать собственный объем" \
-    "3" "Полностью отключить файл подкачки" 3>&1 1>&2 2>&3)
-    if [ $? -ne 0 ]; then return 0; fi
+    "3" "Полностью отключить файл подкачки" 3>&1 1>&2 2>&3); then
+        return 0
+    fi
 
     clear
     case "$swap_choice" in
@@ -1052,13 +1059,12 @@ mod_swap_manager() {
 mod_desktop_apps() {
     echo -e "${C_CYAN}🖥️ === 14/18. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
-    gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
+    local gov_choice
+    if gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
     "1" "⚡ Performance (Максимальный)" \
     "2" "⚖️ Ondemand (Нормальный)" \
     "3" "🍃 Powersave (Эко-режим)" \
-    "0" "⏭️ Без изменений" 3>&1 1>&2 2>&3)
-
-    if [ $? -eq 0 ] && [ "$gov_choice" != "0" ]; then
+    "0" "⏭️ Без изменений" 3>&1 1>&2 2>&3) && [ "$gov_choice" != "0" ]; then
         local selected_gov="ondemand"
         local gov_name="Нормальный (Ondemand)"
         
@@ -1589,7 +1595,6 @@ while true; do
     
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
 
-    # Глобальный пересчет размеров интерфейса на лету (адаптивность для iPhone)
     export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
     export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
     export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
@@ -1597,7 +1602,8 @@ while true; do
     WT_MENU=$((WT_HEIGHT - 14))
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
-    choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ" \
+    local choice
+    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz
@@ -1624,9 +1630,7 @@ while true; do
     "17" "🔍 Интеллектуальный аудит системы" \
     "18" "📡 Режим локального маршрутизатора" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
-    "0" "❌ Завершить работу" 3>&1 1>&2 2>&3)
-
-    if [ $? -ne 0 ] || [ "$choice" = "0" ]; then
+    "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then
         clear
         echo "Работа скрипта завершена."
         exit 0

@@ -1334,9 +1334,29 @@ mod_server_audit() {
 
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-        echo -e "  • Статус брандмауэра UFW:    ${C_GREEN}✅ Активен${C_RESET}"
+        echo -e "  • Статус брандмауэра:        ${C_GREEN}✅ Активен${C_RESET}"
+        
+        # Проверка сквозной маршрутизации
+        local fwd_policy=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")
+        if [ "$fwd_policy" = "ACCEPT" ]; then
+            echo -e "  • Сквозная маршрутизация:    ${C_GREEN}✅ Разрешена (работает как шлюз)${C_RESET}"
+        else
+            echo -e "  • Сквозная маршрутизация:    ${C_YELLOW}⚠️ Запрещена (только локальный трафик)${C_RESET}"
+        fi
+
+        # Проверка изоляции SSH (ищем комментарий или привязку к tailscale0 для ssh)
+        if LC_ALL=C ufw status 2>/dev/null | grep -iE "SSH via Tailscale only" >/dev/null; then
+            echo -e "  • Изоляция SSH-порта:        ${C_GREEN}🔒 Скрыт (только через Tailscale)${C_RESET}"
+        else
+            echo -e "  • Изоляция SSH-порта:        ${C_YELLOW}🌍 Публичный (открыт интернету)${C_RESET}"
+        fi
+
+        # Проверка порта 41641 для Tailscale P2P
+        if LC_ALL=C ufw status 2>/dev/null | grep -qw "41641/udp"; then
+            echo -e "  • Прямые P2P соединения:     ${C_GREEN}✅ Разрешены (Tailscale порт 41641)${C_RESET}"
+        fi
     else
-        echo -e "  • Статус брандмауэра UFW:    ${C_RED}❌ Не активен${C_RESET}"
+        echo -e "  • Статус брандмауэра:        ${C_RED}❌ Не активен${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 7. Закрытая меш-сеть Tailscale ---${C_RESET}"

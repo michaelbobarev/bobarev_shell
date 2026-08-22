@@ -87,7 +87,6 @@ is_tailscale_web_active() {
     return 1
 }
 
-# ⚡ НОВАЯ, БЕЗОПАСНАЯ ИНТЕГРАЦИЯ УСКОРЕНИЯ И MSS CLAMPING (БЕЗ iptables-persistent)
 enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
@@ -114,7 +113,6 @@ ETHTOOL_SVC_EOF
     systemctl daemon-reload
     silent_run systemctl enable --now tailscale-gro.service
 
-    # Антидот: Удаляем конфликтующий пакет iptables-persistent, если он установлен
     if dpkg -l | grep -qw iptables-persistent; then
         silent_run systemctl stop netfilter-persistent 2>/dev/null
         silent_run systemctl disable netfilter-persistent 2>/dev/null
@@ -122,7 +120,6 @@ ETHTOOL_SVC_EOF
         echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
     fi
 
-    # Нативная интеграция MSS Clamping прямо в UFW
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
         if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
             sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
@@ -133,7 +130,6 @@ ETHTOOL_SVC_EOF
         silent_run ufw reload
     fi
 
-    # Применение правил на лету для мгновенного эффекта
     iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     
@@ -326,10 +322,9 @@ mod_apt_update() {
 
     local zram_pkg="zram-tools"
     if [ -f /etc/default/armbian-zram ] || [ -f /etc/init.d/armbian-zram ]; then
-        echo -e "${C_BLUE}ℹ️ Обнаружен встроенный менеджер памяти Armbian, установка стороннего пропущена.${C_RESET}"
+        echo -e "${C_BLUE}ℹ️ Обнаружен встроенный менеджер памяти Armbian. Сторонняя утилита zram-tools пропущена.${C_RESET}"
         zram_pkg=""
-        silent_run systemctl disable --now zramswap.service
-        silent_run systemctl mask zramswap.service
+        # ИСПРАВЛЕНИЕ МИНЫ №3: Больше не отключаем системный ZRAM!
     fi
 
     apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq $zram_pkg
@@ -815,7 +810,15 @@ mod_tailscale() {
                 local en_choice
                 if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
-                        1) silent_run tailscale set --advertise-exit-node=true; echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" ;;
+                        1) 
+                            silent_run tailscale set --advertise-exit-node=true
+                            # ИСПРАВЛЕНИЕ МИНЫ №1: Принудительно разрешаем маршрутизацию UFW для Exit Node
+                            if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
+                                silent_run ufw route allow in on tailscale0 comment 'Tailscale Exit Node Forwarding'
+                                silent_run ufw route allow out on tailscale0 comment 'Tailscale Exit Node Forwarding'
+                            fi
+                            echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" 
+                            ;;
                         2) silent_run tailscale set --advertise-exit-node=false; echo -e "${C_GREEN}✅ Функция сетевого шлюза отключена.${C_RESET}" ;;
                         3)
                             local target_ip=""
@@ -1009,20 +1012,34 @@ kernel.dmesg_restrict=1
 EOF
     sysctl --system > /dev/null
 
-    awk '
-    BEGIN { OFS="\t" }
-    !/^#/ && $2 == "/" {
-        if ($4 !~ /(^|,)noatime(,|$)/) $4 = $4 ",noatime"
-        if ($4 !~ /(^|,)commit=120(,|$)/) $4 = $4 ",commit=120"
-    }
-    { print }' /etc/fstab > /tmp/fstab.tmp && cat /tmp/fstab.tmp > /etc/fstab && rm -f /tmp/fstab.tmp
+    # ИСПРАВЛЕНИЕ МИНЫ №2: Проверка файловой системы перед установкой commit=120
+    local root_fs=$(df -T / 2>/dev/null | awk 'NR==2 {print $2}' || echo "unknown")
+    if [ "$root_fs" = "ext3" ] || [ "$root_fs" = "ext4" ]; then
+        awk '
+        BEGIN { OFS="\t" }
+        !/^#/ && $2 == "/" {
+            if ($4 !~ /(^|,)noatime(,|$)/) $4 = $4 ",noatime"
+            if ($4 !~ /(^|,)commit=120(,|$)/) $4 = $4 ",commit=120"
+        }
+        { print }' /etc/fstab > /tmp/fstab.tmp && cat /tmp/fstab.tmp > /etc/fstab && rm -f /tmp/fstab.tmp
 
-    local root_dev=$(df / 2>/dev/null | awk 'NR==2 {print $1}' || echo "")
-    if [ -n "$root_dev" ] && command -v tune2fs >/dev/null 2>&1; then
-        silent_run tune2fs -E mount_opts=commit=120 "$root_dev"
+        local root_dev=$(df / 2>/dev/null | awk 'NR==2 {print $1}' || echo "")
+        if [ -n "$root_dev" ] && command -v tune2fs >/dev/null 2>&1; then
+            silent_run tune2fs -E mount_opts=commit=120 "$root_dev"
+        fi
+        silent_run mount -o remount,noatime,commit=120 /
+        echo -e "${C_GREEN}✅ Настройки noatime и commit=120 успешно применены (ФС: $root_fs).${C_RESET}"
+    else
+        # Если это BTRFS, XFS или другое, применяем только безопасный noatime
+        awk '
+        BEGIN { OFS="\t" }
+        !/^#/ && $2 == "/" {
+            if ($4 !~ /(^|,)noatime(,|$)/) $4 = $4 ",noatime"
+        }
+        { print }' /etc/fstab > /tmp/fstab.tmp && cat /tmp/fstab.tmp > /etc/fstab && rm -f /tmp/fstab.tmp
+        silent_run mount -o remount,noatime /
+        echo -e "${C_YELLOW}⚠️ Файловая система '$root_fs' не поддерживает commit=120. Применен только noatime.${C_RESET}"
     fi
-
-    silent_run mount -o remount,noatime,commit=120 /
 
     for dev_sched in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler /sys/block/nvme*/queue/scheduler; do
         if [ -f "$dev_sched" ]; then echo "mq-deadline" > "$dev_sched" 2>/dev/null || true; fi
@@ -1043,7 +1060,6 @@ EOF
 
     systemctl daemon-reload
     silent_run mount -a
-    echo -e "${C_GREEN}✅ Алгоритмы работы с памятью и накопителями оптимизированы для продления срока службы диска.${C_RESET}"
 }
 
 # 13. Менеджер Swap

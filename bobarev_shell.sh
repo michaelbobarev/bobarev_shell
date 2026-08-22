@@ -87,7 +87,7 @@ is_tailscale_web_active() {
     return 1
 }
 
-enable_tailscale_gro() {
+enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do sleep 2; done
@@ -112,7 +112,30 @@ WantedBy=multi-user.target
 ETHTOOL_SVC_EOF
     systemctl daemon-reload
     silent_run systemctl enable --now tailscale-gro.service
-    echo -e "${C_GREEN}✅ Служба оптимизации маршрутизации включена.${C_RESET}"
+
+    # Настройка MSS Clamping
+    export DEBIAN_FRONTEND=noninteractive
+    silent_run apt-get update
+    silent_run apt-get install -yq iptables iptables-persistent
+    
+    iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        ip6tables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    fi
+
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    if command -v ip6tables &>/dev/null; then
+        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    fi
+    if command -v netfilter-persistent &>/dev/null; then
+        silent_run netfilter-persistent save
+    fi
+
+    echo -e "${C_GREEN}✅ Аппаратное ускорение (GRO) и фиксация MTU (MSS Clamping) успешно включены.${C_RESET}"
 }
 
 is_port_free() {
@@ -733,11 +756,11 @@ mod_tailscale() {
         if command -v tailscale &>/dev/null; then
             echo -e "${C_BLUE}ℹ️ Пакет Tailscale уже установлен. Применение дополнительных настроек...${C_RESET}"
             ensure_tailscale_installed || true
-            enable_tailscale_gro || true
+            enable_routing_optimizations || true
         else
             if prompt_yn "Установить и настроить закрытую сеть Tailscale на этом сервере?" "true"; then
                 ensure_tailscale_installed || true
-                enable_tailscale_gro || true
+                enable_routing_optimizations || true
             else
                 echo -e "${C_YELLOW}⏭️ Установка Tailscale пропущена пользователем.${C_RESET}"
             fi
@@ -753,7 +776,7 @@ mod_tailscale() {
         "3" "🔀 Трансляция локальных сетей" \
         "4" "🛡️ Прием маршрутов" \
         "5" "🔒 Стелс-режим" \
-        "6" "⚡ Оптимизация маршрутизации" \
+        "6" "⚡ Ускорение и MSS Clamping" \
         "7" "💻 Локальный веб-интерфейс" \
         "8" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
@@ -827,7 +850,7 @@ mod_tailscale() {
                 pause_enter
                 ;;
             6)
-                if prompt_yn "Активировать службу аппаратного ускорения маршрутизации?" "true"; then enable_tailscale_gro; fi
+                if prompt_yn "Активировать аппаратное ускорение и фиксацию MTU (MSS Clamping)?" "true"; then enable_routing_optimizations; fi
                 pause_enter
                 ;;
             7)
@@ -1270,7 +1293,6 @@ mod_server_audit() {
         echo -e "  • Права Sudo для $active_user:  ${C_BLUE}ℹ️ Стандартный запрос пароля${C_RESET}"
     fi
 
-    # ИСПРАВЛЕННАЯ СТРОКА: Заменили || awk на | awk
     local root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
     
     if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
@@ -1336,7 +1358,6 @@ mod_server_audit() {
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         echo -e "  • Статус брандмауэра:        ${C_GREEN}✅ Активен${C_RESET}"
         
-        # Проверка сквозной маршрутизации
         local fwd_policy=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")
         if [ "$fwd_policy" = "ACCEPT" ]; then
             echo -e "  • Сквозная маршрутизация:    ${C_GREEN}✅ Разрешена (работает как шлюз)${C_RESET}"
@@ -1344,14 +1365,12 @@ mod_server_audit() {
             echo -e "  • Сквозная маршрутизация:    ${C_YELLOW}⚠️ Запрещена (только локальный трафик)${C_RESET}"
         fi
 
-        # Проверка изоляции SSH (ищем комментарий или привязку к tailscale0 для ssh)
         if LC_ALL=C ufw status 2>/dev/null | grep -iE "SSH via Tailscale only" >/dev/null; then
             echo -e "  • Изоляция SSH-порта:        ${C_GREEN}🔒 Скрыт (только через Tailscale)${C_RESET}"
         else
             echo -e "  • Изоляция SSH-порта:        ${C_YELLOW}🌍 Публичный (открыт интернету)${C_RESET}"
         fi
 
-        # Проверка порта 41641 для Tailscale P2P
         if LC_ALL=C ufw status 2>/dev/null | grep -qw "41641/udp"; then
             echo -e "  • Прямые P2P соединения:     ${C_GREEN}✅ Разрешены (Tailscale порт 41641)${C_RESET}"
         fi

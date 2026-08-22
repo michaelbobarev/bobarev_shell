@@ -87,6 +87,7 @@ is_tailscale_web_active() {
     return 1
 }
 
+# ⚡ НОВАЯ, БЕЗОПАСНАЯ ИНТЕГРАЦИЯ УСКОРЕНИЯ И MSS CLAMPING (БЕЗ iptables-persistent)
 enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
@@ -113,29 +114,35 @@ ETHTOOL_SVC_EOF
     systemctl daemon-reload
     silent_run systemctl enable --now tailscale-gro.service
 
-    # Настройка MSS Clamping
-    export DEBIAN_FRONTEND=noninteractive
-    silent_run apt-get update
-    silent_run apt-get install -yq iptables iptables-persistent
-    
+    # Антидот: Удаляем конфликтующий пакет iptables-persistent, если он установлен
+    if dpkg -l | grep -qw iptables-persistent; then
+        silent_run systemctl stop netfilter-persistent 2>/dev/null
+        silent_run systemctl disable netfilter-persistent 2>/dev/null
+        silent_run apt-get purge -yq iptables-persistent netfilter-persistent
+        echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
+    fi
+
+    # Нативная интеграция MSS Clamping прямо в UFW
+    if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
+        if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
+            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
+        fi
+        if [ -f /etc/ufw/before6.rules ] && ! grep -q "TCPMSS" /etc/ufw/before6.rules; then
+            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before6.rules
+        fi
+        silent_run ufw reload
+    fi
+
+    # Применение правил на лету для мгновенного эффекта
     iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-    iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     
     if command -v ip6tables &>/dev/null; then
         ip6tables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        ip6tables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        ip6tables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     fi
 
-    mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    if command -v ip6tables &>/dev/null; then
-        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
-    fi
-    if command -v netfilter-persistent &>/dev/null; then
-        silent_run netfilter-persistent save
-    fi
-
-    echo -e "${C_GREEN}✅ Аппаратное ускорение (GRO) и фиксация MTU (MSS Clamping) успешно включены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Аппаратное ускорение (GRO) и нативная фиксация MTU (MSS Clamping в UFW) успешно включены.${C_RESET}"
 }
 
 is_port_free() {
@@ -710,7 +717,7 @@ mod_ufw() {
 
     silent_run ufw --force enable
     silent_run ufw logging off
-    echo -e "${C_GREEN}✅ Межсетевой экран включен и активно защищает систему.${C_RESET}"
+    echo -e "${C_GREEN}✅ Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
 }
 
 # 9. Блокировка Root
@@ -850,7 +857,7 @@ mod_tailscale() {
                 pause_enter
                 ;;
             6)
-                if prompt_yn "Активировать аппаратное ускорение и фиксацию MTU (MSS Clamping)?" "true"; then enable_routing_optimizations; fi
+                if prompt_yn "Активировать аппаратное ускорение и нативную фиксацию MTU (MSS Clamping)?" "true"; then enable_routing_optimizations; fi
                 pause_enter
                 ;;
             7)
@@ -1454,7 +1461,11 @@ mod_server_audit() {
     done
 
     echo -e ""
-    if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then
+    local mss_active=false
+    if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ] && grep -q "TCPMSS" /etc/ufw/before.rules; then mss_active=true; fi
+    if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then mss_active=true; fi
+    
+    if [ "$mss_active" = true ]; then
         echo -e "  • Фиксация MSS (MSS Clamping): ${C_GREEN}✅ Работает (предотвращает зависание сайтов)${C_RESET}"
     else
         echo -e "  • Фиксация MSS (MSS Clamping): ${C_YELLOW}⚠️ Не обнаружена (возможны потери скорости)${C_RESET}"
@@ -1494,7 +1505,7 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Режим локального маршрутизатора
+# 18. Режим локального маршрутизатора (Нативная интеграция с UFW)
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/18. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     
@@ -1526,10 +1537,18 @@ mod_router_sbc() {
     local dhcp_start="${subnet_prefix}.50"
     local dhcp_end="${subnet_prefix}.200"
 
-    echo -e "${C_BLUE}📦 Установка необходимых пакетов (dnsmasq, iptables)...${C_RESET}"
+    echo -e "${C_BLUE}📦 Установка необходимых пакетов (dnsmasq, iptables, network-manager)...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     silent_run apt-get update
-    silent_run apt-get install -yq dnsmasq iptables iptables-persistent network-manager
+    silent_run apt-get install -yq dnsmasq iptables network-manager
+
+    # Антидот: Удаляем конфликтующий пакет
+    if dpkg -l | grep -qw iptables-persistent; then
+        silent_run systemctl stop netfilter-persistent 2>/dev/null
+        silent_run systemctl disable netfilter-persistent 2>/dev/null
+        silent_run apt-get purge -yq iptables-persistent netfilter-persistent
+        echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
+    fi
 
     echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
     if command -v nmcli &>/dev/null; then
@@ -1567,27 +1586,36 @@ EOF
     echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра для локальной сети...${C_RESET}"
     if command -v ufw &>/dev/null; then
         silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
-        silent_run ufw allow in on "$lan_if" to any port 53 proto udp comment 'LAN DNS (UDP)'
-        silent_run ufw allow in on "$lan_if" to any port 53 proto tcp comment 'LAN DNS (TCP)'
+        silent_run ufw allow in on "$lan_if" to any port 53 proto udp comment 'LAN DNS (UDP/TCP)'
+        silent_run ufw route allow in on "$lan_if" comment 'LAN Forwarding'
+    else
+        iptables -D INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT
+        iptables -I INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT
     fi
-    
-    iptables -D INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT 2>/dev/null || true
-    iptables -D INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-    iptables -I INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT
-    iptables -I INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT
 
     echo -e "${C_BLUE}⚙️ Включение маршрутизации и трансляции адресов (NAT)...${C_RESET}"
     sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
     sysctl -p /etc/sysctl.d/99-router.conf >/dev/null 2>&1
 
+    # Нативная интеграция NAT и MSS Clamping в UFW
+    if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
+        if ! grep -q "POSTROUTING -o tailscale0 -j MASQUERADE" /etc/ufw/before.rules; then
+            sed -i '1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -o tailscale0 -j MASQUERADE\nCOMMIT\n\n/' /etc/ufw/before.rules
+        fi
+        if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
+            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
+        fi
+        silent_run ufw reload
+    fi
+
+    # На лету (в память)
     iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
     iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
-    
-    if ! iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then
-        iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    fi
-    
+    iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     iptables -D FORWARD -i "$lan_if" -j ACCEPT 2>/dev/null || true
     iptables -A FORWARD -i "$lan_if" -j ACCEPT
     iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
@@ -1595,25 +1623,22 @@ EOF
     local wan_if=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
     if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
         echo -e "${C_BLUE}🛡️ Активация Kill Switch (блокировка прямого выхода через $wan_if)...${C_RESET}"
-        iptables -D FORWARD -i "$lan_if" -o "$wan_if" -j DROP 2>/dev/null || true
-        iptables -I FORWARD 1 -i "$lan_if" -o "$wan_if" -j DROP
+        if command -v ufw &>/dev/null; then
+            silent_run ufw route deny in on "$lan_if" out on "$wan_if" comment 'Kill Switch'
+        else
+            iptables -D FORWARD -i "$lan_if" -o "$wan_if" -j DROP 2>/dev/null || true
+            iptables -I FORWARD 1 -i "$lan_if" -o "$wan_if" -j DROP
+        fi
     else
         echo -e "${C_YELLOW}⚠️ WAN интерфейс не определен, Kill Switch пропущен.${C_RESET}"
     fi
 
-    echo -e "${C_BLUE}💾 Сохранение правил маршрутизации...${C_RESET}"
-    mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/rules.v4
-    if command -v netfilter-persistent &>/dev/null; then
-        silent_run netfilter-persistent save
-    fi
-
-    echo -e "\n${C_GREEN}🎉 Режим маршрутизатора успешно развернут!${C_RESET}"
+    echo -e "\n${C_GREEN}🎉 Режим маршрутизатора (на базе UFW) успешно развернут!${C_RESET}"
     echo -e "  • LAN Интерфейс:       ${C_BLUE}$lan_if ($lan_ip)${C_RESET}"
     echo -e "  • Пул адресов DHCP:    ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
     echo -e "  • Открытые порты:      ${C_GREEN}53 (DNS) и 67 (DHCP) разрешены${C_RESET}"
     echo -e "  • Маршрутизация (NAT): ${C_GREEN}Через сеть Tailscale${C_RESET}"
-    echo -e "  • MSS Clamping:        ${C_GREEN}Включен (сжатие пакетов)${C_RESET}"
+    echo -e "  • MSS Clamping:        ${C_GREEN}Включен (встроен в UFW)${C_RESET}"
     if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
         echo -e "  • Kill Switch:         ${C_GREEN}Включен (Прямой выход через $wan_if заблокирован!)${C_RESET}"
     fi

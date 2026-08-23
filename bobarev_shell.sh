@@ -29,7 +29,7 @@ if [ -f /etc/armbian-release ] || [ -f /etc/default/armbian-zram ] || grep -q -i
     SYSTEM_TYPE="SBC_Armbian"
 elif [ -d /sys/class/power_supply ] && ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then
     SYSTEM_TYPE="Laptop_PC"
-elif [ "$(systemctl get-default 2>/dev/null)" = "graphical.target" ] || command -v xrandr >/dev/null 2>&1; then
+elif [ "$(systemctl get-default 2>/dev/null)" = "graphical.target" ]; then
     SYSTEM_TYPE="Desktop_PC"
 fi
 
@@ -553,7 +553,6 @@ PermitRootLogin $disable_root
 PubkeyAuthentication yes
 PasswordAuthentication $pass_auth_val
 KbdInteractiveAuthentication $kbd_auth_val
-ChallengeResponseAuthentication no
 AuthorizedKeysFile .ssh/authorized_keys
 StrictModes yes
 UsePAM yes

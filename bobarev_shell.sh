@@ -548,6 +548,7 @@ mod_ssh_config() {
     tee "$conf_file" > /dev/null << SSH_HARDENING_EOF
 # Server Security Hardening Configuration
 $ts_restrict_comment
+AcceptEnv LANG LC_*
 Port $port
 PermitRootLogin $disable_root
 PubkeyAuthentication yes

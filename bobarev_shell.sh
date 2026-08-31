@@ -265,6 +265,9 @@ backup_file() {
 }
 
 pause_enter() {
+    if [ "$MODULE_CANCELED" = true ]; then
+        return 0
+    fi
     echo ""
     read -r -p "Нажмите Enter для возврата в меню..." < /dev/tty || true
 }
@@ -429,6 +432,7 @@ mod_ssh_key() {
     if [ -z "$pubkey" ]; then
         if ! pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 $WT_WIDTH 3>&1 1>&2 2>&3) || [ -z "$pubkey" ]; then
             echo -e "${C_YELLOW}↩️ Отмена. Возврат в главное меню...${C_RESET}"
+            MODULE_CANCELED=true
             return 0
         fi
     fi
@@ -439,6 +443,7 @@ mod_ssh_key() {
         "1" "Добавить ключ в существующий список" \
         "2" "Полностью перезаписать список ключей" 3>&1 1>&2 2>&3); then
             echo -e "${C_YELLOW}↩️ Отмена сохранения.${C_RESET}"
+            MODULE_CANCELED=true
             return 0
         fi
 
@@ -734,6 +739,7 @@ mod_lock_root() {
     if ! root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
     "1" "Заблокировать" \
     "2" "Разблокировать" 3>&1 1>&2 2>&3); then
+        MODULE_CANCELED=true
         return 0
     fi
 
@@ -771,6 +777,7 @@ mod_tailscale() {
     fi
 
     while true; do
+        MODULE_CANCELED=false
         local ts_choice
         if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
         "1" "🔑 Авторизация" \
@@ -812,7 +819,6 @@ mod_tailscale() {
                     case "$en_choice" in
                         1) 
                             silent_run tailscale set --advertise-exit-node=true
-                            # ИСПРАВЛЕНИЕ МИНЫ №1: Принудительно разрешаем маршрутизацию UFW для Exit Node
                             if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
                                 silent_run ufw route allow in on tailscale0 comment 'Tailscale Exit Node Forwarding'
                                 silent_run ufw route allow out on tailscale0 comment 'Tailscale Exit Node Forwarding'
@@ -830,8 +836,8 @@ mod_tailscale() {
                             ;;
                         4) silent_run tailscale set --exit-node=; echo -e "${C_GREEN}✅ Перенаправление трафика отключено.${C_RESET}" ;;
                     esac
-                fi
                 pause_enter
+                fi
                 ;;
                         3)
                 local tr_choice
@@ -909,6 +915,7 @@ mod_logging_manager() {
     "2" "Указать свой лимит (Custom)" \
     "3" "Полностью отключить логирование (Stealth)" \
     "0" "Оставить без изменений" 3>&1 1>&2 2>&3); then
+        MODULE_CANCELED=true
         return 0
     fi
     
@@ -1083,6 +1090,7 @@ mod_swap_manager() {
     "1" "Создать базовый объем (2 Гигабайта)" \
     "2" "Указать собственный объем" \
     "3" "Полностью отключить файл подкачки" 3>&1 1>&2 2>&3); then
+        MODULE_CANCELED=true
         return 0
     fi
 
@@ -1541,6 +1549,7 @@ mod_router_sbc() {
     
     if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
+        MODULE_CANCELED=true
         return 0
     fi
 
@@ -1767,6 +1776,7 @@ while true; do
                 fi
             done
             if [ "$local_aborted" = false ]; then echo -e "\n${C_GREEN}🎉 ВСЕ ЭТАПЫ НАСТРОЙКИ УСПЕШНО ЗАВЕРШЕНЫ!${C_RESET}"; fi
+            MODULE_CANCELED=false
             pause_enter
             ;;
     esac

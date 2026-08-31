@@ -833,15 +833,29 @@ mod_tailscale() {
                 fi
                 pause_enter
                 ;;
-            3)
-                local sub=$(get_interface_subnet "$DEFAULT_WAN_IF")
-                local r_input=""
-                prompt_default "Сетевой диапазон для трансляции:" "${sub}.0/24" r_input
-                if [ -n "$r_input" ]; then
-                    silent_run tailscale set --advertise-routes="$r_input"
-                    echo -e "${C_GREEN}✅ Выбранный диапазон ($r_input) транслируется в общую сеть.${C_RESET}"
+                        3)
+                local tr_choice
+                if tr_choice=$(whiptail --title "Трансляция локальных сетей" --menu "Действие:" 11 $WT_WIDTH 2 \
+                "1" "Включить трансляцию (Задать подсеть)" \
+                "2" "Отключить трансляцию" 3>&1 1>&2 2>&3); then
+                    case "$tr_choice" in
+                        1)
+                            local sub=$(get_interface_subnet "$DEFAULT_WAN_IF")
+                            local r_input=""
+                            MODULE_CANCELED=false
+                            prompt_default "Сетевой диапазон для трансляции:" "${sub}.0/24" r_input
+                            if [ "$MODULE_CANCELED" = false ] && [ -n "$r_input" ]; then
+                                silent_run tailscale set --advertise-routes="$r_input"
+                                echo -e "${C_GREEN}✅ Выбранный диапазон ($r_input) транслируется в общую сеть.${C_RESET}"
+                            fi
+                            ;;
+                        2)
+                            silent_run tailscale set --advertise-routes=""
+                            echo -e "${C_GREEN}✅ Трансляция локальных сетей успешно отключена.${C_RESET}"
+                            ;;
+                    esac
+                    pause_enter
                 fi
-                pause_enter
                 ;;
             4)
                 if prompt_yn "Разрешить принятие внешних сетевых маршрутов от других устройств в вашей сети?" "true"; then

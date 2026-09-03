@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # ==============================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ, ANSI-ЦВЕТА И АВТООПРЕДЕЛЕНИЕ
+# СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
+# Версия: 1.0 (Gold Master)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -47,7 +48,7 @@ get_sshd_cmd() {
 get_active_user() {
     local u="${SUDO_USER:-${LOGNAME:-${USER:-}}}"
     if [ -z "$u" ] || [ "$u" = "root" ]; then
-        u=$(getent passwd | awk -F: '$3>=1000 && $3<60000 && $1!="nobody" {print $1; exit}' || echo "")
+        u=$(getent passwd | awk -F: '$3>=1000 && $3<60000 && $1!="nobody" {print $1; exit}' 2>/dev/null || echo "")
     fi
     if [ -z "$u" ]; then u=$(id -nu 2>/dev/null || logname 2>/dev/null || echo "nobody"); fi
     echo "$u"
@@ -113,7 +114,7 @@ ETHTOOL_SVC_EOF
     systemctl daemon-reload
     silent_run systemctl enable --now tailscale-gro.service
 
-    if dpkg -l | grep -qw iptables-persistent; then
+    if dpkg -l 2>/dev/null | grep -qw iptables-persistent; then
         silent_run systemctl stop netfilter-persistent 2>/dev/null
         silent_run systemctl disable netfilter-persistent 2>/dev/null
         silent_run apt-get purge -yq iptables-persistent netfilter-persistent
@@ -142,9 +143,8 @@ ETHTOOL_SVC_EOF
 }
 
 is_port_free() {
-    local port_raw="$1"
-    local port=$(echo "$port_raw" | tr -dc '0-9')
-    [ -z "$port" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] && return 1
+    local port="${1//[^0-9]/}"
+    { [ -z "$port" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; } && return 1
 
     if command -v ss &>/dev/null; then
         ss -tulnH "sport = :$port" 2>/dev/null | grep -q . && return 1
@@ -309,6 +309,12 @@ mod_hostname() {
     prompt_default "Введите новое имя сервера:" "$default_brand_host" new_host
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
 
+    new_host=$(echo "$new_host" | tr -dc 'a-zA-Z0-9-')
+    if [ -z "$new_host" ]; then
+        whiptail --msgbox "Ошибка: Имя хоста не может быть пустым." 8 $WT_WIDTH
+        return 0
+    fi
+
     hostnamectl set-hostname "$new_host"
     if ! grep -q "$new_host" /etc/hosts; then
         silent_run sed -i -E "s/^127\.0\.0\.1[[:space:]]+localhost/& $new_host/" /etc/hosts
@@ -327,7 +333,6 @@ mod_apt_update() {
     if [ -f /etc/default/armbian-zram ] || [ -f /etc/init.d/armbian-zram ]; then
         echo -e "${C_BLUE}ℹ️ Обнаружен встроенный менеджер памяти Armbian. Сторонняя утилита zram-tools пропущена.${C_RESET}"
         zram_pkg=""
-        # ИСПРАВЛЕНИЕ МИНЫ №3: Больше не отключаем системный ZRAM!
     fi
 
     apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq $zram_pkg
@@ -479,13 +484,13 @@ mod_ssh_config() {
     if [ -n "$sshd_cmd" ]; then
         active_ssh_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
     fi
-    active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
+    active_ssh_port="${active_ssh_port//[^0-9]/}"
 
     local port=""
     while true; do
         prompt_default "Введите сетевой порт для удаленного подключения:" "${active_ssh_port:-22}" port
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        port=$(echo "$port" | tr -dc '0-9')
+        port="${port//[^0-9]/}"
 
         if [ -z "$port" ]; then
             whiptail --msgbox "Ошибка: Значение порта должно состоять только из цифр." 8 $WT_WIDTH
@@ -667,7 +672,7 @@ mod_ufw() {
     if [ -n "$sshd_cmd" ]; then
         active_ssh_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
     fi
-    active_ssh_port=$(echo "$active_ssh_port" | tr -dc '0-9')
+    active_ssh_port="${active_ssh_port//[^0-9]/}"
     local port="${active_ssh_port:-22}"
 
     echo -e "${C_BLUE}ℹ️ Автоматически определен порт SSH: $port${C_RESET}"
@@ -815,7 +820,11 @@ mod_tailscale() {
                 ;;
             2)
                 local en_choice
-                if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 "1" "Назначить этот сервер шлюзом" "2" "Отключить трансляцию шлюза" "3" "Подключиться к удаленному шлюзу" "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
+                if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 \
+                "1" "Назначить этот сервер шлюзом" \
+                "2" "Отключить трансляцию шлюза" \
+                "3" "Подключиться к удаленному шлюзу" \
+                "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
                         1) 
                             silent_run tailscale set --advertise-exit-node=true
@@ -836,10 +845,10 @@ mod_tailscale() {
                             ;;
                         4) silent_run tailscale set --exit-node=; echo -e "${C_GREEN}✅ Перенаправление трафика отключено.${C_RESET}" ;;
                     esac
-                pause_enter
+                    pause_enter
                 fi
                 ;;
-                        3)
+            3)
                 local tr_choice
                 if tr_choice=$(whiptail --title "Трансляция локальных сетей" --menu "Действие:" 11 $WT_WIDTH 2 \
                 "1" "Включить трансляцию (Задать подсеть)" \
@@ -1033,7 +1042,6 @@ kernel.dmesg_restrict=1
 EOF
     sysctl --system > /dev/null
 
-    # ИСПРАВЛЕНИЕ МИНЫ №2: Проверка файловой системы перед установкой commit=120
     local root_fs=$(df -T / 2>/dev/null | awk 'NR==2 {print $2}' || echo "unknown")
     if [ "$root_fs" = "ext3" ] || [ "$root_fs" = "ext4" ]; then
         awk '
@@ -1051,7 +1059,6 @@ EOF
         silent_run mount -o remount,noatime,commit=120 /
         echo -e "${C_GREEN}✅ Настройки noatime и commit=120 успешно применены (ФС: $root_fs).${C_RESET}"
     else
-        # Если это BTRFS, XFS или другое, применяем только безопасный noatime
         awk '
         BEGIN { OFS="\t" }
         !/^#/ && $2 == "/" {
@@ -1104,8 +1111,14 @@ mod_swap_manager() {
             rm -f /swap.img /swapfile
             
             if ! fallocate -l "$swap_size" /swapfile 2>/dev/null; then
-                local num_mb=$(echo "$swap_size" | sed -E 's/([0-9]+)[Gg]/\1 * 1024/e; s/([0-9]+)[Mm]/\1/e' 2>/dev/null || echo "2048")
-                dd if=/dev/zero of=/swapfile bs=1M count="$num_mb" status=progress
+                local num="${swap_size%[GgMm]}"
+                local unit="${swap_size: -1}"
+                case "$unit" in
+                    [Gg]) num=$((num * 1024)) ;;
+                    [Mm]) ;;
+                    *) num=2048 ;;
+                esac
+                dd if=/dev/zero of=/swapfile bs=1M count="$num" status=progress
             fi
             chmod 600 /swapfile
             mkswap /swapfile
@@ -1582,7 +1595,7 @@ mod_router_sbc() {
     silent_run apt-get install -yq dnsmasq iptables network-manager
 
     # Антидот: Удаляем конфликтующий пакет
-    if dpkg -l | grep -qw iptables-persistent; then
+    if dpkg -l 2>/dev/null | grep -qw iptables-persistent; then
         silent_run systemctl stop netfilter-persistent 2>/dev/null
         silent_run systemctl disable netfilter-persistent 2>/dev/null
         silent_run apt-get purge -yq iptables-persistent netfilter-persistent

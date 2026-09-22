@@ -277,6 +277,16 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Автоматическая установка whiptail на минимальных системах
+if ! command -v whiptail &>/dev/null; then
+    echo -e "${C_BLUE}📦 Интерфейс whiptail не обнаружен. Автоматическая установка...${C_RESET}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq && apt-get install -yq whiptail >/dev/null 2>&1 || {
+        echo -e "${C_RED}❌ Не удалось установить whiptail. Выполните вручную: apt update && apt install whiptail${C_RESET}" >&2
+        exit 1
+    }
+fi
+
 # ==============================================================================
 # МОДУЛИ НАСТРОЙКИ
 # ==============================================================================

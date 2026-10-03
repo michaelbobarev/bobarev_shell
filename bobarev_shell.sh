@@ -391,7 +391,7 @@ mod_user_setup() {
 
     local pass
     if ! pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (пусто - отмена):" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
-        echo -e "${C_YELLOW}ℹ️ Смена пароля отменена.${C_RESET}"
+        echo -e "${C_YELLOW}ℹ️️ Смена пароля отменена.${C_RESET}"
     elif [ -z "$pass" ]; then
         echo -e "${C_YELLOW}ℹ️ Смена пароля пропущена.${C_RESET}"
     else
@@ -861,7 +861,6 @@ mod_tailscale() {
                             [ -z "$wan_dev" ] && wan_dev=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 
                             if command -v ufw &>/dev/null; then
-                                # 1. Разрешаем сквозной трафик в UFW
                                 silent_run ufw default allow routed
                                 silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
                                 
@@ -870,7 +869,6 @@ mod_tailscale() {
                                     silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'TS Exit Node In'
                                 fi
 
-                                # 2. Вносим системный NAT для подсети Tailscale в before.rules
                                 if [ -f /etc/ufw/before.rules ] && [ -n "$wan_dev" ]; then
                                     if ! grep -q "100.64.0.0/10.*MASQUERADE" /etc/ufw/before.rules; then
                                         if grep -q "^\*nat" /etc/ufw/before.rules; then
@@ -883,7 +881,6 @@ mod_tailscale() {
                                 fi
                             fi
 
-                            # 3. Применяем NAT на лету в ядро
                             if [ -n "$wan_dev" ]; then
                                 iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
                                 iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
@@ -891,7 +888,6 @@ mod_tailscale() {
 
                             echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом, NAT и сквозная маршрутизация включены.${C_RESET}"
                             
-                            # 4. Окно-памятка для завершения настройки в облаке
                             whiptail --title "⚠️ ВАЖНО: Подтверждение Exit Node" --msgbox \
 "Сервер объявлен шлюзом, правила UFW и системный NAT успешно настроены!\n\nЧтобы интернет заработал на ваших устройствах:\n1. Откройте панель: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] ➔ Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Совет по DNS: Если после подключения сайты не открываются,\nв панели Tailscale (вкладка DNS) включите 'Override local DNS'\nи добавьте публичный резолвер (например, 1.1.1.1)." 16 $WT_WIDTH
                             ;;
@@ -1547,7 +1543,7 @@ mod_server_audit() {
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
             echo -e "  • Ускорение трафика (GRO):   ${C_GREEN}✅ Работает${C_RESET}"
         else
-            echo -e "  • Ускорение трафика (GRO):   ${C_YELLOW}⚠️ Отключено${C_RESET}"
+            echo -e "  • Ускорение трафика (GRO):   ${C_YELLOW}⚠️️ Отключено${C_RESET}"
         fi
     else
         echo -e "  • Программа Tailscale:       ${C_YELLOW}⚠️ Не установлена${C_RESET}"

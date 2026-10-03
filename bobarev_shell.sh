@@ -712,7 +712,7 @@ mod_ufw() {
         do_restrict=true
     fi
 
-    # Базовые правила доверия сети Tailscale и прямого линка (применяются всегда)
+    # Базовые правила доверия Tailscale и P2P (применяются всегда)
     silent_run ufw allow in on tailscale0 comment 'Allow inside Tailscale'
     silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
 
@@ -722,6 +722,21 @@ mod_ufw() {
         silent_run ufw route allow in on "$netdev" out on tailscale0
     fi
 
+    # Сохраняем системный NAT для Exit Node, если узел уже раздает интернет
+    if [ "$(tailscale get advertise-exit-node 2>/dev/null || echo 'false')" = "true" ] && [ -n "$netdev" ]; then
+        if [ -f /etc/ufw/before.rules ]; then
+            if ! grep -q "100.64.0.0/10.*MASQUERADE" /etc/ufw/before.rules; then
+                if grep -q "^\*nat" /etc/ufw/before.rules; then
+                    sed -i "/:POSTROUTING/a -A POSTROUTING -s 100.64.0.0/10 -o $netdev -j MASQUERADE" /etc/ufw/before.rules
+                else
+                    sed -i "1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -s 100.64.0.0\/10 -o $netdev -j MASQUERADE\nCOMMIT\n\n/" /etc/ufw/before.rules
+                fi
+            fi
+        fi
+        iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$netdev" -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "$netdev" -j MASQUERADE 2>/dev/null || true
+    fi
+
     # Разделение логики доступа к порту SSH
     if [ "$do_restrict" = true ]; then
         ensure_tailscale_installed || true
@@ -729,7 +744,7 @@ mod_ufw() {
         echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) доступен ТОЛЬКО из закрытой сети Tailscale.${C_RESET}"
     else
         silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
-        echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) открыт публично, P2P (41641/udp) и сеть Tailscale разрешены.${C_RESET}"
+        echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) открыт публично, P2P (41641/udp) и Tailscale разрешены.${C_RESET}"
     fi
 
     silent_run ufw --force enable
@@ -840,13 +855,60 @@ mod_tailscale() {
                     case "$en_choice" in
                         1) 
                             silent_run tailscale set --advertise-exit-node=true
-                            if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-                                silent_run ufw route allow in on tailscale0 comment 'Tailscale Exit Node Forwarding'
-                                silent_run ufw route allow out on tailscale0 comment 'Tailscale Exit Node Forwarding'
+                            sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+                            local wan_dev="$DEFAULT_WAN_IF"
+                            [ -z "$wan_dev" ] && wan_dev=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+
+                            if command -v ufw &>/dev/null; then
+                                # 1. Разрешаем сквозной трафик в UFW
+                                silent_run ufw default allow routed
+                                silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+                                
+                                if [ -n "$wan_dev" ]; then
+                                    silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'TS Exit Node Out'
+                                    silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'TS Exit Node In'
+                                fi
+
+                                # 2. Вносим системный NAT для подсети Tailscale в before.rules
+                                if [ -f /etc/ufw/before.rules ] && [ -n "$wan_dev" ]; then
+                                    if ! grep -q "100.64.0.0/10.*MASQUERADE" /etc/ufw/before.rules; then
+                                        if grep -q "^\*nat" /etc/ufw/before.rules; then
+                                            sed -i "/:POSTROUTING/a -A POSTROUTING -s 100.64.0.0/10 -o $wan_dev -j MASQUERADE" /etc/ufw/before.rules
+                                        else
+                                            sed -i "1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -s 100.64.0.0\/10 -o $wan_dev -j MASQUERADE\nCOMMIT\n\n/" /etc/ufw/before.rules
+                                        fi
+                                    fi
+                                    silent_run ufw reload
+                                fi
                             fi
-                            echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом.${C_RESET}" 
+
+                            # 3. Применяем NAT на лету в ядро
+                            if [ -n "$wan_dev" ]; then
+                                iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+                                iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+                            fi
+
+                            echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом, NAT и сквозная маршрутизация включены.${C_RESET}"
+                            
+                            # 4. Окно-памятка для завершения настройки в облаке
+                            whiptail --title "⚠️ ВАЖНО: Подтверждение Exit Node" --msgbox \
+"Сервер объявлен шлюзом, правила UFW и системный NAT успешно настроены!\n\nЧтобы интернет заработал на ваших устройствах:\n1. Откройте панель: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] ➔ Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Совет по DNS: Если после подключения сайты не открываются,\nв панели Tailscale (вкладка DNS) включите 'Override local DNS'\nи добавьте публичный резолвер (например, 1.1.1.1)." 16 $WT_WIDTH
                             ;;
-                        2) silent_run tailscale set --advertise-exit-node=false; echo -e "${C_GREEN}✅ Функция сетевого шлюза отключена.${C_RESET}" ;;
+                        2) 
+                            silent_run tailscale set --advertise-exit-node=false
+                            local wan_dev="$DEFAULT_WAN_IF"
+                            [ -z "$wan_dev" ] && wan_dev=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+                            
+                            if [ -n "$wan_dev" ]; then
+                                iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+                            fi
+                            if [ -f /etc/ufw/before.rules ]; then
+                                sed -i '/100\.64\.0\.0\/10.*MASQUERADE/d' /etc/ufw/before.rules
+                                silent_run ufw reload
+                            fi
+                            echo -e "${C_GREEN}✅ Функция Exit Node и правила NAT отключены.${C_RESET}" 
+                            ;;
                         3)
                             local target_ip=""
                             prompt_clean "IP-адрес или имя удаленного шлюза:" target_ip

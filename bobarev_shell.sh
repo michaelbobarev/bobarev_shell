@@ -712,22 +712,24 @@ mod_ufw() {
         do_restrict=true
     fi
 
+    # Базовые правила доверия сети Tailscale и прямого линка (применяются всегда)
+    silent_run ufw allow in on tailscale0 comment 'Allow inside Tailscale'
+    silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
+
+    local netdev="$DEFAULT_WAN_IF"
+    if [ -n "$netdev" ]; then
+        silent_run ufw route allow in on tailscale0 out on "$netdev"
+        silent_run ufw route allow in on "$netdev" out on tailscale0
+    fi
+
+    # Разделение логики доступа к порту SSH
     if [ "$do_restrict" = true ]; then
-        if ensure_tailscale_installed || true; then
-            silent_run ufw allow in on tailscale0 comment 'Allow inside Tailscale'
-            silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
-            local netdev="$DEFAULT_WAN_IF"
-            if [ -n "$netdev" ]; then
-                silent_run ufw route allow in on tailscale0 out on "$netdev"
-                silent_run ufw route allow in on "$netdev" out on tailscale0
-            fi
-            silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
-            echo -e "${C_GREEN}✅ Брандмауэр настроен: подключения разрешены ТОЛЬКО из закрытой сети.${C_RESET}"
-        else
-            silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
-        fi
+        ensure_tailscale_installed || true
+        silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+        echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) доступен ТОЛЬКО из закрытой сети Tailscale.${C_RESET}"
     else
         silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
+        echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) открыт публично, P2P (41641/udp) и сеть Tailscale разрешены.${C_RESET}"
     fi
 
     silent_run ufw --force enable

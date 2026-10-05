@@ -558,6 +558,8 @@ mod_ssh_config() {
     if prompt_yn "Скрыть доступ к серверу (разрешить подключения только участникам вашей закрытой сети Tailscale)?" "true"; then
         restrict_choice=true
         ts_restrict_comment="# SSH via Tailscale only"
+    else
+        ts_restrict_comment="# SSH Public Access"
     fi
 
     echo -e "${C_BLUE}🧹 Очистка сторонних конфигураций SSH...${C_RESET}"
@@ -700,14 +702,20 @@ mod_ufw() {
     fi
 
     local is_ts_restricted_in_mod6=false
+    local is_public_in_mod6=false
     if grep -q "SSH via Tailscale only" /etc/ssh/sshd_config.d/00-bobarev-security.conf 2>/dev/null; then
         is_ts_restricted_in_mod6=true
+    elif grep -q "SSH Public Access" /etc/ssh/sshd_config.d/00-bobarev-security.conf 2>/dev/null; then
+        is_public_in_mod6=true
     fi
 
     local do_restrict=false
     if [ "$is_ts_restricted_in_mod6" = true ]; then
         echo -e "${C_BLUE}ℹ️ Ограничение удаленного доступа применено автоматически.${C_RESET}"
         do_restrict=true
+    elif [ "$is_public_in_mod6" = true ]; then
+        echo -e "${C_BLUE}ℹ️ Публичный доступ к SSH сохранен автоматически.${C_RESET}"
+        do_restrict=false
     elif prompt_yn "Разрешить подключения к серверу ТОЛЬКО участникам вашей закрытой сети Tailscale?" "true"; then
         do_restrict=true
     fi

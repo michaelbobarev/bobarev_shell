@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 1.0 (Gold Master)
+# Версия: 1.1 (Gold Master)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -34,7 +34,11 @@ elif [ "$(systemctl get-default 2>/dev/null)" = "graphical.target" ]; then
     SYSTEM_TYPE="Desktop_PC"
 fi
 
-DEFAULT_WAN_IF=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
+get_wan_if() {
+    ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+}
+
+DEFAULT_WAN_IF=$(get_wan_if)
 
 silent_run() { "$@" >/dev/null 2>&1 || true; }
 
@@ -391,7 +395,7 @@ mod_user_setup() {
 
     local pass
     if ! pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (пусто - отмена):" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
-        echo -e "${C_YELLOW}ℹ️️ Смена пароля отменена.${C_RESET}"
+        echo -e "${C_YELLOW}ℹ Смена пароля отменена.${C_RESET}"
     elif [ -z "$pass" ]; then
         echo -e "${C_YELLOW}ℹ️ Смена пароля пропущена.${C_RESET}"
     else
@@ -546,7 +550,8 @@ mod_ssh_config() {
     fi
 
     local conf_dir="/etc/ssh/sshd_config.d"
-    mkdir -p "$conf_dir"
+    local conf_bak_dir="/etc/ssh/.sshd_config.d.bak"
+    mkdir -p "$conf_dir" "$conf_bak_dir"
     
     if [ -f /etc/ssh/sshd_config ]; then
         silent_run sed -i '/^\s*Include \/etc\/ssh\/sshd_config\.d\/\*\.conf/d' /etc/ssh/sshd_config
@@ -562,7 +567,9 @@ mod_ssh_config() {
         ts_restrict_comment="# SSH Public Access"
     fi
 
-    echo -e "${C_BLUE}🧹 Очистка сторонних конфигураций SSH...${C_RESET}"
+    echo -e "${C_BLUE}🧹 Резервное копирование и очистка сторонних конфигураций SSH...${C_RESET}"
+    rm -rf "${conf_bak_dir:?}"/* 2>/dev/null || true
+    cp -a "$conf_dir"/*.conf "$conf_bak_dir"/ 2>/dev/null || true
     rm -f "$conf_dir"/*.conf 2>/dev/null
     
     local conf_file="$conf_dir/00-bobarev-security.conf"
@@ -579,6 +586,9 @@ KbdInteractiveAuthentication $kbd_auth_val
 AuthorizedKeysFile .ssh/authorized_keys
 StrictModes yes
 UsePAM yes
+UseDNS no
+ClientAliveInterval 60
+ClientAliveCountMax 3
 MaxAuthTries 3
 MaxSessions 3
 MaxStartups 10:30:60
@@ -600,6 +610,7 @@ SSH_HARDENING_EOF
     fi
 
     if [ "$test_ok" = true ]; then
+        rm -rf "$conf_bak_dir" 2>/dev/null || true
         silent_run systemctl disable --now ssh.socket
         silent_run systemctl enable --now ssh.service
         silent_run systemctl restart sshd
@@ -625,6 +636,8 @@ SSH_HARDENING_EOF
     else
         echo -e "${C_RED}❌ Ошибка применения параметров безопасности! Выполнен откат изменений...${C_RESET}"
         rm -f "$conf_file"
+        cp -a "$conf_bak_dir"/*.conf "$conf_dir"/ 2>/dev/null || true
+        rm -rf "$conf_bak_dir" 2>/dev/null || true
         systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
     fi
 }
@@ -632,12 +645,22 @@ SSH_HARDENING_EOF
 # 7. Защита ядра и сети
 mod_hardening() {
     echo -e "${C_CYAN}🛡️ === 7/18. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
-    backup_file "/etc/sysctl.d/99-hardening.conf"
+    backup_file "/etc/sysctl.d/99-server-hardening.conf"
     
+    local icmp_ignore=0
+    if prompt_yn "Скрыть сервер от пингов (отключить ответы на ICMP Echo / ping)?" "false"; then
+        icmp_ignore=1
+        echo -e "${C_BLUE}ℹ️ Ответы на ICMP-пинги будут отключены.${C_RESET}"
+    else
+        if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+        icmp_ignore=0
+        echo -e "${C_BLUE}ℹ️ Стандартные ответы на ICMP-пинги сохранены (рекомендуется для мониторинга).${C_RESET}"
+    fi
+
     silent_run modprobe tcp_bbr
 
     mkdir -p /etc/sysctl.d
-    tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << 'HARDENING_EOF'
+    tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << HARDENING_EOF
 kernel.dmesg_restrict = 1
 kernel.kptr_restrict = 2
 kernel.yama.ptrace_scope = 1
@@ -660,7 +683,7 @@ net.ipv4.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
 net.ipv4.icmp_ignore_bogus_error_responses = 1
-net.ipv4.icmp_echo_ignore_all = 1
+net.ipv4.icmp_echo_ignore_all = $icmp_ignore
 fs.protected_symlinks = 1
 fs.protected_hardlinks = 1
 fs.protected_fifos = 1
@@ -678,6 +701,7 @@ HARDENING_EOF
 # 8. Firewall UFW
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/18. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
+    DEFAULT_WAN_IF=$(get_wan_if)
     
     local active_ssh_port="22"
     local sshd_cmd=$(get_sshd_cmd)
@@ -800,6 +824,7 @@ mod_lock_root_auto() { mod_lock_root "auto"; }
 # 10. Tailscale
 mod_tailscale() {
     local mode="${1:-}"
+    DEFAULT_WAN_IF=$(get_wan_if)
     if [ "$mode" = "auto" ]; then
         if command -v tailscale &>/dev/null; then
             echo -e "${C_BLUE}ℹ️ Пакет Tailscale уже установлен. Применение дополнительных настроек...${C_RESET}"
@@ -818,6 +843,7 @@ mod_tailscale() {
 
     while true; do
         MODULE_CANCELED=false
+        DEFAULT_WAN_IF=$(get_wan_if)
         local ts_choice
         if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
         "1" "🔑 Авторизация" \
@@ -865,8 +891,7 @@ mod_tailscale() {
                             silent_run tailscale set --advertise-exit-node=true
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
-                            local wan_dev="$DEFAULT_WAN_IF"
-                            [ -z "$wan_dev" ] && wan_dev=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+                            local wan_dev=$(get_wan_if)
 
                             if command -v ufw &>/dev/null; then
                                 silent_run ufw default allow routed
@@ -901,8 +926,7 @@ mod_tailscale() {
                             ;;
                         2) 
                             silent_run tailscale set --advertise-exit-node=false
-                            local wan_dev="$DEFAULT_WAN_IF"
-                            [ -z "$wan_dev" ] && wan_dev=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+                            local wan_dev=$(get_wan_if)
                             
                             if [ -n "$wan_dev" ]; then
                                 iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
@@ -1017,15 +1041,12 @@ mod_logging_manager() {
             [ "$MODULE_CANCELED" = true ] && return 0
         fi
         
-        silent_run sed -i -E '/^\s*#?\s*(Storage|ForwardToSyslog|ForwardToKMsg|ForwardToConsole|ForwardToWall)=/d' /etc/systemd/journald.conf
-        silent_run sed -i -E 's/^\s*#?\s*SystemMaxUse=.*/SystemMaxUse='"$log_size"'/' /etc/systemd/journald.conf
-        if ! grep -q "^SystemMaxUse=" /etc/systemd/journald.conf; then
-            echo "SystemMaxUse=$log_size" >> /etc/systemd/journald.conf
-        fi
-        silent_run sed -i -E 's/^\s*#?\s*MaxRetentionSec=.*/MaxRetentionSec=1month/' /etc/systemd/journald.conf
-        if ! grep -q "^MaxRetentionSec=" /etc/systemd/journald.conf; then
-            echo "MaxRetentionSec=1month" >> /etc/systemd/journald.conf
-        fi
+        silent_run sed -i -E '/^\s*#?\s*(\[Journal\]|Storage=|ForwardToSyslog=|ForwardToKMsg=|ForwardToConsole=|ForwardToWall=|SystemMaxUse=|MaxRetentionSec=)/d' /etc/systemd/journald.conf
+        cat << CONF >> /etc/systemd/journald.conf
+[Journal]
+SystemMaxUse=$log_size
+MaxRetentionSec=1month
+CONF
         
         silent_run systemctl restart systemd-journald
         silent_run systemctl disable clean-logs-boot.service 2>/dev/null || true
@@ -1037,7 +1058,7 @@ mod_logging_manager() {
         cat << 'DISABLE_LOGS_EOF' > /usr/local/bin/disable-logging.sh
 #!/bin/bash
 set -euo pipefail
-sed -i -E '/^\s*#?\s*(Storage|ForwardToSyslog|ForwardToKMsg|ForwardToConsole|ForwardToWall)=/d' /etc/systemd/journald.conf
+sed -i -E '/^\s*#?\s*(\[Journal\]|Storage=|ForwardToSyslog=|ForwardToKMsg=|ForwardToConsole=|ForwardToWall=|SystemMaxUse=|MaxRetentionSec=)/d' /etc/systemd/journald.conf
 cat << 'CONF' >> /etc/systemd/journald.conf
 [Journal]
 Storage=none
@@ -1096,11 +1117,12 @@ BOOT_CLEAN_SVC_EOF
     fi
 }
 mod_logging_manager_auto() {
-    silent_run sed -i -E '/^\s*#?\s*(Storage|ForwardToSyslog|ForwardToKMsg|ForwardToConsole|ForwardToWall)=/d' /etc/systemd/journald.conf
-    silent_run sed -i -E 's/^\s*#?\s*SystemMaxUse=.*/SystemMaxUse=100M/' /etc/systemd/journald.conf
-    if ! grep -q "^SystemMaxUse=" /etc/systemd/journald.conf; then echo "SystemMaxUse=100M" >> /etc/systemd/journald.conf; fi
-    silent_run sed -i -E 's/^\s*#?\s*MaxRetentionSec=.*/MaxRetentionSec=1month/' /etc/systemd/journald.conf
-    if ! grep -q "^MaxRetentionSec=" /etc/systemd/journald.conf; then echo "MaxRetentionSec=1month" >> /etc/systemd/journald.conf; fi
+    silent_run sed -i -E '/^\s*#?\s*(\[Journal\]|Storage=|ForwardToSyslog=|ForwardToKMsg=|ForwardToConsole=|ForwardToWall=|SystemMaxUse=|MaxRetentionSec=)/d' /etc/systemd/journald.conf
+    cat << 'CONF' >> /etc/systemd/journald.conf
+[Journal]
+SystemMaxUse=100M
+MaxRetentionSec=1month
+CONF
     silent_run systemctl restart systemd-journald
 }
 
@@ -1152,13 +1174,13 @@ EOF
     done
 
     TMPFS_ENTRIES=(
-        "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=512M 0 0"
-        "tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,size=256M 0 0"
+        "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=25% 0 0"
+        "tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,size=15% 0 0"
     )
 
     for entry in "${TMPFS_ENTRIES[@]}"; do
         mount_point=$(echo "$entry" | awk '{print $2}')
-        if ! grep -q "$mount_point" /etc/fstab; then
+        if ! grep -q -E "[[:space:]]${mount_point}[[:space:]]" /etc/fstab; then
             mkdir -p "$mount_point"
             echo "$entry" >> /etc/fstab
         fi
@@ -1183,31 +1205,40 @@ mod_swap_manager() {
     case "$swap_choice" in
         1|2)
             local swap_size="2G"
-            if [ "$swap_choice" = "2" ]; then prompt_default "Желаемый объем памяти:" "4G" swap_size; fi
+            if [ "$swap_choice" = "2" ]; then
+                prompt_default "Желаемый объем памяти (например: 2G, 4G, 1024M):" "4G" swap_size
+                [ "$MODULE_CANCELED" = true ] && return 0
+            fi
             silent_run swapoff /swap.img
             silent_run swapoff /swapfile
             rm -f /swap.img /swapfile
-            
-            if ! fallocate -l "$swap_size" /swapfile 2>/dev/null; then
-                local num="${swap_size%[GgMm]}"
-                local unit="${swap_size: -1}"
-                case "$unit" in
-                    [Gg]) num=$((num * 1024)) ;;
-                    [Mm]) ;;
-                    *) num=2048 ;;
-                esac
-                dd if=/dev/zero of=/swapfile bs=1M count="$num" status=progress
+
+            local root_fs=$(df -T / 2>/dev/null | awk 'NR==2 {print $2}' || echo "unknown")
+            if [ "$root_fs" = "btrfs" ] && command -v btrfs &>/dev/null; then
+                btrfs filesystem mkswapfile --size "$swap_size" /swapfile
+            else
+                if ! fallocate -l "$swap_size" /swapfile 2>/dev/null; then
+                    local num="${swap_size%[GgMm]}"
+                    local unit="${swap_size: -1}"
+                    case "$unit" in
+                        [Gg]) num=$((num * 1024)) ;;
+                        [Mm]) ;;
+                        *) num=2048 ;;
+                    esac
+                    dd if=/dev/zero of=/swapfile bs=1M count="$num" status=progress
+                fi
+                chmod 600 /swapfile
+                mkswap /swapfile
             fi
-            chmod 600 /swapfile
-            mkswap /swapfile
+
             swapon /swapfile
-            sed -i '/swap/d' /etc/fstab
+            sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
             echo '/swapfile none swap sw 0 0' >> /etc/fstab
             echo -e "${C_GREEN}✅ Файл подкачки размером $swap_size успешно инициализирован!${C_RESET}"
             ;;
         3)
             silent_run swapoff -a
-            sed -i '/swap/d' /etc/fstab
+            sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
             rm -f /swapfile /swap.img
             echo -e "${C_GREEN}✅ Использование виртуальной памяти отключено.${C_RESET}"
             ;;
@@ -1330,7 +1361,7 @@ HDMI_EOF
 
 # 16. Диагностика времени загрузки
 mod_boot_diag() {
-    echo -e "${C_CYAN}⏱️ === 16/18. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
+    echo -e "${C_CYAN}⏱️ === 16/18. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
         echo -e "${C_RED}❌ Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
@@ -1551,7 +1582,7 @@ mod_server_audit() {
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
             echo -e "  • Ускорение трафика (GRO):   ${C_GREEN}✅ Работает${C_RESET}"
         else
-            echo -e "  • Ускорение трафика (GRO):   ${C_YELLOW}⚠️️ Отключено${C_RESET}"
+            echo -e "  • Ускорение трафика (GRO):   ${C_YELLOW}⚠ Отключено${C_RESET}"
         fi
     else
         echo -e "  • Программа Tailscale:       ${C_YELLOW}⚠️ Не установлена${C_RESET}"
@@ -1637,6 +1668,7 @@ mod_server_audit() {
 # 18. Режим локального маршрутизатора (Нативная интеграция с UFW)
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/18. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
+    DEFAULT_WAN_IF=$(get_wan_if)
     
     if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
@@ -1650,12 +1682,26 @@ mod_router_sbc() {
         return 0
     fi
 
+    local menu_items=()
+    local iface_desc=""
+    for iface in $available_ifs; do
+        if [ "$iface" = "$DEFAULT_WAN_IF" ]; then
+            iface_desc="Текущий WAN интерфейс"
+        else
+            iface_desc="Свободный интерфейс (рекомендуется для LAN)"
+        fi
+        menu_items+=("$iface" "$iface_desc")
+    done
+
     local lan_if=""
-    prompt_clean "Введите имя LAN-интерфейса, к которому подключены клиенты (Доступно: $(echo $available_ifs | tr '\n' ' ')): " lan_if
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$lan_if" ]; then return 0; fi
+    if ! lan_if=$(whiptail --title "Выбор LAN-интерфейса" --menu "Выберите сетевой интерфейс, к которому подключены клиенты:" 14 $WT_WIDTH 5 "${menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
+        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
+        MODULE_CANCELED=true
+        return 0
+    fi
 
     local lan_ip="192.168.199.1"
-    prompt_clean "Введите статический IP для этого шлюза (например, 192.168.199.1):" lan_ip
+    prompt_default "Введите статический IP для этого шлюза:" "$lan_ip" lan_ip
     [ "$MODULE_CANCELED" = true ] && return 0
 
     if [[ "$lan_ip" == 100.* ]]; then
@@ -1716,7 +1762,7 @@ EOF
     echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра для локальной сети...${C_RESET}"
     if command -v ufw &>/dev/null; then
         silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
-        silent_run ufw allow in on "$lan_if" to any port 53 proto udp comment 'LAN DNS (UDP/TCP)'
+        silent_run ufw allow in on "$lan_if" to any port 53 comment 'LAN DNS (UDP/TCP)'
         silent_run ufw route allow in on "$lan_if" comment 'LAN Forwarding'
     else
         iptables -D INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT 2>/dev/null || true
@@ -1748,9 +1794,10 @@ EOF
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     iptables -D FORWARD -i "$lan_if" -j ACCEPT 2>/dev/null || true
     iptables -A FORWARD -i "$lan_if" -j ACCEPT
-    iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+    iptables -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
-    local wan_if=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+    local wan_if=$(get_wan_if)
     if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
         echo -e "${C_BLUE}🛡️ Активация Kill Switch (блокировка прямого выхода через $wan_if)...${C_RESET}"
         if command -v ufw &>/dev/null; then
@@ -1766,7 +1813,7 @@ EOF
     echo -e "\n${C_GREEN}🎉 Режим маршрутизатора (на базе UFW) успешно развернут!${C_RESET}"
     echo -e "  • LAN Интерфейс:       ${C_BLUE}$lan_if ($lan_ip)${C_RESET}"
     echo -e "  • Пул адресов DHCP:    ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
-    echo -e "  • Открытые порты:      ${C_GREEN}53 (DNS) и 67 (DHCP) разрешены${C_RESET}"
+    echo -e "  • Открытые порты:      ${C_GREEN}53 (DNS UDP/TCP) и 67 (DHCP) разрешены${C_RESET}"
     echo -e "  • Маршрутизация (NAT): ${C_GREEN}Через сеть Tailscale${C_RESET}"
     echo -e "  • MSS Clamping:        ${C_GREEN}Включен (встроен в UFW)${C_RESET}"
     if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then

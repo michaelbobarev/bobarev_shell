@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 1.6 (Gold Master - Smart Policy Routing & Live Interface Menu)
+# Версия: 1.7 (Gold Master - Policy Routing, rp_filter & Google Wifi Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -107,8 +107,17 @@ get_iface_status_tag() {
 }
 
 # ------------------------------------------------------------------------------
-# ИДЕМПОТЕНТНЫЕ ХЕЛПЕРЫ ДЛЯ UFW (NAT, MANGLE, DOCKER)
+# ИДЕМПОТЕНТНЫЕ ХЕЛПЕРЫ ДЛЯ UFW (NAT, MANGLE, DOCKER, RP_FILTER)
 # ------------------------------------------------------------------------------
+disable_ufw_strict_rpfilter() {
+    if [ -f /etc/ufw/sysctl.conf ]; then
+        sed -i 's/rp_filter=1/rp_filter=0/g' /etc/ufw/sysctl.conf 2>/dev/null || true
+    fi
+    for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
+        [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
+    done
+}
+
 ensure_ufw_mangle_tcpmss() {
     if [ -f /etc/ufw/before.rules ] && ! grep -q "TCPMSS" /etc/ufw/before.rules; then
         sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
@@ -122,9 +131,14 @@ ensure_ufw_nat_rule() {
     local rule="$1"
     [ ! -f /etc/ufw/before.rules ] && return 0
     if ! grep -q "^\*nat" /etc/ufw/before.rules; then
-        sed -i '1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\nCOMMIT\n\n/' /etc/ufw/before.rules
-    elif ! grep -q "^:POSTROUTING" /etc/ufw/before.rules; then
-        sed -i '/^\*nat/a :POSTROUTING ACCEPT [0:0]' /etc/ufw/before.rules
+        sed -i '1s/^/*nat\n:PREROUTING ACCEPT [0:0]\n:POSTROUTING ACCEPT [0:0]\nCOMMIT\n\n/' /etc/ufw/before.rules
+    else
+        if ! grep -q "^:PREROUTING" /etc/ufw/before.rules; then
+            sed -i '/^\*nat/a :PREROUTING ACCEPT [0:0]' /etc/ufw/before.rules
+        fi
+        if ! grep -q "^:POSTROUTING" /etc/ufw/before.rules; then
+            sed -i '/^\*nat/a :POSTROUTING ACCEPT [0:0]' /etc/ufw/before.rules
+        fi
     fi
     if ! grep -qF -- "$rule" /etc/ufw/before.rules; then
         sed -i "/^:POSTROUTING/a $rule" /etc/ufw/before.rules
@@ -191,10 +205,12 @@ ETHTOOL_SVC_EOF
         echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
     fi
 
+    disable_ufw_strict_rpfilter
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
         ensure_ufw_mangle_tcpmss
         silent_run ufw reload
     fi
+    disable_ufw_strict_rpfilter
 
     iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
@@ -766,6 +782,7 @@ mod_hardening() {
 
     silent_run modprobe tcp_bbr
     silent_run modprobe nf_conntrack
+    disable_ufw_strict_rpfilter
 
     mkdir -p /etc/sysctl.d
     tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << HARDENING_EOF
@@ -786,8 +803,8 @@ net.core.wmem_default = 1048576
 net.core.netdev_max_backlog = 10000
 net.netfilter.nf_conntrack_max = 131072
 net.ipv4.tcp_syncookies = 1
-net.ipv4.conf.all.rp_filter = 2
-net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.send_redirects = 0
@@ -840,6 +857,7 @@ mod_ufw() {
     echo -e "${C_BLUE}ℹ️ Автоматически определен порт SSH: $port${C_RESET}"
 
     silent_run ufw --force reset
+    disable_ufw_strict_rpfilter
     silent_run ufw default deny incoming
     silent_run ufw default allow outgoing
 
@@ -908,15 +926,6 @@ mod_ufw() {
             fi
             echo -e "${C_BLUE}ℹ️ Восстановлен профиль роутера: $ROUTER_LAN_IF -> $ROUTER_OUT_IF (Kill Switch: ${ROUTER_KILLSWITCH:-false}).${C_RESET}"
         fi
-    elif [ -f /etc/dnsmasq.conf ] && grep -q "^interface=" /etc/dnsmasq.conf; then
-        local r_lan_if=$(grep "^interface=" /etc/dnsmasq.conf | head -n 1 | cut -d= -f2)
-        if [ -n "$r_lan_if" ]; then
-            silent_run ufw allow in on "$r_lan_if" to any port 67 proto udp comment 'LAN DHCP'
-            silent_run ufw allow in on "$r_lan_if" to any port 53 comment 'LAN DNS (UDP/TCP)'
-            silent_run ufw route allow in on "$r_lan_if" comment 'LAN Forwarding'
-            ensure_ufw_nat_rule "-A POSTROUTING -o tailscale0 -j MASQUERADE"
-            ensure_ufw_mangle_tcpmss
-        fi
     fi
 
     # Защита Docker за UFW (ufw-docker)
@@ -943,6 +952,8 @@ mod_ufw() {
 
     silent_run ufw --force enable
     silent_run ufw logging off
+    disable_ufw_strict_rpfilter
+    [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
     echo -e "${C_GREEN}✅ Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
 }
 
@@ -1874,13 +1885,13 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Универсальный режим локального маршрутизатора (Policy Routing + NAT + DNS)
+# 18. Универсальный режим локального маршрутизатора (Policy Routing + NAT + DNS Redirect)
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/19. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     local wan_if="$DEFAULT_WAN_IF"
     
-    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний LAN-интерфейс для клиентов и целевой внешний канал (WireGuard, Tailscale, TUN-прокси или прямой WAN), а также решить, направлять ли трафик самого сервера в этот же канал." 13 $WT_WIDTH; then
+    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний LAN-интерфейс для клиентов (или Google Wifi) и целевой внешний канал (WireGuard, Tailscale, TUN-прокси или прямой WAN), а также решить, направлять ли трафик самого сервера в этот же канал." 13 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         MODULE_CANCELED=true
         return 0
@@ -1917,7 +1928,6 @@ mod_router_sbc() {
     local seen_ifs=" lo $lan_if "
     local all_sys_ifs=$(ip -br link show | awk '{print $1}' | sed 's/@.*//' || echo "")
 
-    # Сортируем существующие интерфейсы по приоритету удобства: сначала wg*, затем tun*, затем tailscale0, затем WAN
     local ordered_candidates=()
     for iface in $all_sys_ifs; do
         [[ "$iface" == wg* ]] && ordered_candidates+=("$iface")
@@ -1976,7 +1986,6 @@ mod_router_sbc() {
     local dhcp_start="${subnet_prefix}.50"
     local dhcp_end="${subnet_prefix}.200"
 
-    # Вопрос: Перевести ли трафик самого сервера (NanoPi) в этот же канал?
     local route_host="false"
     if [ "$out_if" != "$wan_if" ] && [ "$out_if" != "tailscale0" ]; then
         if prompt_yn "Направить трафик САМОГО СЕРВЕРА ($(hostname)) тоже в канал '$out_if' вместе с LAN-клиентами?\n\n• Да: и клиенты в LAN, и сам сервер выходят с IP '$out_if' (доступ к серверу по Tailscale и локальной сети сохранится).\n• Нет: через '$out_if' идут только клиенты за портом '$lan_if'." "true"; then
@@ -1997,12 +2006,25 @@ mod_router_sbc() {
         fi
     fi
 
-    # Автоматическое снятие конфликтующего Tailscale Exit Node, если выбран другой интерфейс (например, wg0)
+    # Автоматическое снятие конфликтующего Tailscale Exit Node и сломанного MagicDNS при выборе другого интерфейса (например, wg0)
     if [ "$out_if" != "tailscale0" ] && command -v tailscale &>/dev/null; then
         local active_ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
         if [ -n "$active_ts_exit" ] && [ "$active_ts_exit" != "none" ] && [ "$active_ts_exit" != "false" ]; then
             echo -e "${C_BLUE}🔄 Отключение перехвата шлюза в Tailscale (Exit Node: $active_ts_exit) для освобождения маршрута под $out_if...${C_RESET}"
             silent_run tailscale set --exit-node=
+        fi
+        silent_run tailscale set --accept-dns=false
+    fi
+
+    # Определяем внутренний DNS туннеля (например, 10.64.0.1 для Mullvad или из /etc/wireguard/*.conf)
+    local vpn_dns=""
+    if [ -f "/etc/wireguard/${out_if}.conf" ]; then
+        vpn_dns=$(grep -iE '^\s*DNS\s*=' "/etc/wireguard/${out_if}.conf" | head -n 1 | cut -d= -f2 | tr ',' ' ' | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || echo "")
+    fi
+    if [ -z "$vpn_dns" ]; then
+        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+        if [[ "$out_ip4" == 10.64.* ]]; then
+            vpn_dns="10.64.0.1"
         fi
     fi
 
@@ -2015,11 +2037,16 @@ mod_router_sbc() {
         else
             echo -e "\n[Resolve]\nDNSStubListener=no" >> /etc/systemd/resolved.conf
         fi
-        if [ -f /run/systemd/resolve/resolv.conf ]; then
-            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
-        fi
         systemctl restart systemd-resolved 2>/dev/null || true
     fi
+
+    # Гарантируем рабочий /etc/resolv.conf на самом хосте
+    rm -f /etc/resolv.conf 2>/dev/null || true
+    {
+        [ -n "$vpn_dns" ] && echo "nameserver $vpn_dns"
+        echo "nameserver 1.1.1.1"
+        echo "nameserver 8.8.8.8"
+    } > /etc/resolv.conf
 
     echo -e "${C_BLUE}📦 Установка необходимых пакетов (dnsmasq, iptables, network-manager)...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
@@ -2052,25 +2079,26 @@ mod_router_sbc() {
         ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
     fi
 
-    # 3. Настройка dnsmasq только на LAN-интерфейс
+    # 3. Настройка dnsmasq (с поддержкой VPN DNS + публичных апстримов)
     echo -e "${C_BLUE}⚙️ Настройка кэширующего сервера DHCP и DNS (dnsmasq)...${C_RESET}"
     backup_file "/etc/dnsmasq.conf"
     rm -f /etc/dnsmasq.d/* 2>/dev/null || true
 
-    cat <<EOF > /etc/dnsmasq.conf
-domain-needed
-bogus-priv
-no-resolv
-server=1.1.1.1
-server=8.8.8.8
-cache-size=1500
-interface=$lan_if
-except-interface=lo
-bind-dynamic
-dhcp-range=$dhcp_start,$dhcp_end,12h
-dhcp-option=3,$lan_ip
-dhcp-option=6,$lan_ip
-EOF
+    {
+        echo "domain-needed"
+        echo "bogus-priv"
+        echo "no-resolv"
+        [ -n "$vpn_dns" ] && echo "server=$vpn_dns"
+        echo "server=1.1.1.1"
+        echo "server=8.8.8.8"
+        echo "cache-size=1500"
+        echo "interface=$lan_if"
+        echo "except-interface=lo"
+        echo "bind-dynamic"
+        echo "dhcp-range=$dhcp_start,$dhcp_end,12h"
+        echo "dhcp-option=3,$lan_ip"
+        echo "dhcp-option=6,$lan_ip"
+    } > /etc/dnsmasq.conf
 
     systemctl unmask dnsmasq 2>/dev/null || true
     systemctl enable dnsmasq 2>/dev/null || true
@@ -2101,9 +2129,11 @@ ROUTER_LAN_IP="$lan_ip"
 ROUTER_OUT_IF="$out_if"
 ROUTER_ROUTE_HOST="$route_host"
 ROUTER_KILLSWITCH="$use_killswitch"
+ROUTER_VPN_DNS="$vpn_dns"
 EOF
 
     echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра и маршрутизации ($lan_if -> $out_if)...${C_RESET}"
+    disable_ufw_strict_rpfilter
     if command -v ufw &>/dev/null; then
         silent_run ufw default allow routed
         silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
@@ -2123,7 +2153,11 @@ EOF
 
     echo -e "${C_BLUE}⚙️ Включение маршрутизации, NAT и приоритетной таблицы (Policy Routing)...${C_RESET}"
     [ -f /etc/sysctl.conf ] && sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
+    cat << 'SYSCTL_ROUTER_EOF' > /etc/sysctl.d/99-router.conf
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+SYSCTL_ROUTER_EOF
     sysctl -p /etc/sysctl.d/99-router.conf >/dev/null 2>&1
 
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
@@ -2131,20 +2165,30 @@ EOF
         ensure_ufw_mangle_tcpmss
         silent_run ufw reload
     fi
+    disable_ufw_strict_rpfilter
 
-    # Создаем скрипт и сервис автозапуска Policy Routing (приоритеты 90..105 -> таблица 200 + защита от утечки IPv6)
+    # Создаем скрипт и сервис автозапуска Policy Routing (приоритеты 5290..5310 ПОСЛЕ Tailscale 5270 + rp_filter=0 + DNS DNAT для Google Wifi)
     cat << 'ROUTER_UP_EOF' > /usr/local/bin/bobarev-router-up.sh
 #!/bin/bash
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 [ ! -f /etc/default/bobarev-router ] && exit 0
 source /etc/default/bobarev-router
+
+# 1. Отключаем строгий rp_filter на всех интерфейсах (чтобы ядро не отбрасывало пакеты туннеля wg0)
+if [ -f /etc/ufw/sysctl.conf ]; then
+    sed -i 's/rp_filter=1/rp_filter=0/g' /etc/ufw/sysctl.conf 2>/dev/null || true
+fi
+for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
+    [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
+done
 
 ip link set dev "$ROUTER_LAN_IF" up 2>/dev/null || true
 if ! ip -4 addr show dev "$ROUTER_LAN_IF" 2>/dev/null | grep -q "$ROUTER_LAN_IP"; then
     ip addr add "$ROUTER_LAN_IP/24" dev "$ROUTER_LAN_IF" 2>/dev/null || true
 fi
 
-# Очистка прежних правил Policy Routing (IPv4 и IPv6)
-for p in 90 94 95 96 100 105; do
+# 2. Очистка старых правил Policy Routing (включая старые 90..105 и новые 5290..5310)
+for p in 90 94 95 96 100 105 5290 5300 5310; do
     ip -4 rule del prio "$p" 2>/dev/null || true
     ip -6 rule del prio "$p" 2>/dev/null || true
 done
@@ -2152,7 +2196,6 @@ ip -4 route flush table 200 2>/dev/null || true
 ip -6 route flush table 200 2>/dev/null || true
 
 WAN_DEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
-WAN_GW=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '/via/ {print $3; exit}' || echo "")
 
 if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
     OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
@@ -2162,49 +2205,56 @@ if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
         ip -4 route replace default dev "$ROUTER_OUT_IF" table 200 2>/dev/null || true
     fi
 
-    # 90: Защита всех локальных подсетей (LAN, WAN-подсеть роутера и статические маршруты)
-    ip -4 rule add from all lookup main suppress_prefixlength 0 prio 90 2>/dev/null || true
-    # 100: Весь интернет-трафик клиентов из LAN принудительно идет в таблицу 200 ($ROUTER_OUT_IF)
-    ip -4 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 100 2>/dev/null || true
+    # Приоритеты 5290..5310 работают ПОСЛЕ таблицы Tailscale (5270), сохраняя работу Tailscale и MagicDNS!
+    # 5290: Защита всех локальных подсетей (LAN, WAN-подсеть роутера и статические маршруты)
+    ip -4 rule add from all lookup main suppress_prefixlength 0 prio 5290 2>/dev/null || true
+    # 5300: Весь трафик клиентов из LAN (включая Google Wifi) идет в таблицу 200 ($ROUTER_OUT_IF)
+    ip -4 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 5300 2>/dev/null || true
 
-    # Если включен перевод самого хоста в этот же туннель
+    # 5310: Если включен перевод самого хоста в этот же канал (используем нативное исключение not fwmark)
     if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ] && [ "$ROUTER_OUT_IF" != "$WAN_DEV" ]; then
-        # Защита от петли маршрутизации WireGuard (fwmark + прямой маршрут до Endpoint через WAN)
         if command -v wg &>/dev/null && wg show "$ROUTER_OUT_IF" >/dev/null 2>&1; then
             WG_FWMARK=$(wg show "$ROUTER_OUT_IF" fwmark 2>/dev/null || echo "off")
             if [ "$WG_FWMARK" = "off" ] || [ -z "$WG_FWMARK" ]; then
                 wg set "$ROUTER_OUT_IF" fwmark 0xca6c 2>/dev/null || true
                 WG_FWMARK="0xca6c"
             fi
-            ip -4 rule add fwmark "$WG_FWMARK" lookup main prio 94 2>/dev/null || true
-
-            if [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ]; then
-                for ep_ip in $(wg show "$ROUTER_OUT_IF" endpoints 2>/dev/null | awk '{print $2}' | sed -E 's/:[0-9]+$//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
-                    ip -4 route replace "$ep_ip/32" via "$WAN_GW" dev "$WAN_DEV" table main 2>/dev/null || true
-                done
-            fi
+            ip -4 rule add not fwmark "$WG_FWMARK" lookup 200 prio 5310 2>/dev/null || true
+        else
+            ip -4 rule add from all lookup 200 prio 5310 2>/dev/null || true
         fi
-        # 95: Сохраняем работу демона Tailscale поверх WAN (чтобы сервер всегда был доступен по Tailscale)
-        ip -4 rule add fwmark 0x80000/0xff0000 lookup main prio 95 2>/dev/null || true
-        # 105: Трафик самого сервера идет через таблицу 200 ($ROUTER_OUT_IF)
-        ip -4 rule add from all lookup 200 prio 105 2>/dev/null || true
     fi
 
-    # Защита от утечки IPv6 (если туннель $ROUTER_OUT_IF имеет только IPv4, блокируем обход по IPv6 с мгновенным фоллбэком на IPv4)
+    # Защита от утечки IPv6 (если туннель $ROUTER_OUT_IF имеет только IPv4)
     OUT_HAS_IPV6=$(ip -6 addr show dev "$ROUTER_OUT_IF" scope global 2>/dev/null || echo "")
     if [ -z "$OUT_HAS_IPV6" ]; then
         ip -6 route replace unreachable default table 200 2>/dev/null || true
-        ip -6 rule add from all lookup main suppress_prefixlength 0 prio 90 2>/dev/null || true
-        ip -6 rule add fwmark 0x80000/0xff0000 lookup main prio 95 2>/dev/null || true
-        ip -6 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 100 2>/dev/null || true
+        ip -6 rule add from all lookup main suppress_prefixlength 0 prio 5290 2>/dev/null || true
+        ip -6 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 5300 2>/dev/null || true
         if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ]; then
-            ip -6 rule add from all lookup 200 prio 105 2>/dev/null || true
+            ip -6 rule add from all lookup 200 prio 5310 2>/dev/null || true
         fi
+    fi
+
+    # Обновляем /etc/resolv.conf на хосте, чтобы не зависеть от отключенного Exit Node
+    if grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null || ! grep -qE "1\.1\.1\.1|8\.8\.8\.8" /etc/resolv.conf 2>/dev/null; then
+        rm -f /etc/resolv.conf 2>/dev/null || true
+        {
+            [ -n "${ROUTER_VPN_DNS:-}" ] && echo "nameserver $ROUTER_VPN_DNS"
+            echo "nameserver 1.1.1.1"
+            echo "nameserver 8.8.8.8"
+        } > /etc/resolv.conf
     fi
 fi
 
 ip -4 route flush cache 2>/dev/null || true
 ip -6 route flush cache 2>/dev/null || true
+
+# 3. Прозрачный перехват DNS (порт 53) на LAN-интерфейсе (необходимо для роутеров Google Wifi с жестко зашитым 8.8.8.8)
+iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
+iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
+iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
+iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
 
 iptables -t nat -D POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null || true
 iptables -t nat -A POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE
@@ -2220,7 +2270,7 @@ ROUTER_UP_EOF
     tee /etc/systemd/system/bobarev-router.service > /dev/null << 'ROUTER_SVC_EOF'
 [Unit]
 Description=Bobarev Universal Router Policy Routing & NAT
-After=network-online.target wg-quick@wg0.service tailscaled.service
+After=network-online.target wg-quick@wg0.service tailscaled.service ufw.service
 Wants=network-online.target
 
 [Service]
@@ -2249,20 +2299,23 @@ ROUTER_SVC_EOF
         fi
     fi
 
-    echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
-    local ext_ip_out="Не удалось определить (проверьте связь туннеля)"
-    local probed_ip=$(curl -4 -s --max-time 4 --interface "$out_if" https://ip.gs 2>/dev/null || curl -4 -s --max-time 4 --interface "$out_if" https://ifconfig.me 2>/dev/null || echo "")
+    echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if' (без зависимости от DNS)...${C_RESET}"
+    local ext_ip_out="Не удалось определить (проверьте handshake туннеля: wg show $out_if)"
+    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo "")
+    if [ -z "$probed_ip" ]; then
+        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
+    fi
     if [ -n "$probed_ip" ]; then
         ext_ip_out="$probed_ip"
     fi
 
-    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор (v1.6 Policy Routing) успешно развернут!${C_RESET}"
-    echo -e "  • LAN Интерфейс (Вход):  ${C_BLUE}$lan_if ($lan_ip, bind-dynamic)${C_RESET}"
-    echo -e "  • Выходной канал (NAT):  ${C_GREEN}$out_if (Приоритет ip rule: 100 -> таблица 200)${C_RESET}"
+    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор (v1.7 Policy Routing + Google Wifi Ready) развернут!${C_RESET}"
+    echo -e "  • LAN Интерфейс (Вход):  ${C_BLUE}$lan_if ($lan_ip, bind-dynamic + DNS DNAT 53)${C_RESET}"
+    echo -e "  • Выходной канал (NAT):  ${C_GREEN}$out_if (Приоритет ip rule: 5300 -> таблица 200, rp_filter=0)${C_RESET}"
     echo -e "  • Внешний IP канала:     ${C_GREEN}$ext_ip_out${C_RESET}"
-    echo -e "  • Трафик самого сервера: ${C_BLUE}$([ "$route_host" = "true" ] && echo "Тоже идет через $out_if (Prio 105 + IPv6 Leak Guard)" || echo "Стандартный системный маршрут")${C_RESET}"
+    echo -e "  • Трафик самого сервера: ${C_BLUE}$([ "$route_host" = "true" ] && echo "Тоже идет через $out_if (Prio 5310 not fwmark + IPv6 Guard)" || echo "Стандартный системный маршрут")${C_RESET}"
     echo -e "  • Пул адресов DHCP:      ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
-    echo -e "  • Локальный DNS-кэш:     ${C_GREEN}$lan_ip (1500 записей, UDP/TCP порт 53)${C_RESET}"
+    echo -e "  • Локальный DNS-кэш:     ${C_GREEN}$lan_ip (${vpn_dns:+$vpn_dns, }1.1.1.1, 8.8.8.8)${C_RESET}"
     echo -e "  • MSS Clamping:          ${C_GREEN}Включен (встроен в UFW)${C_RESET}"
     if [ "$use_killswitch" = "true" ]; then
         echo -e "  • Kill Switch:           ${C_GREEN}Включен (Утечка трафика через $wan_if заблокирована!)${C_RESET}"
@@ -2317,6 +2370,7 @@ mod_backup_manager() {
             silent_run systemctl restart systemd-journald
             silent_run systemctl restart sshd || silent_run systemctl restart ssh
             command -v ufw &>/dev/null && silent_run ufw reload
+            disable_ufw_strict_rpfilter
             echo -e "${C_GREEN}✅ Конфигурации успешно восстановлены и применены!${C_RESET}"
         fi
     fi
@@ -2360,7 +2414,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v1.6 (Gold Master - Smart Policy Routing Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v1.7 (Gold Master - Policy Routing & Google Wifi Fix)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню whiptail"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -2402,7 +2456,7 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.6)" \
+    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.7)" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz

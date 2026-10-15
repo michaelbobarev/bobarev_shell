@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 1.7 (Gold Master - Policy Routing, rp_filter & Google Wifi Fix)
+# Версия: 1.8 (Gold Master - Policy Routing, rp_filter & Clean DNS Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -2016,12 +2016,14 @@ mod_router_sbc() {
         silent_run tailscale set --accept-dns=false
     fi
 
-    # Определяем внутренний DNS туннеля (например, 10.64.0.1 для Mullvad или из /etc/wireguard/*.conf)
+    # Определяем внутренний DNS туннеля без дублирования стандартных публичных серверов (1.1.1.1 / 8.8.8.8)
     local vpn_dns=""
     if [ -f "/etc/wireguard/${out_if}.conf" ]; then
         vpn_dns=$(grep -iE '^\s*DNS\s*=' "/etc/wireguard/${out_if}.conf" | head -n 1 | cut -d= -f2 | tr ',' ' ' | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || echo "")
     fi
-    if [ -z "$vpn_dns" ]; then
+    if [ "$vpn_dns" = "8.8.8.8" ] || [ "$vpn_dns" = "8.8.4.4" ] || [ "$vpn_dns" = "1.1.1.1" ] || [ "$vpn_dns" = "1.0.0.1" ]; then
+        vpn_dns=""
+    elif [ -z "$vpn_dns" ]; then
         local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
         if [[ "$out_ip4" == 10.64.* ]]; then
             vpn_dns="10.64.0.1"
@@ -2079,7 +2081,7 @@ mod_router_sbc() {
         ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
     fi
 
-    # 3. Настройка dnsmasq (с поддержкой VPN DNS + публичных апстримов)
+    # 3. Настройка dnsmasq (с поддержкой VPN DNS + публичных апстримов без дубликатов)
     echo -e "${C_BLUE}⚙️ Настройка кэширующего сервера DHCP и DNS (dnsmasq)...${C_RESET}"
     backup_file "/etc/dnsmasq.conf"
     rm -f /etc/dnsmasq.d/* 2>/dev/null || true
@@ -2309,7 +2311,7 @@ ROUTER_SVC_EOF
         ext_ip_out="$probed_ip"
     fi
 
-    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор (v1.7 Policy Routing + Google Wifi Ready) развернут!${C_RESET}"
+    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор (v1.8 Policy Routing + Google Wifi Ready) развернут!${C_RESET}"
     echo -e "  • LAN Интерфейс (Вход):  ${C_BLUE}$lan_if ($lan_ip, bind-dynamic + DNS DNAT 53)${C_RESET}"
     echo -e "  • Выходной канал (NAT):  ${C_GREEN}$out_if (Приоритет ip rule: 5300 -> таблица 200, rp_filter=0)${C_RESET}"
     echo -e "  • Внешний IP канала:     ${C_GREEN}$ext_ip_out${C_RESET}"
@@ -2414,7 +2416,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v1.7 (Gold Master - Policy Routing & Google Wifi Fix)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v1.8 (Gold Master - Policy Routing & Clean DNS Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню whiptail"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -2456,7 +2458,7 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.7)" \
+    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.8)" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz

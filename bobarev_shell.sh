@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 1.3 (Gold Master)
+# Версия: 1.4 (Gold Master - Universal Router Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -35,7 +35,7 @@ elif [ "$(systemctl get-default 2>/dev/null)" = "graphical.target" ]; then
 fi
 
 get_wan_if() {
-    ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+    ip route show default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
 }
 
 DEFAULT_WAN_IF=$(get_wan_if)
@@ -130,6 +130,7 @@ apply_ufw_docker_protection() {
 -A DOCKER-USER -j ufw-user-forward
 -A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
 -A DOCKER-USER -i tailscale0 -j RETURN
+-A DOCKER-USER -i wg+ -j RETURN
 -A DOCKER-USER -i $wan_if -p tcp -m conntrack --ctstate NEW -j DROP
 -A DOCKER-USER -i $wan_if -p udp -m conntrack --ctstate NEW -j DROP
 -A DOCKER-USER -j RETURN
@@ -142,12 +143,12 @@ enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 tries=0
-while ! ip route show default 2>/dev/null | grep -v tailscale0 >/dev/null 2>&1; do
+while ! ip route show default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -ge 15 ] && exit 0
     sleep 2
 done
-NETDEV=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+NETDEV=$(ip route show default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
     ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
 fi
@@ -877,8 +878,23 @@ mod_ufw() {
         iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "$netdev" -j MASQUERADE 2>/dev/null || true
     fi
 
-    # Автоматическое сохранение правил локального роутера (Модуль 18), если он был настроен
-    if [ -f /etc/dnsmasq.conf ] && grep -q "^interface=" /etc/dnsmasq.conf; then
+    # Автоматическое сохранение правил универсального роутера (Модуль 18), если он был настроен
+    if [ -f /etc/default/bobarev-router ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-router
+        if [ -n "${ROUTER_LAN_IF:-}" ] && [ -n "${ROUTER_OUT_IF:-}" ]; then
+            silent_run ufw allow in on "$ROUTER_LAN_IF" to any port 67 proto udp comment 'LAN DHCP'
+            silent_run ufw allow in on "$ROUTER_LAN_IF" to any port 53 comment 'LAN DNS (UDP/TCP)'
+            silent_run ufw route allow in on "$ROUTER_LAN_IF" out on "$ROUTER_OUT_IF" comment "LAN to $ROUTER_OUT_IF"
+            silent_run ufw route allow in on "$ROUTER_OUT_IF" out on "$ROUTER_LAN_IF" comment "$ROUTER_OUT_IF to LAN"
+            ensure_ufw_nat_rule "-A POSTROUTING -o $ROUTER_OUT_IF -j MASQUERADE"
+            ensure_ufw_mangle_tcpmss
+            if [ "${ROUTER_KILLSWITCH:-false}" = "true" ] && [ -n "$netdev" ] && [ "$netdev" != "$ROUTER_OUT_IF" ] && [ "$netdev" != "$ROUTER_LAN_IF" ]; then
+                silent_run ufw route deny in on "$ROUTER_LAN_IF" out on "$netdev" comment 'Kill Switch'
+            fi
+            echo -e "${C_BLUE}ℹ️ Восстановлен профиль роутера: $ROUTER_LAN_IF ➔ $ROUTER_OUT_IF (Kill Switch: ${ROUTER_KILLSWITCH:-false}).${C_RESET}"
+        fi
+    elif [ -f /etc/dnsmasq.conf ] && grep -q "^interface=" /etc/dnsmasq.conf; then
         local r_lan_if=$(grep "^interface=" /etc/dnsmasq.conf | head -n 1 | cut -d= -f2)
         if [ -n "$r_lan_if" ]; then
             silent_run ufw allow in on "$r_lan_if" to any port 67 proto udp comment 'LAN DHCP'
@@ -886,16 +902,12 @@ mod_ufw() {
             silent_run ufw route allow in on "$r_lan_if" comment 'LAN Forwarding'
             ensure_ufw_nat_rule "-A POSTROUTING -o tailscale0 -j MASQUERADE"
             ensure_ufw_mangle_tcpmss
-            if [ -n "$netdev" ] && [ "$netdev" != "$r_lan_if" ]; then
-                silent_run ufw route deny in on "$r_lan_if" out on "$netdev" comment 'Kill Switch'
-            fi
-            echo -e "${C_BLUE}ℹ️ Обнаружен активный режим роутера на $r_lan_if: правила NAT, DNS/DHCP и Kill Switch сохранены.${C_RESET}"
         fi
     fi
 
     # Защита Docker за UFW (ufw-docker)
     if [ -n "$netdev" ]; then
-        if prompt_yn "Включить защиту контейнеров Docker за UFW (запретить Docker обходить фаервол снаружи, оставив доступ через Tailscale)?" "true"; then
+        if prompt_yn "Включить защиту контейнеров Docker за UFW (запретить Docker обходить фаервол снаружи, оставив доступ через Tailscale и WG)?" "true"; then
             apply_ufw_docker_protection "$netdev"
             echo -e "${C_GREEN}✅ Защита Docker + UFW (цепочка DOCKER-USER) интегрирована в /etc/ufw/after.rules.${C_RESET}"
         fi
@@ -1691,7 +1703,7 @@ mod_server_audit() {
     check_param "net.ipv4.tcp_congestion_control" "bbr" "Алгоритм TCP BBR" "Активен" "Стандартный"
     check_param "net.core.rmem_max" "26214400" "Расширенные UDP-буферы" "Активны (25 МБ)" "Стандартные"
 
-    echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) и Роутер ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         echo -e "  • Статус брандмауэра:        ${C_GREEN}✅ Активен${C_RESET}"
         
@@ -1708,8 +1720,10 @@ mod_server_audit() {
             echo -e "  • Изоляция SSH-порта:        ${C_YELLOW}🌍 Публичный (открыт интернету)${C_RESET}"
         fi
 
-        if LC_ALL=C ufw status 2>/dev/null | grep -qw "41641/udp"; then
-            echo -e "  • Прямые P2P соединения:     ${C_GREEN}✅ Разрешены (Tailscale порт 41641)${C_RESET}"
+        if [ -f /etc/default/bobarev-router ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-router
+            echo -e "  • Режим LAN-роутера:         ${C_GREEN}✅ ${ROUTER_LAN_IF:-?} (${ROUTER_LAN_IP:-?}) ➔ ${ROUTER_OUT_IF:-?}${C_RESET} (Kill Switch: ${C_BLUE}${ROUTER_KILLSWITCH:-false}${C_RESET})"
         fi
 
         if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules; then
@@ -1770,7 +1784,7 @@ mod_server_audit() {
         
         if [ "$speed" != "N/A" ] && [ "$speed" -gt 0 ] 2>/dev/null; then
             speed="${speed} Мбит/с"
-        elif [ "$iface" = "tailscale0" ] || [[ "$iface" == *"wg"* ]] || [[ "$iface" == *"lo"* ]]; then
+        elif [ "$iface" = "tailscale0" ] || [[ "$iface" == *"wg"* ]] || [[ "$iface" == *"tun"* ]] || [[ "$iface" == *"lo"* ]]; then
             speed="Виртуальный линк"
         else
             speed="Не определена"
@@ -1846,43 +1860,81 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Режим локального маршрутизатора (Нативная интеграция с UFW)
+# 18. Универсальный режим локального маршрутизатора (Tailscale / WireGuard / TUN / Прямой WAN)
 mod_router_sbc() {
-    echo -e "${C_CYAN}📡 === 18/19. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
+    echo -e "${C_CYAN}📡 === 18/19. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
+    local wan_if="$DEFAULT_WAN_IF"
     
-    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP и кэширующий DNS-сервер (dnsmasq), NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $WT_WIDTH; then
+    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать как внутренний LAN-интерфейс для клиентов, так и внешний канал (Tailscale, WireGuard wg0, TUN-прокси или прямой выход через WAN), а также настроить DHCP, кэширующий DNS и Kill Switch." 13 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
-    local available_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg|docker|veth|br-" | awk '{print $1}' || echo "")
-    if [ -z "$available_ifs" ]; then
+    # Шаг 1. Выбор LAN-интерфейса (физические порты, исключая виртуальные туннели)
+    local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|tun[0-9]*|docker|veth|br-" | awk '{print $1}' || echo "")
+    if [ -z "$available_lan_ifs" ]; then
         whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
         return 0
     fi
 
-    local menu_items=()
+    local lan_menu_items=()
     local iface_desc=""
-    for iface in $available_ifs; do
-        if [ "$iface" = "$DEFAULT_WAN_IF" ]; then
-            iface_desc="Текущий WAN интерфейс"
+    for iface in $available_lan_ifs; do
+        if [ "$iface" = "$wan_if" ]; then
+            iface_desc="Текущий WAN интерфейс (Вход интернета)"
         else
-            iface_desc="Свободный интерфейс (рекомендуется для LAN)"
+            iface_desc="Свободный порт (Рекомендуется для LAN-клиентов)"
         fi
-        menu_items+=("$iface" "$iface_desc")
+        lan_menu_items+=("$iface" "$iface_desc")
     done
 
     local lan_if=""
-    if ! lan_if=$(whiptail --title "Выбор LAN-интерфейса" --menu "Выберите сетевой интерфейс, к которому подключены клиенты:" 14 $WT_WIDTH 5 "${menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
+    if ! lan_if=$(whiptail --title "1/3. Внутренний LAN-интерфейс" --menu "Выберите сетевой порт, к которому подключены ваши клиенты (или свитч/роутер):" 14 $WT_WIDTH 5 "${lan_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
+    # Шаг 2. Выбор целевого выходного интерфейса (Uplink / VPN: Tailscale, WireGuard, TUN или WAN)
+    local out_menu_items=()
+    local seen_ifs=" lo $lan_if "
+
+    # Проверяем наличие популярных интерфейсов и всех поднятых в системе
+    local all_sys_ifs=$(ip -br link show | awk '{print $1}' | sed 's/@.*//' || echo "")
+    for candidate in tailscale0 wg0 wg1 tun0 singbox0 $all_sys_ifs; do
+        [[ "$seen_ifs" == *" $candidate "* ]] && continue
+        if ip link show "$candidate" >/dev/null 2>&1 || [ "$candidate" = "tailscale0" ] || [ "$candidate" = "wg0" ] || [ "$candidate" = "tun0" ]; then
+            seen_ifs="$seen_ifs $candidate "
+            local out_desc="Сетевой интерфейс"
+            case "$candidate" in
+                tailscale0) out_desc="🔗 Tailscale (Меш-сеть / Exit Node)" ;;
+                wg*)        out_desc="🛡️ WireGuard / AmneziaWG туннель ($candidate)" ;;
+                tun*|utun*|singbox*) out_desc="🚀 TUN-туннель / Proxy / OpenVPN ($candidate)" ;;
+                "$wan_if")  out_desc="🌍 Прямой выход через WAN провайдера (Без VPN)" ;;
+                *)          out_desc="🔌 Сетевой интерфейс ($candidate)" ;;
+            esac
+            out_menu_items+=("$candidate" "$out_desc")
+        fi
+    done
+    out_menu_items+=("CUSTOM" "✍️ Ввести имя интерфейса вручную (например, wg2)")
+
+    local out_if=""
+    if ! out_if=$(whiptail --title "2/3. Выходной канал (Uplink / VPN)" --menu "Через какое соединение направлять интернет-трафик клиентов из LAN ($lan_if)?" 16 $WT_WIDTH 7 "${out_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$out_if" ]; then
+        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
+        MODULE_CANCELED=true
+        return 0
+    fi
+
+    if [ "$out_if" = "CUSTOM" ]; then
+        prompt_default "Введите точное имя выходного интерфейса (например: wg0, tun0, ppp0):" "wg0" out_if
+        if [ "$MODULE_CANCELED" = true ] || [ -z "$out_if" ]; then return 0; fi
+    fi
+
+    # Шаг 3. Настройка адресации LAN
     local lan_ip="192.168.199.1"
-    prompt_default "Введите статический IP для этого шлюза:" "$lan_ip" lan_ip
+    prompt_default "3/3. Введите статический IP для этого LAN-шлюза ($lan_if):" "$lan_ip" lan_ip
     [ "$MODULE_CANCELED" = true ] && return 0
 
     if [[ "$lan_ip" == 100.* ]]; then
@@ -1893,6 +1945,17 @@ mod_router_sbc() {
     local subnet_prefix=$(echo "$lan_ip" | cut -d. -f1-3)
     local dhcp_start="${subnet_prefix}.50"
     local dhcp_end="${subnet_prefix}.200"
+
+    # Определяем, нужен ли Kill Switch (имеет смысл только если выход идет через туннель, а не напрямую в WAN)
+    local use_killswitch="false"
+    if [ -n "$wan_if" ] && [ "$out_if" != "$wan_if" ] && [ "$lan_if" != "$wan_if" ]; then
+        if prompt_yn "Включить строгий Kill Switch?\n\nЕсли туннель '$out_if' упадет, сервер заблокирует прямой выход клиентов через '$wan_if' провайдера (защита от утечки IP)." "true"; then
+            use_killswitch="true"
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+            use_killswitch="false"
+        fi
+    fi
 
     # 1. Предварительное освобождение порта 53 ДО установки dnsmasq
     if [ -f /etc/systemd/resolved.conf ] && systemctl is-active --quiet systemd-resolved; then
@@ -1925,7 +1988,6 @@ mod_router_sbc() {
     echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
     if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
         silent_run nmcli dev set "$lan_if" managed yes 2>/dev/null
-        # Удаляем любые старые профили, привязанные к этому интерфейсу
         for old_uuid in $(nmcli -t -f UUID,DEVICE con show 2>/dev/null | awk -F: -v dev="$lan_if" '$2==dev {print $1}'); do
             silent_run nmcli con delete uuid "$old_uuid" 2>/dev/null
         done
@@ -1936,7 +1998,6 @@ mod_router_sbc() {
         silent_run nmcli con up "$lan_if" 2>/dev/null || true
     fi
 
-    # Гарантированно назначаем IP на интерфейс на уровне ядра (даже если кабель сейчас не подключен)
     ip link set dev "$lan_if" up 2>/dev/null || true
     if ! ip -4 addr show dev "$lan_if" 2>/dev/null | grep -q "$lan_ip"; then
         ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
@@ -1972,11 +2033,38 @@ EOF
         journalctl -u dnsmasq -n 10 --no-pager || true
     fi
 
-    echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра для локальной сети...${C_RESET}"
+    # Очистка старых правил роутера, если ранее выбирался другой выходной интерфейс
+    if [ -f /etc/default/bobarev-router ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-router
+        if [ -n "${ROUTER_OUT_IF:-}" ] && [ "$ROUTER_OUT_IF" != "$out_if" ]; then
+            iptables -t nat -D POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null || true
+            if [ -f /etc/ufw/before.rules ]; then
+                sed -i "/-A POSTROUTING -o ${ROUTER_OUT_IF} -j MASQUERADE/d" /etc/ufw/before.rules
+            fi
+        fi
+    fi
+
+    # Сохраняем конфигурацию роутера для Модуля 8 (UFW), Модуля 17 (Аудит) и Модуля 19 (Бэкап)
+    cat <<EOF > /etc/default/bobarev-router
+ROUTER_LAN_IF="$lan_if"
+ROUTER_LAN_IP="$lan_ip"
+ROUTER_OUT_IF="$out_if"
+ROUTER_KILLSWITCH="$use_killswitch"
+EOF
+
+    echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра и маршрутизации ($lan_if ➔ $out_if)...${C_RESET}"
     if command -v ufw &>/dev/null; then
+        silent_run ufw default allow routed
+        silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
         silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
         silent_run ufw allow in on "$lan_if" to any port 53 comment 'LAN DNS (UDP/TCP)'
-        silent_run ufw route allow in on "$lan_if" comment 'LAN Forwarding'
+        # Если ранее на этом интерфейсе стоял Kill Switch, сначала удаляем его (на случай если пользователь выбрал прямой WAN)
+        if [ -n "$wan_if" ]; then
+            silent_run ufw route delete deny in on "$lan_if" out on "$wan_if"
+        fi
+        silent_run ufw route allow in on "$lan_if" out on "$out_if" comment "LAN to $out_if"
+        silent_run ufw route allow in on "$out_if" out on "$lan_if" comment "$out_if to LAN"
     else
         iptables -D INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT 2>/dev/null || true
         iptables -D INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
@@ -1984,47 +2072,52 @@ EOF
         iptables -I INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT
     fi
 
-    echo -e "${C_BLUE}⚙️ Включение маршрутизации и трансляции адресов (NAT)...${C_RESET}"
+    echo -e "${C_BLUE}⚙️ Включение маршрутизации и трансляции адресов (NAT в $out_if)...${C_RESET}"
     [ -f /etc/sysctl.conf ] && sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
     sysctl -p /etc/sysctl.d/99-router.conf >/dev/null 2>&1
 
+    # Нативная интеграция NAT и MSS Clamping в UFW под выбранный $out_if
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
-        ensure_ufw_nat_rule "-A POSTROUTING -o tailscale0 -j MASQUERADE"
+        ensure_ufw_nat_rule "-A POSTROUTING -o $out_if -j MASQUERADE"
         ensure_ufw_mangle_tcpmss
         silent_run ufw reload
     fi
 
-    iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
-    iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+    # На лету (в память ядра)
+    if [ -n "$wan_if" ]; then
+        iptables -D FORWARD -i "$lan_if" -o "$wan_if" -j DROP 2>/dev/null || true
+    fi
+    iptables -t nat -D POSTROUTING -o "$out_if" -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -A POSTROUTING -o "$out_if" -j MASQUERADE
     iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-    iptables -D FORWARD -i "$lan_if" -j ACCEPT 2>/dev/null || true
-    iptables -A FORWARD -i "$lan_if" -j ACCEPT
+    iptables -D FORWARD -i "$lan_if" -o "$out_if" -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -i "$lan_if" -o "$out_if" -j ACCEPT
     iptables -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
     iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
-    local wan_if=$(get_wan_if)
-    if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
-        echo -e "${C_BLUE}🛡️ Активация Kill Switch (блокировка прямого выхода через $wan_if)...${C_RESET}"
+    if [ "$use_killswitch" = "true" ] && [ -n "$wan_if" ] && [ "$wan_if" != "$out_if" ] && [ "$wan_if" != "$lan_if" ]; then
+        echo -e "${C_BLUE}🛡️ Активация Kill Switch (блокировка прямого выхода в обход $out_if через $wan_if)...${C_RESET}"
         if command -v ufw &>/dev/null; then
             silent_run ufw route deny in on "$lan_if" out on "$wan_if" comment 'Kill Switch'
         else
-            iptables -D FORWARD -i "$lan_if" -o "$wan_if" -j DROP 2>/dev/null || true
             iptables -I FORWARD 1 -i "$lan_if" -o "$wan_if" -j DROP
         fi
-    else
-        echo -e "${C_YELLOW}⚠️ WAN интерфейс не определен, Kill Switch пропущен.${C_RESET}"
     fi
 
-    echo -e "\n${C_GREEN}🎉 Режим маршрутизатора (на базе UFW + кэширующий DNS) успешно развернут!${C_RESET}"
-    echo -e "  • LAN Интерфейс:       ${C_BLUE}$lan_if ($lan_ip, bind-dynamic)${C_RESET}"
-    echo -e "  • Пул адресов DHCP:    ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
-    echo -e "  • Локальный DNS-кэш:   ${C_GREEN}$lan_ip (1500 записей, UDP/TCP порт 53)${C_RESET}"
-    echo -e "  • Маршрутизация (NAT): ${C_GREEN}Через сеть Tailscale${C_RESET}"
-    echo -e "  • MSS Clamping:        ${C_GREEN}Включен (встроен в UFW)${C_RESET}"
-    if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
-        echo -e "  • Kill Switch:         ${C_GREEN}Включен (Прямой выход через $wan_if заблокирован!)${C_RESET}"
+    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор успешно развернут!${C_RESET}"
+    echo -e "  • LAN Интерфейс (Вход):  ${C_BLUE}$lan_if ($lan_ip, bind-dynamic)${C_RESET}"
+    echo -e "  • Выходной канал (NAT):  ${C_GREEN}$out_if${C_RESET}"
+    echo -e "  • Пул адресов DHCP:      ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
+    echo -e "  • Локальный DNS-кэш:     ${C_GREEN}$lan_ip (1500 записей, UDP/TCP порт 53)${C_RESET}"
+    echo -e "  • MSS Clamping:          ${C_GREEN}Включен (встроен в UFW)${C_RESET}"
+    if [ "$use_killswitch" = "true" ]; then
+        echo -e "  • Kill Switch:           ${C_GREEN}Включен (Утечка трафика через $wan_if заблокирована!)${C_RESET}"
+    elif [ "$out_if" = "$wan_if" ]; then
+        echo -e "  • Режим работы:          ${C_BLUE}Классический роутер (Прямой выход через WAN $wan_if)${C_RESET}"
+    else
+        echo -e "  • Kill Switch:           ${C_YELLOW}Отключен пользователем${C_RESET}"
     fi
 }
 
@@ -2047,7 +2140,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -2113,7 +2206,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v1.3 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v1.4 (Gold Master - Universal Router Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню whiptail"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -2155,7 +2248,7 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.3)" \
+    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.4)" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz
@@ -2180,7 +2273,7 @@ while true; do
     "15" "📺 Сброс видеовыхода HDMI" \
     "16" "⏱️ Анализ времени загрузки" \
     "17" "🔍 Интеллектуальный аудит системы" \
-    "18" "📡 Режим локального маршрутизатора" \
+    "18" "📡 Универсальный маршрутизатор (LAN ➔ VPN/WAN)" \
     "19" "📦 Экспорт / Импорт настроек (Backup)" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then

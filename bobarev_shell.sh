@@ -1857,7 +1857,7 @@ mod_router_sbc() {
         return 0
     fi
 
-    local available_ifs=$(ip -br link show | grep -vE "DOWN|tailscale0|lo|wg" | awk '{print $1}' || echo "")
+    local available_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg|docker|veth|br-" | awk '{print $1}' || echo "")
     if [ -z "$available_ifs" ]; then
         whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
         return 0
@@ -1894,12 +1894,26 @@ mod_router_sbc() {
     local dhcp_start="${subnet_prefix}.50"
     local dhcp_end="${subnet_prefix}.200"
 
+    # 1. Предварительное освобождение порта 53 ДО установки dnsmasq
+    if [ -f /etc/systemd/resolved.conf ] && systemctl is-active --quiet systemd-resolved; then
+        echo -e "${C_BLUE}⚙️ Освобождение порта 53 от systemd-resolved...${C_RESET}"
+        sed -i -E '/^\s*#?\s*DNSStubListener=/d' /etc/systemd/resolved.conf 2>/dev/null || true
+        if grep -q "^\[Resolve\]" /etc/systemd/resolved.conf; then
+            sed -i '/^\[Resolve\]/a DNSStubListener=no' /etc/systemd/resolved.conf
+        else
+            echo -e "\n[Resolve]\nDNSStubListener=no" >> /etc/systemd/resolved.conf
+        fi
+        if [ -f /run/systemd/resolve/resolv.conf ]; then
+            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
+        fi
+        systemctl restart systemd-resolved 2>/dev/null || true
+    fi
+
     echo -e "${C_BLUE}📦 Установка необходимых пакетов (dnsmasq, iptables, network-manager)...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     silent_run apt-get update
     silent_run apt-get install -yq dnsmasq iptables network-manager
 
-    # Антидот: Удаляем конфликтующий пакет
     if dpkg -l 2>/dev/null | grep -qw iptables-persistent; then
         silent_run systemctl stop netfilter-persistent 2>/dev/null
         silent_run systemctl disable netfilter-persistent 2>/dev/null
@@ -1907,33 +1921,31 @@ mod_router_sbc() {
         echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
     fi
 
+    # 2. Настройка статического IP на LAN-интерфейсе (с поддержкой работы без кабеля)
     echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
     if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
         silent_run nmcli dev set "$lan_if" managed yes 2>/dev/null
+        # Удаляем любые старые профили, привязанные к этому интерфейсу
+        for old_uuid in $(nmcli -t -f UUID,DEVICE con show 2>/dev/null | awk -F: -v dev="$lan_if" '$2==dev {print $1}'); do
+            silent_run nmcli con delete uuid "$old_uuid" 2>/dev/null
+        done
         silent_run nmcli con delete "$lan_if" 2>/dev/null
-        silent_run nmcli con add type ethernet ifname "$lan_if" con-name "$lan_if" ipv4.method manual ipv4.addresses "$lan_ip/24" ipv4.dns "1.1.1.1,8.8.8.8"
-        if ! nmcli con up "$lan_if" >/dev/null 2>&1; then
-            ip addr flush dev "$lan_if" 2>/dev/null || true
-            ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
-            ip link set dev "$lan_if" up 2>/dev/null || true
-        fi
-    else
-        ip addr flush dev "$lan_if" 2>/dev/null || true
-        ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
-        ip link set dev "$lan_if" up 2>/dev/null || true
+        silent_run nmcli con add type ethernet ifname "$lan_if" con-name "$lan_if" \
+            ipv4.method manual ipv4.addresses "$lan_ip/24" ipv4.never-default yes \
+            connection.autoconnect yes
+        silent_run nmcli con up "$lan_if" 2>/dev/null || true
     fi
 
+    # Гарантированно назначаем IP на интерфейс на уровне ядра (даже если кабель сейчас не подключен)
+    ip link set dev "$lan_if" up 2>/dev/null || true
+    if ! ip -4 addr show dev "$lan_if" 2>/dev/null | grep -q "$lan_ip"; then
+        ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
+    fi
+
+    # 3. Настройка dnsmasq только на LAN-интерфейс (без конфликта с 127.0.0.1 / lo)
     echo -e "${C_BLUE}⚙️ Настройка кэширующего сервера DHCP и DNS (dnsmasq)...${C_RESET}"
     backup_file "/etc/dnsmasq.conf"
-    
-    if [ -f /etc/systemd/resolved.conf ] && systemctl is-active --quiet systemd-resolved; then
-        sed -i -E '/^\s*#?\s*DNSStubListener=/d' /etc/systemd/resolved.conf 2>/dev/null || true
-        echo "DNSStubListener=no" >> /etc/systemd/resolved.conf
-        if [ -f /run/systemd/resolve/resolv.conf ]; then
-            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
-        fi
-        systemctl restart systemd-resolved 2>/dev/null || true
-    fi
+    rm -f /etc/dnsmasq.d/* 2>/dev/null || true
 
     cat <<EOF > /etc/dnsmasq.conf
 domain-needed
@@ -1943,15 +1955,22 @@ server=1.1.1.1
 server=8.8.8.8
 cache-size=1500
 interface=$lan_if
+except-interface=lo
 bind-dynamic
-listen-address=$lan_ip,127.0.0.1
 dhcp-range=$dhcp_start,$dhcp_end,12h
 dhcp-option=3,$lan_ip
 dhcp-option=6,$lan_ip
 EOF
+
     systemctl unmask dnsmasq 2>/dev/null || true
-    systemctl enable dnsmasq 2>/dev/null
-    systemctl restart dnsmasq || echo -e "${C_YELLOW}⚠️ Ошибка запуска dnsmasq. Проверьте конфликты порта 53.${C_RESET}"
+    systemctl enable dnsmasq 2>/dev/null || true
+    systemctl stop dnsmasq 2>/dev/null || true
+    if systemctl start dnsmasq; then
+        echo -e "${C_GREEN}✅ Служба dnsmasq успешно запущена на интерфейсе $lan_if ($lan_ip).${C_RESET}"
+    else
+        echo -e "${C_RED}❌ Ошибка запуска dnsmasq! Вывод диагностики:${C_RESET}"
+        journalctl -u dnsmasq -n 10 --no-pager || true
+    fi
 
     echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра для локальной сети...${C_RESET}"
     if command -v ufw &>/dev/null; then
@@ -1970,14 +1989,12 @@ EOF
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
     sysctl -p /etc/sysctl.d/99-router.conf >/dev/null 2>&1
 
-    # Нативная интеграция NAT и MSS Clamping в UFW без дублирования секций
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
         ensure_ufw_nat_rule "-A POSTROUTING -o tailscale0 -j MASQUERADE"
         ensure_ufw_mangle_tcpmss
         silent_run ufw reload
     fi
 
-    # На лету (в память)
     iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
     iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
     iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true

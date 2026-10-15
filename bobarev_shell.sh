@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.0 (Gold Master)
+# Версия: 2.1 (Gold Master - Reboot-Proof Router & Human-Readable Audit)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1968,7 +1968,7 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Универсальный режим локального маршрутизатора (Policy Routing + NAT + DNS Redirect)
+# 18. Универсальный режим локального маршрутизатора (Policy Routing + NAT + DNS Redirect + Reboot Proof)
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/19. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -2089,6 +2089,12 @@ mod_router_sbc() {
         fi
     fi
 
+    # Автоматическое включение автозапуска службы WireGuard (wg-quick@wg0), чтобы туннель поднимался при ребуте
+    if [[ "$out_if" == wg* ]] && [ -f "/etc/wireguard/${out_if}.conf" ]; then
+        echo -e "${C_BLUE}🔄 Включение автозапуска туннеля WireGuard (wg-quick@${out_if}.service) при старте системы...${C_RESET}"
+        silent_run systemctl enable --now "wg-quick@${out_if}.service"
+    fi
+
     # Автоматическое снятие конфликтующего Tailscale Exit Node и сломанного MagicDNS при выборе другого интерфейса (например, wg0)
     if [ "$out_if" != "tailscale0" ] && command -v tailscale &>/dev/null; then
         local active_ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
@@ -2145,7 +2151,16 @@ mod_router_sbc() {
         echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
     fi
 
-    # 2. Настройка статического IP на LAN-интерфейсе
+    # 2. Очистка старых конфликтующих конфигов в /etc/systemd/network (чтобы не вылезал 192.168.50.1 после ребута)
+    if [ -d /etc/systemd/network ]; then
+        for net_file in $(grep -rlE "Name=${lan_if}|192\.168\.50\.1" /etc/systemd/network/ 2>/dev/null || true); do
+            rm -f "$net_file" 2>/dev/null || true
+            echo -e "${C_BLUE}🧹 Удален старый конфликтующий конфиг сети: $net_file${C_RESET}"
+        done
+        rm -f /etc/systemd/network/*.bak 2>/dev/null || true
+    fi
+
+    # Настройка статического IP на LAN-интерфейсе
     echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
     if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
         silent_run nmcli dev set "$lan_if" managed yes 2>/dev/null
@@ -2160,9 +2175,8 @@ mod_router_sbc() {
     fi
 
     ip link set dev "$lan_if" up 2>/dev/null || true
-    if ! ip -4 addr show dev "$lan_if" 2>/dev/null | grep -q "$lan_ip"; then
-        ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
-    fi
+    ip -4 addr flush dev "$lan_if" 2>/dev/null || true
+    ip -4 addr add "$lan_ip/24" brd + dev "$lan_if" 2>/dev/null || true
 
     # 3. Настройка dnsmasq (с поддержкой VPN DNS + публичных апстримов без дубликатов)
     echo -e "${C_BLUE}⚙️ Настройка кэширующего сервера DHCP и DNS (dnsmasq)...${C_RESET}"
@@ -2252,14 +2266,14 @@ SYSCTL_ROUTER_EOF
     fi
     disable_ufw_strict_rpfilter
 
-    # Создаем скрипт и сервис автозапуска Policy Routing (приоритеты 5290..5310 ПОСЛЕ Tailscale 5270 + rp_filter=0 + DNS DNAT для Google Wifi)
+    # Создаем скрипт и сервис автозапуска Policy Routing (с авто-стартом wg*, сбросом лишних IP и защитой таблицы 200)
     cat << 'ROUTER_UP_EOF' > /usr/local/bin/bobarev-router-up.sh
 #!/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 [ ! -f /etc/default/bobarev-router ] && exit 0
 source /etc/default/bobarev-router
 
-# 1. Отключаем строгий rp_filter на всех интерфейсах (чтобы ядро не отбрасывало пакеты туннеля wg0)
+# 1. Отключаем строгий rp_filter на всех интерфейсах
 if [ -f /etc/ufw/sysctl.conf ]; then
     sed -i 's/rp_filter=1/rp_filter=0/g' /etc/ufw/sysctl.conf 2>/dev/null || true
 fi
@@ -2267,12 +2281,21 @@ for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
     [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
 done
 
+# 2. Чистим LAN-интерфейс от посторонних IP (например, 192.168.50.1) и назначаем строго $ROUTER_LAN_IP
 ip link set dev "$ROUTER_LAN_IF" up 2>/dev/null || true
-if ! ip -4 addr show dev "$ROUTER_LAN_IF" 2>/dev/null | grep -q "$ROUTER_LAN_IP"; then
-    ip addr add "$ROUTER_LAN_IP/24" dev "$ROUTER_LAN_IF" 2>/dev/null || true
+ip -4 addr flush dev "$ROUTER_LAN_IF" 2>/dev/null || true
+ip -4 addr add "$ROUTER_LAN_IP/24" brd + dev "$ROUTER_LAN_IF" 2>/dev/null || true
+
+# 3. Если выходной канал — WireGuard (wg*), убеждаемся, что он поднят после ребута (ждем до 15 сек.)
+if [[ "$ROUTER_OUT_IF" == wg* ]] && ! ip link show "$ROUTER_OUT_IF" >/dev/null 2>&1; then
+    systemctl start "wg-quick@${ROUTER_OUT_IF}.service" 2>/dev/null || wg-quick up "$ROUTER_OUT_IF" 2>/dev/null || true
+    for _ in {1..15}; do
+        ip link show "$ROUTER_OUT_IF" >/dev/null 2>&1 && break
+        sleep 1
+    done
 fi
 
-# 2. Очистка старых правил Policy Routing (включая старые 90..105 и новые 5290..5310)
+# 4. Очистка и настройка правил Policy Routing (приоритеты 5290..5310 -> таблица 200)
 for p in 90 94 95 96 100 105 5290 5300 5310; do
     ip -4 rule del prio "$p" 2>/dev/null || true
     ip -6 rule del prio "$p" 2>/dev/null || true
@@ -2283,20 +2306,21 @@ ip -6 route flush table 200 2>/dev/null || true
 WAN_DEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
 
 if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
-    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
-    if [ -n "$OUT_GW" ]; then
-        ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" table 200 2>/dev/null || true
-    else
-        ip -4 route replace default dev "$ROUTER_OUT_IF" table 200 2>/dev/null || true
+    # Страховочный маршрут unreachable с метрикой 9999 в таблице 200 (блокирует утечку через провайдера при падении wg0)
+    if [ "${ROUTER_KILLSWITCH:-false}" = "true" ] && [ "$ROUTER_OUT_IF" != "$WAN_DEV" ]; then
+        ip -4 route replace unreachable default metric 9999 table 200 2>/dev/null || true
     fi
 
-    # Приоритеты 5290..5310 работают ПОСЛЕ таблицы Tailscale (5270), сохраняя работу Tailscale и MagicDNS!
-    # 5290: Защита всех локальных подсетей (LAN, WAN-подсеть роутера и статические маршруты)
+    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
+    if [ -n "$OUT_GW" ]; then
+        ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
+    else
+        ip -4 route replace default dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
+    fi
+
     ip -4 rule add from all lookup main suppress_prefixlength 0 prio 5290 2>/dev/null || true
-    # 5300: Весь трафик клиентов из LAN (включая Google Wifi) идет в таблицу 200 ($ROUTER_OUT_IF)
     ip -4 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 5300 2>/dev/null || true
 
-    # 5310: Если включен перевод самого хоста в этот же канал (используем нативное исключение not fwmark)
     if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ] && [ "$ROUTER_OUT_IF" != "$WAN_DEV" ]; then
         if command -v wg &>/dev/null && wg show "$ROUTER_OUT_IF" >/dev/null 2>&1; then
             WG_FWMARK=$(wg show "$ROUTER_OUT_IF" fwmark 2>/dev/null || echo "off")
@@ -2310,7 +2334,6 @@ if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
         fi
     fi
 
-    # Защита от утечки IPv6 (если туннель $ROUTER_OUT_IF имеет только IPv4)
     OUT_HAS_IPV6=$(ip -6 addr show dev "$ROUTER_OUT_IF" scope global 2>/dev/null || echo "")
     if [ -z "$OUT_HAS_IPV6" ]; then
         ip -6 route replace unreachable default table 200 2>/dev/null || true
@@ -2321,7 +2344,6 @@ if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
         fi
     fi
 
-    # Обновляем /etc/resolv.conf на хосте, чтобы не зависеть от отключенного Exit Node
     if grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null || ! grep -qE "1\.1\.1\.1|8\.8\.8\.8" /etc/resolv.conf 2>/dev/null; then
         rm -f /etc/resolv.conf 2>/dev/null || true
         {
@@ -2335,7 +2357,7 @@ fi
 ip -4 route flush cache 2>/dev/null || true
 ip -6 route flush cache 2>/dev/null || true
 
-# 3. Прозрачный перехват DNS (порт 53) на LAN-интерфейсе (необходимо для роутеров Google Wifi с жестко зашитым 8.8.8.8)
+# 5. Прозрачный перехват DNS (порт 53) на LAN-интерфейсе и правила NAT / FORWARD
 iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
 iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
 iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
@@ -2349,13 +2371,15 @@ iptables -D FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT 2>/dev/nul
 iptables -A FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT
 iptables -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+systemctl restart dnsmasq 2>/dev/null || true
 ROUTER_UP_EOF
     chmod +x /usr/local/bin/bobarev-router-up.sh
 
     tee /etc/systemd/system/bobarev-router.service > /dev/null << 'ROUTER_SVC_EOF'
 [Unit]
 Description=Bobarev Universal Router Policy Routing & NAT
-After=network-online.target wg-quick@wg0.service tailscaled.service ufw.service
+After=network-online.target systemd-networkd.service NetworkManager.service wg-quick@wg0.service tailscaled.service ufw.service
 Wants=network-online.target
 
 [Service]
@@ -2394,9 +2418,9 @@ ROUTER_SVC_EOF
         ext_ip_out="$probed_ip"
     fi
 
-    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор успешно развернут и работает!${C_RESET}"
+    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор успешно развернут и закреплен в автозагрузке!${C_RESET}"
     echo -e "  • Внутренняя сеть (LAN):   ${C_BLUE}$lan_if (IP шлюза: $lan_ip, авто-подхват кабеля)${C_RESET}"
-    echo -e "  • Выходной интернет-канал: ${C_GREEN}$out_if (приоритетная маршрутизация трафика)${C_RESET}"
+    echo -e "  • Выходной интернет-канал: ${C_GREEN}$out_if (автозапуск при старте системы включен)${C_RESET}"
     echo -e "  • Внешний IP-адрес:        ${C_GREEN}$ext_ip_out${C_RESET}"
     echo -e "  • Трафик самого сервера:   ${C_BLUE}$([ "$route_host" = "true" ] && echo "Тоже защищен и идет через $out_if (утечки IPv6 заблокированы)" || echo "Идет напрямую через провайдера (мимо VPN)")${C_RESET}"
     echo -e "  • Раздача адресов (DHCP):  ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
@@ -2499,7 +2523,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.0 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.1 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

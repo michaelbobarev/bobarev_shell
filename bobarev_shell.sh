@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 1.2 (Gold Master)
+# Версия: 1.3 (Gold Master)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -141,10 +141,15 @@ DOCKER_UFW_EOF
 enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
-while ! ip route show default | grep -v tailscale0 >/dev/null 2>&1; do sleep 2; done
-NETDEV=$(ip route show default | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+tries=0
+while ! ip route show default 2>/dev/null | grep -v tailscale0 >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -ge 15 ] && exit 0
+    sleep 2
+done
+NETDEV=$(ip route show default 2>/dev/null | grep -v tailscale0 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
-    ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off || true
+    ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
 fi
 ETHTOOL_SCRIPT_EOF
     chmod +x /usr/local/bin/tailscale-gro.sh
@@ -184,7 +189,7 @@ ETHTOOL_SVC_EOF
         ip6tables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     fi
 
-    echo -e "${C_GREEN}✅ Аппаратное ускорение (GRO) и нативная фиксация MTU (MSS Clamping в UFW) успешно включены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Аппаратное ускорение (GRO с защитой от зависаний) и фиксация MTU (MSS Clamping) включены.${C_RESET}"
 }
 
 is_port_free() {
@@ -254,9 +259,14 @@ TS_EOF
         whiptail --title "Авторизация" --msgbox "Если вы перешли по ссылке выше и подтвердили авторизацию в браузере, нажмите ОК для продолжения настройки." 10 $WT_WIDTH
     fi
 
-    silent_run tailscale set --auto-update
-    echo -e "${C_GREEN}✅ Узел успешно подключен.${C_RESET}"
-    return 0
+    if is_tailscale_authenticated; then
+        silent_run tailscale set --auto-update
+        echo -e "${C_GREEN}✅ Узел успешно подключен.${C_RESET}"
+        return 0
+    else
+        echo -e "${C_YELLOW}⚠️ Узел еще не авторизован в сети Tailscale.${C_RESET}"
+        return 1
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -333,12 +343,12 @@ if ! command -v whiptail &>/dev/null; then
 fi
 
 # ==============================================================================
-# МОДУЛИ НАСТРОЙКИ
+# МОДУЛИ НАСТРОЙКИ (1 - 19)
 # ==============================================================================
 
-# 1. Часовой пояс
+# 1. Часовой пояс и синхронизация времени NTP
 mod_timezone() {
-    echo -e "${C_CYAN}🌐 === 1/18. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
+    echo -e "${C_CYAN}🌐 === 1/19. НАСТРОЙКА ЧАСОВОГО ПОЯСА И ТОЧНОГО ВРЕМЕНИ ===${C_RESET}"
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Europe/Moscow")
     echo "Текущий часовой пояс: $current_tz"
     local tz=""
@@ -346,12 +356,13 @@ mod_timezone() {
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
 
     silent_run timedatectl set-timezone "$tz"
-    echo -e "${C_GREEN}✅ Часовой пояс установлен в $tz.${C_RESET}"
+    silent_run timedatectl set-ntp true
+    echo -e "${C_GREEN}✅ Часовой пояс установлен в $tz, сетевая синхронизация времени (NTP) активирована.${C_RESET}"
 }
 
 # 2. Имя хоста
 mod_hostname() {
-    echo -e "${C_CYAN}🏷️ === 2/18. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
+    echo -e "${C_CYAN}🏷️ === 2/19. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
     echo "Текущее имя хоста: $(hostname)"
     
     local default_brand_host="Server-VPS"
@@ -386,7 +397,7 @@ mod_hostname() {
 
 # 3. Обновление пакетов
 mod_apt_update() {
-    echo -e "${C_CYAN}📦 === 3/18. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
+    echo -e "${C_CYAN}📦 === 3/19. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
 
     if [ -f /etc/gai.conf ]; then
@@ -404,6 +415,16 @@ mod_apt_update() {
 
     apt-get install -yq sudo ufw unattended-upgrades ethtool curl wget ca-certificates gnupg whiptail jq $zram_pkg
     silent_run dpkg-reconfigure --priority=low unattended-upgrades
+
+    if [ -d /etc/apt/apt.conf.d ]; then
+        cat << 'UNATTENDED_EOF' > /etc/apt/apt.conf.d/51bobarev-unattended-clean
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+UNATTENDED_EOF
+        echo -e "${C_BLUE}ℹ️ Включена автоочистка старых ядер при фоновых обновлениях безопасности.${C_RESET}"
+    fi
+
     apt-get autoremove -yq && apt-get clean
     systemctl enable unattended-upgrades
 
@@ -435,7 +456,7 @@ ZRAM_EOF
 
 # 4. Пользователь и Sudo
 mod_user_setup() {
-    echo -e "${C_CYAN}👤 === 4/18. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
+    echo -e "${C_CYAN}👤 === 4/19. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
     local active_user=$(get_active_user)
     local username=""
     prompt_default "Имя администратора:" "$active_user" username
@@ -486,7 +507,7 @@ mod_user_setup() {
 
 # 5. SSH-ключи
 mod_ssh_key() {
-    echo -e "${C_CYAN}🔑 === 5/18. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN}🔑 === 5/19. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
     local active_user=$(get_active_user)
     local target_user=""
     prompt_default "Для какого пользователя привязать ключ?" "$active_user" target_user
@@ -551,7 +572,7 @@ mod_ssh_key() {
 
 # 6. Конфигурация SSH
 mod_ssh_config() {
-    echo -e "${C_CYAN}🔒 === 6/18. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN}🔒 === 6/19. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
 
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
@@ -680,7 +701,7 @@ SSH_HARDENING_EOF
         silent_run systemctl restart ssh
 
         if [ "$restrict_choice" = true ]; then
-            if ensure_tailscale_installed || true; then
+            if ensure_tailscale_installed && is_tailscale_authenticated; then
                 if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
                     silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
                     silent_run ufw delete allow "$port"/tcp
@@ -689,11 +710,19 @@ SSH_HARDENING_EOF
                     echo -e "${C_BLUE}ℹ️ Правило изоляции сохранено. Оно вступит в силу при включении брандмауэра (Модуль 8).${C_RESET}"
                 fi
             else
-                echo -e "${C_YELLOW}⚠️ Подключение к закрытой сети отменено. Оставлен обычный публичный доступ.${C_RESET}"
+                sed -i 's/# SSH via Tailscale only/# SSH Public Access/' "$conf_file"
+                echo -e "${C_YELLOW}⚠️ Узел Tailscale не авторизован! Для предотвращения блокировки сервера оставлен публичный доступ к SSH ($port).${C_RESET}"
                 silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
             fi
         else
             silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
+            if prompt_yn "Установить легковесную защиту от брутфорса SSH (sshguard — ~2 МБ ОЗУ, авто-бан ботов)?" "true"; then
+                export DEBIAN_FRONTEND=noninteractive
+                silent_run apt-get update
+                silent_run apt-get install -yq sshguard
+                silent_run systemctl enable --now sshguard
+                echo -e "${C_GREEN}✅ Защита от перебора паролей (sshguard) активирована.${C_RESET}"
+            fi
         fi
         echo -e "${C_GREEN}✅ Служба удаленного доступа успешно перезапущена с абсолютным приоритетом параметров.${C_RESET}"
     else
@@ -707,7 +736,7 @@ SSH_HARDENING_EOF
 
 # 7. Защита ядра и сети
 mod_hardening() {
-    echo -e "${C_CYAN}🛡️ === 7/18. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
+    echo -e "${C_CYAN}🛡️ === 7/19. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     backup_file "/etc/sysctl.d/99-server-hardening.conf"
     
     local icmp_ignore=0
@@ -721,6 +750,7 @@ mod_hardening() {
     fi
 
     silent_run modprobe tcp_bbr
+    silent_run modprobe nf_conntrack
 
     mkdir -p /etc/sysctl.d
     tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << HARDENING_EOF
@@ -734,6 +764,12 @@ kernel.sysrq = 0
 kernel.panic = 10
 kernel.panic_on_oops = 1
 net.core.bpf_jit_harden = 2
+net.core.rmem_max = 26214400
+net.core.wmem_max = 26214400
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 10000
+net.netfilter.nf_conntrack_max = 131072
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.default.rp_filter = 2
@@ -770,12 +806,12 @@ HARDENING_EOF
         echo -e "${C_GREEN}✅ Аппаратный таймер защиты от зависаний (Watchdog 15s) для SBC активирован.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN}✅ Настройки системной защиты, TCP BBR и авто-ребута при панике ядра успешно применены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Защита ядра, расширенные UDP-буферы, TCP BBR и авто-ребут при панике применены.${C_RESET}"
 }
 
 # 8. Firewall UFW
 mod_ufw() {
-    echo -e "${C_CYAN}🧱 === 8/18. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
+    echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     
     local active_ssh_port="22"
@@ -865,11 +901,15 @@ mod_ufw() {
         fi
     fi
 
-    # Разделение логики доступа к порту SSH
+    # Разделение логики доступа к порту SSH с защитой от блокировки
     if [ "$do_restrict" = true ]; then
-        ensure_tailscale_installed || true
-        silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
-        echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) доступен ТОЛЬКО из закрытой сети Tailscale.${C_RESET}"
+        if ensure_tailscale_installed && is_tailscale_authenticated; then
+            silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+            echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) доступен ТОЛЬКО из закрытой сети Tailscale.${C_RESET}"
+        else
+            silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
+            echo -e "${C_YELLOW}⚠️ Узел Tailscale не авторизован! Во избежание потери доступа порт SSH ($port) оставлен открытым публично.${C_RESET}"
+        fi
     else
         silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
         echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) открыт публично, P2P (41641/udp) и Tailscale разрешены.${C_RESET}"
@@ -893,7 +933,7 @@ mod_lock_root() {
         return 0
     fi
 
-    echo -e "${C_CYAN}🔐 === 9/18. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
+    echo -e "${C_CYAN}🔐 === 9/19. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
     local root_choice
     if ! root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
@@ -1105,7 +1145,7 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 
 # 11. Управление логированием (Интерактивный менеджер)
 mod_logging_manager() {
-    echo -e "${C_CYAN}📝 === 11/18. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
+    echo -e "${C_CYAN}📝 === 11/19. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
     local log_choice
     if ! log_choice=$(whiptail --title "Управление логами" --menu "Выберите режим работы системных журналов:" 14 $WT_WIDTH 4 \
@@ -1215,7 +1255,7 @@ CONF
 
 # 12. Оптимизация RAM / Flash
 mod_ram_flash_opt() {
-    echo -e "${C_CYAN}⚡ === 12/18. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
+    echo -e "${C_CYAN}⚡ === 12/19. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
 
     local target_swappiness=1
@@ -1354,7 +1394,7 @@ mod_swap_manager() {
 
 # 14. Системные утилиты и режим процессора
 mod_desktop_apps() {
-    echo -e "${C_CYAN}🖥️ === 14/18. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
+    echo -e "${C_CYAN}🖥️ === 14/19. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
     local gov_choice
     if gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
@@ -1448,7 +1488,7 @@ EOF
 
 # 15. Программный сброс HDMI
 mod_hdmi_reset() {
-    echo -e "${C_CYAN}📺 === 15/18. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
+    echo -e "${C_CYAN}📺 === 15/19. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
     cat << 'HDMI_EOF' > /usr/local/bin/reset-hdmi.sh
 #!/bin/bash
 HDMI_OUTPUT=$(xrandr 2>/dev/null | grep -E "^HDMI-[0-9A-Z-]+ connected" | awk '{print $1}' | head -n 1 || true)
@@ -1478,7 +1518,7 @@ HDMI_EOF
 
 # 16. Диагностика времени загрузки
 mod_boot_diag() {
-    echo -e "${C_CYAN}⏱️ === 16/18. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
+    echo -e "${C_CYAN}⏱️ === 16/19. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
         echo -e "${C_RED}❌ Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
@@ -1526,7 +1566,11 @@ mod_server_audit() {
 
     echo -e "${C_BOLD}--- 1. Базовая система, хост и обновления ---${C_RESET}"
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
-    echo -e "  • Часовой пояс:              ${C_GREEN}$current_tz${C_RESET}"
+    local ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "no")
+    local ntp_str="${C_YELLOW}⚠️ Нет синхронизации${C_RESET}"
+    [ "$ntp_sync" = "yes" ] && ntp_str="${C_GREEN}✅ Синхронизировано (NTP)${C_RESET}"
+
+    echo -e "  • Часовой пояс и время:      ${C_GREEN}$current_tz${C_RESET} ($ntp_str)"
     echo -e "  • Имя хоста:                 ${C_GREEN}$(hostname)${C_RESET}"
     echo -e "  • Тип системы (окружение):   ${C_BLUE}$SYSTEM_TYPE${C_RESET}"
     echo -e "  • Режим загрузки (systemd):  ${C_BLUE}$(systemctl get-default 2>/dev/null || echo "N/A")${C_RESET}"
@@ -1537,7 +1581,7 @@ mod_server_audit() {
         echo -e "  • Авто-обновления (security): ${C_RED}❌ Отключены${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 2. Аппаратная часть (Процессор и Температура) ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 2. Аппаратная часть (Процессор, Диск и Температура) ---${C_RESET}"
     local cpu_temp="Нет сенсора"
     if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
         local raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "")
@@ -1563,11 +1607,14 @@ mod_server_audit() {
     fi
     
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
+    local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}' || echo "N/A")
+    local inode_usage=$(df -i / 2>/dev/null | awk 'NR==2 {print $5}' || echo "N/A")
 
     echo -e "  • Температура CPU:           $cpu_temp"
     echo -e "  • Режим процессора (Gov):    ${C_BLUE}$cpu_gov${C_RESET}"
     echo -e "  • Текущая частота CPU:       ${C_BLUE}$cpu_freq${C_RESET}"
     echo -e "  • Средняя нагрузка (Load):   ${C_BLUE}$load_avg${C_RESET}"
+    echo -e "  • Занято на диске (/):       ${C_BLUE}$disk_usage${C_RESET} (Inodes: ${C_BLUE}$inode_usage${C_RESET})"
 
     echo -e "\n${C_BOLD}--- 3. Учетные записи, пользователи и Sudo ---${C_RESET}"
     echo -e "  • Основной администратор:    ${C_GREEN}$active_user${C_RESET}"
@@ -1623,6 +1670,12 @@ mod_server_audit() {
     echo -e "  • Вход root по SSH:          $root_status_human"
     echo -e "  • Вход по паролю SSH:        $pass_status_human"
 
+    if systemctl is-active --quiet sshguard 2>/dev/null; then
+        echo -e "  • Анти-брутфорс (sshguard):  ${C_GREEN}✅ Активен${C_RESET}"
+    elif systemctl is-active --quiet fail2ban 2>/dev/null; then
+        echo -e "  • Анти-брутфорс (fail2ban):  ${C_GREEN}✅ Активен${C_RESET}"
+    fi
+
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
         local param="$1" expected="$2" name="$3" ok_msg="$4" err_msg="$5"
@@ -1636,7 +1689,7 @@ mod_server_audit() {
     check_param "kernel.dmesg_restrict" "1" "Ограничение буфера ядра" "Включено" "Отключено"
     check_param "net.ipv4.tcp_syncookies" "1" "Защита SYN-cookies" "Включена" "Отключена"
     check_param "net.ipv4.tcp_congestion_control" "bbr" "Алгоритм TCP BBR" "Активен" "Стандартный"
-    check_param "net.ipv4.tcp_rfc1337" "1" "Защита Time-Wait (RFC1337)" "Включена" "Отключена"
+    check_param "net.core.rmem_max" "26214400" "Расширенные UDP-буферы" "Активны (25 МБ)" "Стандартные"
 
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
@@ -1709,7 +1762,7 @@ mod_server_audit() {
         echo -e "  • Программа Tailscale:       ${C_YELLOW}⚠️ Не установлена${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Диагностика ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Открытые порты ---${C_RESET}"
     local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' || echo "")
     for iface in $active_ifs; do
         local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")
@@ -1752,6 +1805,11 @@ mod_server_audit() {
         echo -e "  • Фиксация MSS (MSS Clamping): ${C_YELLOW}⚠️ Не обнаружена (возможны потери скорости)${C_RESET}"
     fi
 
+    if command -v ss &>/dev/null; then
+        local listen_ports=$(ss -tulnH 2>/dev/null | awk '{print $1 ":" $5}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -u | tr '\n' ' ' || echo "")
+        [ -n "$listen_ports" ] && echo -e "  • Слушающие порты (TCP/UDP): ${C_BLUE}$listen_ports${C_RESET}"
+    fi
+
     echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и Swap ---${C_RESET}"
     
     local vm_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
@@ -1790,10 +1848,10 @@ mod_server_audit() {
 
 # 18. Режим локального маршрутизатора (Нативная интеграция с UFW)
 mod_router_sbc() {
-    echo -e "${C_CYAN}📡 === 18/18. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
+    echo -e "${C_CYAN}📡 === 18/19. РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     
-    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP-сервер (dnsmasq), DNS, NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $WT_WIDTH; then
+    if ! whiptail --title "Режим Маршрутизатора" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nБудет настроен DHCP и кэширующий DNS-сервер (dnsmasq), NAT, MSS Clamping, защита от конфликтов и строгий Kill Switch. Трафик клиентов пойдет ТОЛЬКО через Tailscale Exit-Node." 12 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         MODULE_CANCELED=true
         return 0
@@ -1853,7 +1911,7 @@ mod_router_sbc() {
     if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
         silent_run nmcli dev set "$lan_if" managed yes 2>/dev/null
         silent_run nmcli con delete "$lan_if" 2>/dev/null
-        silent_run nmcli con add type ethernet ifname "$lan_if" con-name "$lan_if" ipv4.method manual ipv4.addresses "$lan_ip/24" ipv4.dns "8.8.8.8,1.1.1.1"
+        silent_run nmcli con add type ethernet ifname "$lan_if" con-name "$lan_if" ipv4.method manual ipv4.addresses "$lan_ip/24" ipv4.dns "1.1.1.1,8.8.8.8"
         if ! nmcli con up "$lan_if" >/dev/null 2>&1; then
             ip addr flush dev "$lan_if" 2>/dev/null || true
             ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
@@ -1865,23 +1923,31 @@ mod_router_sbc() {
         ip link set dev "$lan_if" up 2>/dev/null || true
     fi
 
-    echo -e "${C_BLUE}⚙️ Настройка сервера DHCP и DNS...${C_RESET}"
+    echo -e "${C_BLUE}⚙️ Настройка кэширующего сервера DHCP и DNS (dnsmasq)...${C_RESET}"
     backup_file "/etc/dnsmasq.conf"
     
-    if systemctl is-active --quiet systemd-resolved; then
-        sed -i 's/#DNSStubListener=yes/DNSStubListener=no/' /etc/systemd/resolved.conf 2>/dev/null
-        systemctl restart systemd-resolved 2>/dev/null
+    if [ -f /etc/systemd/resolved.conf ] && systemctl is-active --quiet systemd-resolved; then
+        sed -i -E '/^\s*#?\s*DNSStubListener=/d' /etc/systemd/resolved.conf 2>/dev/null || true
+        echo "DNSStubListener=no" >> /etc/systemd/resolved.conf
+        if [ -f /run/systemd/resolve/resolv.conf ]; then
+            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || true
+        fi
+        systemctl restart systemd-resolved 2>/dev/null || true
     fi
 
     cat <<EOF > /etc/dnsmasq.conf
 domain-needed
 bogus-priv
+no-resolv
+server=1.1.1.1
+server=8.8.8.8
+cache-size=1500
 interface=$lan_if
-bind-interfaces
-listen-address=$lan_ip
+bind-dynamic
+listen-address=$lan_ip,127.0.0.1
 dhcp-range=$dhcp_start,$dhcp_end,12h
 dhcp-option=3,$lan_ip
-dhcp-option=6,8.8.8.8,1.1.1.1
+dhcp-option=6,$lan_ip
 EOF
     systemctl unmask dnsmasq 2>/dev/null || true
     systemctl enable dnsmasq 2>/dev/null
@@ -1934,14 +2000,61 @@ EOF
         echo -e "${C_YELLOW}⚠️ WAN интерфейс не определен, Kill Switch пропущен.${C_RESET}"
     fi
 
-    echo -e "\n${C_GREEN}🎉 Режим маршрутизатора (на базе UFW) успешно развернут!${C_RESET}"
-    echo -e "  • LAN Интерфейс:       ${C_BLUE}$lan_if ($lan_ip)${C_RESET}"
+    echo -e "\n${C_GREEN}🎉 Режим маршрутизатора (на базе UFW + кэширующий DNS) успешно развернут!${C_RESET}"
+    echo -e "  • LAN Интерфейс:       ${C_BLUE}$lan_if ($lan_ip, bind-dynamic)${C_RESET}"
     echo -e "  • Пул адресов DHCP:    ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
-    echo -e "  • Открытые порты:      ${C_GREEN}53 (DNS UDP/TCP) и 67 (DHCP) разрешены${C_RESET}"
+    echo -e "  • Локальный DNS-кэш:   ${C_GREEN}$lan_ip (1500 записей, UDP/TCP порт 53)${C_RESET}"
     echo -e "  • Маршрутизация (NAT): ${C_GREEN}Через сеть Tailscale${C_RESET}"
     echo -e "  • MSS Clamping:        ${C_GREEN}Включен (встроен в UFW)${C_RESET}"
     if [ -n "$wan_if" ] && [ "$wan_if" != "$lan_if" ]; then
         echo -e "  • Kill Switch:         ${C_GREEN}Включен (Прямой выход через $wan_if заблокирован!)${C_RESET}"
+    fi
+}
+
+# 19. Экспорт и импорт резервной копии конфигураций
+mod_backup_manager() {
+    echo -e "${C_CYAN}📦 === 19/19. ЭКСПОРТ И ИМПОРТ КОНФИГУРАЦИЙ СЕРВЕРА ===${C_RESET}"
+    local target_user=$(get_active_user)
+    local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    [ -z "$target_home" ] && target_home="/root"
+
+    local b_choice
+    if ! b_choice=$(whiptail --title "Резервное копирование настроек" --menu "Выберите действие:" 13 $WT_WIDTH 3 \
+    "1" "📤 Создать архив настроек (Экспорт)" \
+    "2" "📥 Восстановить настройки из архива (Импорт)" \
+    "0" "↩️ Отмена" 3>&1 1>&2 2>&3) || [ "$b_choice" = "0" ]; then
+        MODULE_CANCELED=true
+        return 0
+    fi
+
+    if [ "$b_choice" = "1" ]; then
+        local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
+        local files_to_pack=()
+        for item in /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+            [ -e "$item" ] && files_to_pack+=("$item")
+        done
+
+        tar -czf "$archive_path" "${files_to_pack[@]}" 2>/dev/null || true
+        silent_run chown "$target_user:$target_user" "$archive_path"
+        echo -e "${C_GREEN}✅ Архив конфигураций успешно создан:${C_RESET} ${C_BLUE}$archive_path${C_RESET}"
+    elif [ "$b_choice" = "2" ]; then
+        local import_path=""
+        prompt_default "Введите полный путь к архиву .tar.gz для восстановления:" "${target_home}/" import_path
+        [ "$MODULE_CANCELED" = true ] && return 0
+
+        if [ ! -f "$import_path" ]; then
+            echo -e "${C_RED}❌ Файл не найден: $import_path${C_RESET}"
+            return 0
+        fi
+
+        if prompt_yn "Восстановить системные конфигурации из архива $import_path и перезапустить службы?" "false"; then
+            tar -xzf "$import_path" -C / 2>/dev/null
+            sysctl --system >/dev/null 2>&1 || true
+            silent_run systemctl restart systemd-journald
+            silent_run systemctl restart sshd || silent_run systemctl restart ssh
+            command -v ufw &>/dev/null && silent_run ufw reload
+            echo -e "${C_GREEN}✅ Конфигурации успешно восстановлены и применены!${C_RESET}"
+        fi
     fi
 }
 
@@ -1974,16 +2087,21 @@ if [ "${1:-}" != "" ]; then
             mod_apt_update
             exit 0
             ;;
+        --backup|-b)
+            mod_backup_manager
+            exit 0
+            ;;
         --auto)
             run_full_auto_setup
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v1.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v1.3 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню whiptail"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
             echo "  --update, -u  Обновление пакетов, IPv4 приоритет и настройка zRAM (Модуль 3)"
+            echo "  --backup, -b  Экспорт или импорт резервной копии настроек (Модуль 19)"
             echo "  --auto        Последовательная настройка сервера целиком (Шаги 1-12)"
             echo "  --help, -h    Показать эту справку"
             exit 0
@@ -2020,7 +2138,7 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.2)" \
+    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.3)" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz
@@ -2028,7 +2146,7 @@ while true; do
   • Сеть Tailscale: $ts_main_status
 
   📌 Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU \
-    "1" "🌐 Часовой пояс" \
+    "1" "🌐 Часовой пояс и NTP" \
     "2" "🏷️ Имя сервера" \
     "3" "📦 Обновление компонентов" \
     "4" "👤 Создание и настройка пользователя" \
@@ -2046,6 +2164,7 @@ while true; do
     "16" "⏱️ Анализ времени загрузки" \
     "17" "🔍 Интеллектуальный аудит системы" \
     "18" "📡 Режим локального маршрутизатора" \
+    "19" "📦 Экспорт / Импорт настроек (Backup)" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then
         clear
@@ -2075,6 +2194,7 @@ while true; do
         16) mod_boot_diag; pause_enter ;;
         17) mod_server_audit; pause_enter ;;
         18) mod_router_sbc; pause_enter ;;
+        19) mod_backup_manager; pause_enter ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

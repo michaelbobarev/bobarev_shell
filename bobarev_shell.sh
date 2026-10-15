@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 1.1 (Gold Master)
+# Версия: 1.2 (Gold Master)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -68,7 +68,7 @@ get_tailscale_whoami() {
         ts_name=$(echo "$raw" | grep -oE '[a-zA-Z0-9.-]+\.(ts|tailscale)\.net' | head -n 1 || echo "N/A")
         
         if [ "$ts_name" = "N/A" ]; then
-            ts_name=$(tailscale status --peers=false 2>/dev/null | awk 'NR==1 {print $2}')
+            ts_name=$(tailscale status --peers=false 2>/dev/null | awk 'NR==1 {print $2}' || echo "")
             [ -z "$ts_name" ] && ts_name="N/A"
         fi
     fi
@@ -90,6 +90,52 @@ is_tailscale_web_active() {
     systemctl is-active --quiet tailscale-web.service 2>/dev/null && return 0
     ps aux 2>/dev/null | grep -v grep | grep -q -iE "tailscale.*web" && return 0
     return 1
+}
+
+# ------------------------------------------------------------------------------
+# ИДЕМПОТЕНТНЫЕ ХЕЛПЕРЫ ДЛЯ UFW (NAT, MANGLE, DOCKER)
+# ------------------------------------------------------------------------------
+ensure_ufw_mangle_tcpmss() {
+    if [ -f /etc/ufw/before.rules ] && ! grep -q "TCPMSS" /etc/ufw/before.rules; then
+        sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
+    fi
+    if [ -f /etc/ufw/before6.rules ] && ! grep -q "TCPMSS" /etc/ufw/before6.rules; then
+        sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before6.rules
+    fi
+}
+
+ensure_ufw_nat_rule() {
+    local rule="$1"
+    [ ! -f /etc/ufw/before.rules ] && return 0
+    if ! grep -q "^\*nat" /etc/ufw/before.rules; then
+        sed -i '1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\nCOMMIT\n\n/' /etc/ufw/before.rules
+    elif ! grep -q "^:POSTROUTING" /etc/ufw/before.rules; then
+        sed -i '/^\*nat/a :POSTROUTING ACCEPT [0:0]' /etc/ufw/before.rules
+    fi
+    if ! grep -qF -- "$rule" /etc/ufw/before.rules; then
+        sed -i "/^:POSTROUTING/a $rule" /etc/ufw/before.rules
+    fi
+}
+
+apply_ufw_docker_protection() {
+    local wan_if="$1"
+    [ ! -f /etc/ufw/after.rules ] || [ -z "$wan_if" ] && return 0
+    sed -i '/# BEGIN UFW AND DOCKER/,/# END UFW AND DOCKER/d' /etc/ufw/after.rules
+    cat << DOCKER_UFW_EOF >> /etc/ufw/after.rules
+
+# BEGIN UFW AND DOCKER
+*filter
+:ufw-user-forward - [0:0]
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -j ufw-user-forward
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -i tailscale0 -j RETURN
+-A DOCKER-USER -i $wan_if -p tcp -m conntrack --ctstate NEW -j DROP
+-A DOCKER-USER -i $wan_if -p udp -m conntrack --ctstate NEW -j DROP
+-A DOCKER-USER -j RETURN
+COMMIT
+# END UFW AND DOCKER
+DOCKER_UFW_EOF
 }
 
 enable_routing_optimizations() {
@@ -126,12 +172,7 @@ ETHTOOL_SVC_EOF
     fi
 
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
-        if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
-            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
-        fi
-        if [ -f /etc/ufw/before6.rules ] && ! grep -q "TCPMSS" /etc/ufw/before6.rules; then
-            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before6.rules
-        fi
+        ensure_ufw_mangle_tcpmss
         silent_run ufw reload
     fi
 
@@ -313,10 +354,10 @@ mod_hostname() {
     echo -e "${C_CYAN}🏷️ === 2/18. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
     echo "Текущее имя хоста: $(hostname)"
     
-    local default_brand_host="Server_VPS"
+    local default_brand_host="Server-VPS"
     case "$SYSTEM_TYPE" in
-        SBC_Armbian) default_brand_host="Server_SBC" ;;
-        Desktop_PC|Laptop_PC) default_brand_host="Server_PC" ;;
+        SBC_Armbian) default_brand_host="Server-SBC" ;;
+        Desktop_PC|Laptop_PC) default_brand_host="Server-PC" ;;
     esac
 
     local new_host=""
@@ -330,17 +371,29 @@ mod_hostname() {
     fi
 
     hostnamectl set-hostname "$new_host"
-    if ! grep -q "$new_host" /etc/hosts; then
-        silent_run sed -i -E "s/^127\.0\.0\.1[[:space:]]+localhost/& $new_host/" /etc/hosts
+    if [ -f /etc/hosts ]; then
+        backup_file "/etc/hosts"
+        sed -i -E "s/^(127\.0\.0\.1[[:space:]]+localhost).*$/\1 $new_host/" /etc/hosts
+        if grep -q "^127\.0\.1\.1" /etc/hosts; then
+            sed -i -E "s/^127\.0\.1\.1[[:space:]]+.*$/127.0.1.1\t$new_host/" /etc/hosts
+        else
+            echo -e "127.0.1.1\t$new_host" >> /etc/hosts
+        fi
     fi
     silent_run sed -i 's/preserve_hostname: false/preserve_hostname: true/g' /etc/cloud/cloud.cfg
-    echo -e "${C_GREEN}✅ Имя сервера изменено на $new_host.${C_RESET}"
+    echo -e "${C_GREEN}✅ Имя сервера чисто обновлено на $new_host.${C_RESET}"
 }
 
 # 3. Обновление пакетов
 mod_apt_update() {
     echo -e "${C_CYAN}📦 === 3/18. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
+
+    if [ -f /etc/gai.conf ]; then
+        sed -i 's/^#\s*precedence ::ffff:0:0\/96\s\+100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf 2>/dev/null || true
+        echo -e "${C_BLUE}ℹ️ Включен приоритет IPv4 над IPv6 (защита от зависаний apt и curl).${C_RESET}"
+    fi
+
     apt-get update && apt-get upgrade -yq
 
     local zram_pkg="zram-tools"
@@ -353,6 +406,16 @@ mod_apt_update() {
     silent_run dpkg-reconfigure --priority=low unattended-upgrades
     apt-get autoremove -yq && apt-get clean
     systemctl enable unattended-upgrades
+
+    if [ -n "$zram_pkg" ] && [ -f /etc/default/zramswap ]; then
+        cat << 'ZRAM_EOF' > /etc/default/zramswap
+ALGO=zstd
+PERCENT=50
+PRIORITY=100
+ZRAM_EOF
+        silent_run systemctl restart zramswap
+        echo -e "${C_GREEN}✅ Сжатие оперативной памяти zRAM (алгоритм zstd, 50% RAM) активировано.${C_RESET}"
+    fi
 
     local current_target=$(systemctl get-default)
     echo "Текущий режим загрузки: $current_target"
@@ -668,6 +731,8 @@ kernel.randomize_va_space = 2
 kernel.unprivileged_bpf_disabled = 1
 kernel.perf_event_paranoid = 3
 kernel.sysrq = 0
+kernel.panic = 10
+kernel.panic_on_oops = 1
 net.core.bpf_jit_harden = 2
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.rp_filter = 2
@@ -692,10 +757,20 @@ net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_rfc1337 = 1
-net.ipv4.tcp_timestamps = 0
+net.ipv4.tcp_timestamps = 1
 HARDENING_EOF
     sysctl --system > /dev/null
-    echo -e "${C_GREEN}✅ Настройки системной защиты и ускорения сетевых протоколов успешно применены.${C_RESET}"
+
+    if [ "$SYSTEM_TYPE" = "SBC_Armbian" ] && [ -f /etc/systemd/system.conf ]; then
+        sed -i -E 's/^\s*#?\s*RuntimeWatchdogSec=.*/RuntimeWatchdogSec=15s/' /etc/systemd/system.conf
+        if ! grep -q "^RuntimeWatchdogSec=" /etc/systemd/system.conf; then
+            echo "RuntimeWatchdogSec=15s" >> /etc/systemd/system.conf
+        fi
+        silent_run systemctl daemon-reexec
+        echo -e "${C_GREEN}✅ Аппаратный таймер защиты от зависаний (Watchdog 15s) для SBC активирован.${C_RESET}"
+    fi
+
+    echo -e "${C_GREEN}✅ Настройки системной защиты, TCP BBR и авто-ребута при панике ядра успешно применены.${C_RESET}"
 }
 
 # 8. Firewall UFW
@@ -754,19 +829,40 @@ mod_ufw() {
         silent_run ufw route allow in on "$netdev" out on tailscale0
     fi
 
+    # Восстановление MSS Clamping, если установлен Tailscale или сервис GRO
+    if command -v tailscale &>/dev/null || [ -f /etc/systemd/system/tailscale-gro.service ]; then
+        ensure_ufw_mangle_tcpmss
+    fi
+
     # Сохраняем системный NAT для Exit Node, если узел уже раздает интернет
     if [ "$(tailscale get advertise-exit-node 2>/dev/null || echo 'false')" = "true" ] && [ -n "$netdev" ]; then
-        if [ -f /etc/ufw/before.rules ]; then
-            if ! grep -q "100.64.0.0/10.*MASQUERADE" /etc/ufw/before.rules; then
-                if grep -q "^\*nat" /etc/ufw/before.rules; then
-                    sed -i "/:POSTROUTING/a -A POSTROUTING -s 100.64.0.0/10 -o $netdev -j MASQUERADE" /etc/ufw/before.rules
-                else
-                    sed -i "1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -s 100.64.0.0\/10 -o $netdev -j MASQUERADE\nCOMMIT\n\n/" /etc/ufw/before.rules
-                fi
-            fi
-        fi
+        ensure_ufw_nat_rule "-A POSTROUTING -s 100.64.0.0/10 -o $netdev -j MASQUERADE"
         iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$netdev" -j MASQUERADE 2>/dev/null || true
         iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "$netdev" -j MASQUERADE 2>/dev/null || true
+    fi
+
+    # Автоматическое сохранение правил локального роутера (Модуль 18), если он был настроен
+    if [ -f /etc/dnsmasq.conf ] && grep -q "^interface=" /etc/dnsmasq.conf; then
+        local r_lan_if=$(grep "^interface=" /etc/dnsmasq.conf | head -n 1 | cut -d= -f2)
+        if [ -n "$r_lan_if" ]; then
+            silent_run ufw allow in on "$r_lan_if" to any port 67 proto udp comment 'LAN DHCP'
+            silent_run ufw allow in on "$r_lan_if" to any port 53 comment 'LAN DNS (UDP/TCP)'
+            silent_run ufw route allow in on "$r_lan_if" comment 'LAN Forwarding'
+            ensure_ufw_nat_rule "-A POSTROUTING -o tailscale0 -j MASQUERADE"
+            ensure_ufw_mangle_tcpmss
+            if [ -n "$netdev" ] && [ "$netdev" != "$r_lan_if" ]; then
+                silent_run ufw route deny in on "$r_lan_if" out on "$netdev" comment 'Kill Switch'
+            fi
+            echo -e "${C_BLUE}ℹ️ Обнаружен активный режим роутера на $r_lan_if: правила NAT, DNS/DHCP и Kill Switch сохранены.${C_RESET}"
+        fi
+    fi
+
+    # Защита Docker за UFW (ufw-docker)
+    if [ -n "$netdev" ]; then
+        if prompt_yn "Включить защиту контейнеров Docker за UFW (запретить Docker обходить фаервол снаружи, оставив доступ через Tailscale)?" "true"; then
+            apply_ufw_docker_protection "$netdev"
+            echo -e "${C_GREEN}✅ Защита Docker + UFW (цепочка DOCKER-USER) интегрирована в /etc/ufw/after.rules.${C_RESET}"
+        fi
     fi
 
     # Разделение логики доступа к порту SSH
@@ -900,16 +996,7 @@ mod_tailscale() {
                                 if [ -n "$wan_dev" ]; then
                                     silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'TS Exit Node Out'
                                     silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'TS Exit Node In'
-                                fi
-
-                                if [ -f /etc/ufw/before.rules ] && [ -n "$wan_dev" ]; then
-                                    if ! grep -q "100.64.0.0/10.*MASQUERADE" /etc/ufw/before.rules; then
-                                        if grep -q "^\*nat" /etc/ufw/before.rules; then
-                                            sed -i "/:POSTROUTING/a -A POSTROUTING -s 100.64.0.0/10 -o $wan_dev -j MASQUERADE" /etc/ufw/before.rules
-                                        else
-                                            sed -i "1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -s 100.64.0.0\/10 -o $wan_dev -j MASQUERADE\nCOMMIT\n\n/" /etc/ufw/before.rules
-                                        fi
-                                    fi
+                                    ensure_ufw_nat_rule "-A POSTROUTING -s 100.64.0.0/10 -o $wan_dev -j MASQUERADE"
                                     silent_run ufw reload
                                 fi
                             fi
@@ -1131,9 +1218,18 @@ mod_ram_flash_opt() {
     echo -e "${C_CYAN}⚡ === 12/18. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
 
+    local target_swappiness=1
+    local target_page_cluster=3
+    if swapon --show 2>/dev/null | grep -q "zram"; then
+        target_swappiness=100
+        target_page_cluster=0
+        echo -e "${C_BLUE}ℹ️ Обнаружен активный zRAM: установлен vm.swappiness=100 и page-cluster=0 для сжатия в ОЗУ.${C_RESET}"
+    fi
+
     mkdir -p /etc/sysctl.d
-    cat << 'EOF' > /etc/sysctl.d/99-ram-opt.conf
-vm.swappiness=1
+    cat << EOF > /etc/sysctl.d/99-ram-opt.conf
+vm.swappiness=$target_swappiness
+vm.page-cluster=$target_page_cluster
 vm.vfs_cache_pressure=50
 vm.dirty_writeback_centisecs=1500
 vm.dirty_background_ratio=5
@@ -1169,9 +1265,19 @@ EOF
         echo -e "${C_YELLOW}⚠️ Файловая система '$root_fs' не поддерживает commit=120. Применен только noatime.${C_RESET}"
     fi
 
-    for dev_sched in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler /sys/block/nvme*/queue/scheduler; do
+    for dev_sched in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler; do
         if [ -f "$dev_sched" ]; then echo "mq-deadline" > "$dev_sched" 2>/dev/null || true; fi
     done
+    for nvme_sched in /sys/block/nvme*/queue/scheduler; do
+        if [ -f "$nvme_sched" ]; then echo "none" > "$nvme_sched" 2>/dev/null || true; fi
+    done
+
+    mkdir -p /etc/udev/rules.d
+    cat << 'UDEV_EOF' > /etc/udev/rules.d/60-ioscheduler.rules
+ACTION=="add|change", KERNEL=="sd[a-z]|mmcblk[0-9]*", ATTR{queue/scheduler}="mq-deadline"
+ACTION=="add|change", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none"
+UDEV_EOF
+    silent_run udevadm control --reload-rules
 
     TMPFS_ENTRIES=(
         "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=25% 0 0"
@@ -1237,10 +1343,11 @@ mod_swap_manager() {
             echo -e "${C_GREEN}✅ Файл подкачки размером $swap_size успешно инициализирован!${C_RESET}"
             ;;
         3)
-            silent_run swapoff -a
+            silent_run swapoff /swapfile
+            silent_run swapoff /swap.img
             sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
             rm -f /swapfile /swap.img
-            echo -e "${C_GREEN}✅ Использование виртуальной памяти отключено.${C_RESET}"
+            echo -e "${C_GREEN}✅ Дисковый файл подкачки отключен.${C_RESET}"
             ;;
     esac
 }
@@ -1252,15 +1359,25 @@ mod_desktop_apps() {
     local gov_choice
     if gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
     "1" "⚡ Performance (Максимальный)" \
-    "2" "⚖️ Ondemand (Нормальный)" \
+    "2" "⚖️ Ondemand / Schedutil (Сбалансированный)" \
     "3" "🍃 Powersave (Эко-режим)" \
     "0" "⏭️ Без изменений" 3>&1 1>&2 2>&3) && [ "$gov_choice" != "0" ]; then
         local selected_gov="ondemand"
-        local gov_name="Нормальный (Ondemand)"
-        
+        local gov_name="Сбалансированный"
+        local avail_govs=""
+        [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors ] && avail_govs=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null || echo "")
+
         case "$gov_choice" in
             1) selected_gov="performance"; gov_name="Максимальный (Performance)" ;;
-            2) selected_gov="ondemand"; gov_name="Нормальный (Ondemand)" ;;
+            2)
+                if echo "$avail_govs" | grep -qw "ondemand"; then
+                    selected_gov="ondemand"; gov_name="Сбалансированный (Ondemand)"
+                elif echo "$avail_govs" | grep -qw "schedutil"; then
+                    selected_gov="schedutil"; gov_name="Сбалансированный (Schedutil)"
+                else
+                    selected_gov="powersave"; gov_name="Динамический P-State (Powersave)"
+                fi
+                ;;
             3) selected_gov="powersave"; gov_name="Эко-режим (Powersave)" ;;
         esac
 
@@ -1273,7 +1390,7 @@ mod_desktop_apps() {
         silent_run systemctl restart cpufrequtils 2>/dev/null || true
         
         for cpu in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
-            [ -f "$cpu" ] && echo "$selected_gov" > "$cpu" 2>/dev/null
+            [ -f "$cpu" ] && echo "$selected_gov" > "$cpu" 2>/dev/null || true
         done
         echo -e "${C_GREEN}✅ Режим процессора успешно изменен на $gov_name.${C_RESET}"
     else
@@ -1361,7 +1478,7 @@ HDMI_EOF
 
 # 16. Диагностика времени загрузки
 mod_boot_diag() {
-    echo -e "${C_CYAN}⏱️ === 16/18. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЫ ===${C_RESET}"
+    echo -e "${C_CYAN}⏱️ === 16/18. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
         echo -e "${C_RED}❌ Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
@@ -1423,7 +1540,7 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 2. Аппаратная часть (Процессор и Температура) ---${C_RESET}"
     local cpu_temp="Нет сенсора"
     if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
-        local raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+        local raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "")
         if [ -n "$raw_temp" ] && [ "$raw_temp" -gt 0 ]; then
             cpu_temp=$(awk "BEGIN {printf \"%.1f°C\", $raw_temp/1000}")
             if [ "$raw_temp" -gt 75000 ]; then
@@ -1437,11 +1554,11 @@ mod_server_audit() {
     fi
 
     local cpu_gov="Неизвестно"
-    [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ] && cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+    [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ] && cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "Неизвестно")
 
     local cpu_freq="Неизвестно"
     if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]; then
-        local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)
+        local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "")
         [ -n "$raw_freq" ] && cpu_freq="$(awk "BEGIN {printf \"%d MHz\", $raw_freq/1000}")"
     fi
     
@@ -1473,9 +1590,9 @@ mod_server_audit() {
     local sshd_cmd=$(get_sshd_cmd)
 
     if [ -n "$sshd_cmd" ]; then
-        local conf_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1)
-        local conf_root=$($sshd_cmd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1)
-        local conf_pass=$($sshd_cmd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1)
+        local conf_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "")
+        local conf_root=$($sshd_cmd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1 || echo "")
+        local conf_pass=$($sshd_cmd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1 || echo "")
         
         [ -n "$conf_port" ] && ssh_port="$conf_port"
         [ -n "$conf_root" ] && root_ssh="$conf_root"
@@ -1541,6 +1658,10 @@ mod_server_audit() {
         if LC_ALL=C ufw status 2>/dev/null | grep -qw "41641/udp"; then
             echo -e "  • Прямые P2P соединения:     ${C_GREEN}✅ Разрешены (Tailscale порт 41641)${C_RESET}"
         fi
+
+        if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules; then
+            echo -e "  • Защита контейнеров Docker: ${C_GREEN}✅ Активна (DOCKER-USER под контролем UFW)${C_RESET}"
+        fi
     else
         echo -e "  • Статус брандмауэра:        ${C_RED}❌ Не активен${C_RESET}"
     fi
@@ -1550,7 +1671,7 @@ mod_server_audit() {
         echo -e "  • Пакет Tailscale:           ${C_GREEN}✅ Установлен и работает${C_RESET}"
         local ts_name ts_ip ts_exit ts_adv_exit ts_accept ts_stealth
         IFS="|" read -r ts_name _ <<< "$(get_tailscale_whoami)"
-        ts_ip=$(tailscale whoami 2>/dev/null | grep -i "^  Addresses:" | grep -oP '100\.\d+\.\d+\.\d+' | head -n 1 || echo "Нет IP")
+        ts_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "Нет IP")
         
         ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
         local ts_exit_human
@@ -1589,7 +1710,7 @@ mod_server_audit() {
     fi
 
     echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Диагностика ---${C_RESET}"
-    local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}')
+    local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' || echo "")
     for iface in $active_ifs; do
         local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")
         local speed=$(cat /sys/class/net/"$iface"/speed 2>/dev/null || echo "N/A")
@@ -1637,6 +1758,8 @@ mod_server_audit() {
     local swappiness_human
     if [ "$vm_swappiness" = "1" ]; then
         swappiness_human="${C_GREEN}✅ 1 (Максимальное сбережение накопителя)${C_RESET}"
+    elif [ "$vm_swappiness" = "100" ] && swapon --show 2>/dev/null | grep -q "zram"; then
+        swappiness_human="${C_GREEN}✅ 100 (Оптимально для активного сжатия zRAM)${C_RESET}"
     elif [ "$vm_swappiness" = "60" ]; then
         swappiness_human="${C_YELLOW}⚠️ 60 (Стандартное, частая запись на диск)${C_RESET}"
     elif [ "$vm_swappiness" = "N/A" ]; then
@@ -1660,7 +1783,7 @@ mod_server_audit() {
 
     local current_swap=$(swapon --show --noheadings 2>/dev/null | awk '{print $1 " (" $3 ")"}' | paste -sd ", " - || echo "")
     [ -z "$current_swap" ] && current_swap="Отключен"
-    echo -e "  • Активный файл Swap:        ${C_BLUE}$current_swap${C_RESET}"
+    echo -e "  • Активный Swap / zRAM:      ${C_BLUE}$current_swap${C_RESET}"
 
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
@@ -1676,7 +1799,7 @@ mod_router_sbc() {
         return 0
     fi
 
-    local available_ifs=$(ip -br link show | grep -vE "DOWN|tailscale0|lo|wg" | awk '{print $1}')
+    local available_ifs=$(ip -br link show | grep -vE "DOWN|tailscale0|lo|wg" | awk '{print $1}' || echo "")
     if [ -z "$available_ifs" ]; then
         whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
         return 0
@@ -1727,14 +1850,19 @@ mod_router_sbc() {
     fi
 
     echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
-    if command -v nmcli &>/dev/null; then
+    if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
+        silent_run nmcli dev set "$lan_if" managed yes 2>/dev/null
         silent_run nmcli con delete "$lan_if" 2>/dev/null
         silent_run nmcli con add type ethernet ifname "$lan_if" con-name "$lan_if" ipv4.method manual ipv4.addresses "$lan_ip/24" ipv4.dns "8.8.8.8,1.1.1.1"
-        silent_run nmcli con up "$lan_if"
+        if ! nmcli con up "$lan_if" >/dev/null 2>&1; then
+            ip addr flush dev "$lan_if" 2>/dev/null || true
+            ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
+            ip link set dev "$lan_if" up 2>/dev/null || true
+        fi
     else
-        ip addr flush dev "$lan_if" 2>/dev/null
-        ip addr add "$lan_ip/24" dev "$lan_if"
-        ip link set dev "$lan_if" up
+        ip addr flush dev "$lan_if" 2>/dev/null || true
+        ip addr add "$lan_ip/24" dev "$lan_if" 2>/dev/null || true
+        ip link set dev "$lan_if" up 2>/dev/null || true
     fi
 
     echo -e "${C_BLUE}⚙️ Настройка сервера DHCP и DNS...${C_RESET}"
@@ -1772,18 +1900,14 @@ EOF
     fi
 
     echo -e "${C_BLUE}⚙️ Включение маршрутизации и трансляции адресов (NAT)...${C_RESET}"
-    sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+    [ -f /etc/sysctl.conf ] && sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
     echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
     sysctl -p /etc/sysctl.d/99-router.conf >/dev/null 2>&1
 
-    # Нативная интеграция NAT и MSS Clamping в UFW
+    # Нативная интеграция NAT и MSS Clamping в UFW без дублирования секций
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
-        if ! grep -q "POSTROUTING -o tailscale0 -j MASQUERADE" /etc/ufw/before.rules; then
-            sed -i '1s/^/*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -o tailscale0 -j MASQUERADE\nCOMMIT\n\n/' /etc/ufw/before.rules
-        fi
-        if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
-            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
-        fi
+        ensure_ufw_nat_rule "-A POSTROUTING -o tailscale0 -j MASQUERADE"
+        ensure_ufw_mangle_tcpmss
         silent_run ufw reload
     fi
 
@@ -1821,6 +1945,56 @@ EOF
     fi
 }
 
+run_full_auto_setup() {
+    echo "🚀 ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
+    local local_aborted=false
+    for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_logging_manager_auto mod_ram_flash_opt; do
+        MODULE_CANCELED=false
+        $m
+        if [ "$MODULE_CANCELED" = true ]; then
+            echo -e "${C_YELLOW}🛑 Автоматическая настройка прервана.${C_RESET}"
+            local_aborted=true
+            break
+        fi
+    done
+    if [ "$local_aborted" = false ]; then echo -e "\n${C_GREEN}🎉 ВСЕ ЭТАПЫ НАСТРОЙКИ УСПЕШНО ЗАВЕРШЕНЫ!${C_RESET}"; fi
+    MODULE_CANCELED=false
+}
+
+# ------------------------------------------------------------------------------
+# ОБРАБОТКА CLI-АРГУМЕНТОВ БЫСТРОГО ЗАПУСКА
+# ------------------------------------------------------------------------------
+if [ "${1:-}" != "" ]; then
+    case "${1:-}" in
+        --audit|-a)
+            mod_server_audit
+            exit 0
+            ;;
+        --update|-u)
+            mod_apt_update
+            exit 0
+            ;;
+        --auto)
+            run_full_auto_setup
+            exit 0
+            ;;
+        --help|-h)
+            echo -e "${C_BOLD}BOBAREV SHELL v1.2 (Gold Master)${C_RESET}"
+            echo "Использование: $0 [опция]"
+            echo "  (без опций)   Запуск интерактивного меню whiptail"
+            echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
+            echo "  --update, -u  Обновление пакетов, IPv4 приоритет и настройка zRAM (Модуль 3)"
+            echo "  --auto        Последовательная настройка сервера целиком (Шаги 1-12)"
+            echo "  --help, -h    Показать эту справку"
+            exit 0
+            ;;
+        *)
+            echo -e "${C_RED}Неизвестный параметр: $1${C_RESET} (используйте --help для справки)" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 # ==============================================================================
 # === 🚀 ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
 # ==============================================================================
@@ -1846,7 +2020,7 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ" \
+    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.2)" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz
@@ -1901,21 +2075,6 @@ while true; do
         16) mod_boot_diag; pause_enter ;;
         17) mod_server_audit; pause_enter ;;
         18) mod_router_sbc; pause_enter ;;
-        A)
-            echo "🚀 ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
-            local_aborted=false
-            for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_logging_manager_auto mod_ram_flash_opt; do
-                MODULE_CANCELED=false
-                $m
-                if [ "$MODULE_CANCELED" = true ]; then
-                    echo -e "${C_YELLOW}🛑 Автоматическая настройка прервана.${C_RESET}"
-                    local_aborted=true
-                    break
-                fi
-            done
-            if [ "$local_aborted" = false ]; then echo -e "\n${C_GREEN}🎉 ВСЕ ЭТАПЫ НАСТРОЙКИ УСПЕШНО ЗАВЕРШЕНЫ!${C_RESET}"; fi
-            MODULE_CANCELED=false
-            pause_enter
-            ;;
+        A) run_full_auto_setup; pause_enter ;;
     esac
 done

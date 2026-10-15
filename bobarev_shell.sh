@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 1.5 (Gold Master - Policy Routing & Universal Router Edition)
+# Версия: 1.6 (Gold Master - Smart Policy Routing & Live Interface Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -35,7 +35,7 @@ elif [ "$(systemctl get-default 2>/dev/null)" = "graphical.target" ]; then
 fi
 
 get_wan_if() {
-    ip route show default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
 }
 
 DEFAULT_WAN_IF=$(get_wan_if)
@@ -92,6 +92,20 @@ is_tailscale_web_active() {
     return 1
 }
 
+get_iface_status_tag() {
+    local iface="$1"
+    local state="DOWN"
+    if ip link show "$iface" 2>/dev/null | grep -q "<[^>]*UP"; then
+        state="UP"
+    fi
+    local ip4=$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+    if [ -n "$ip4" ]; then
+        echo "[${state}: ${ip4}]"
+    else
+        echo "[${state}: без IP]"
+    fi
+}
+
 # ------------------------------------------------------------------------------
 # ИДЕМПОТЕНТНЫЕ ХЕЛПЕРЫ ДЛЯ UFW (NAT, MANGLE, DOCKER)
 # ------------------------------------------------------------------------------
@@ -143,12 +157,12 @@ enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 tries=0
-while ! ip route show default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" >/dev/null 2>&1; do
+while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -ge 15 ] && exit 0
     sleep 2
 done
-NETDEV=$(ip route show default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
     ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
 fi
@@ -277,9 +291,9 @@ prompt_yn() {
     local prompt="$1"
     local default_yes="$2"
     if [ "$default_yes" = "true" ]; then
-        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $WT_WIDTH; then return 0; else return 1; fi
+        if whiptail --title "Подтверждение" --yesno "$prompt" 12 $WT_WIDTH; then return 0; else return 1; fi
     else
-        if whiptail --title "Подтверждение" --yesno "$prompt" 11 $WT_WIDTH --defaultno; then return 0; else return 1; fi
+        if whiptail --title "Подтверждение" --yesno "$prompt" 12 $WT_WIDTH --defaultno; then return 0; else return 1; fi
     fi
 }
 
@@ -892,7 +906,7 @@ mod_ufw() {
             if [ "${ROUTER_KILLSWITCH:-false}" = "true" ] && [ -n "$netdev" ] && [ "$netdev" != "$ROUTER_OUT_IF" ] && [ "$netdev" != "$ROUTER_LAN_IF" ]; then
                 silent_run ufw route deny in on "$ROUTER_LAN_IF" out on "$netdev" comment 'Kill Switch'
             fi
-            echo -e "${C_BLUE}ℹ️ Восстановлен профиль роутера: $ROUTER_LAN_IF ➔ $ROUTER_OUT_IF (Kill Switch: ${ROUTER_KILLSWITCH:-false}).${C_RESET}"
+            echo -e "${C_BLUE}ℹ️ Восстановлен профиль роутера: $ROUTER_LAN_IF -> $ROUTER_OUT_IF (Kill Switch: ${ROUTER_KILLSWITCH:-false}).${C_RESET}"
         fi
     elif [ -f /etc/dnsmasq.conf ] && grep -q "^interface=" /etc/dnsmasq.conf; then
         local r_lan_if=$(grep "^interface=" /etc/dnsmasq.conf | head -n 1 | cut -d= -f2)
@@ -1061,7 +1075,7 @@ mod_tailscale() {
                             echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом, NAT и сквозная маршрутизация включены.${C_RESET}"
                             
                             whiptail --title "⚠️ ВАЖНО: Подтверждение Exit Node" --msgbox \
-"Сервер объявлен шлюзом, правила UFW и системный NAT успешно настроены!\n\nЧтобы интернет заработал на ваших устройствах:\n1. Откройте панель: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] ➔ Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Совет по DNS: Если после подключения сайты не открываются,\nв панели Tailscale (вкладка DNS) включите 'Override local DNS'\nи добавьте публичный резолвер (например, 1.1.1.1)." 16 $WT_WIDTH
+"Сервер объявлен шлюзом, правила UFW и системный NAT успешно настроены!\n\nЧтобы интернет заработал на ваших устройствах:\n1. Откройте панель: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Совет по DNS: Если после подключения сайты не открываются,\nв панели Tailscale (вкладка DNS) включите 'Override local DNS'\nи добавьте публичный резолвер (например, 1.1.1.1)." 16 $WT_WIDTH
                             ;;
                         2) 
                             silent_run tailscale set --advertise-exit-node=false
@@ -1723,7 +1737,7 @@ mod_server_audit() {
         if [ -f /etc/default/bobarev-router ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-router
-            echo -e "  • Режим LAN-роутера (PBR):   ${C_GREEN}✅ ${ROUTER_LAN_IF:-?} (${ROUTER_LAN_IP:-?}) -> ${ROUTER_OUT_IF:-?}${C_RESET} (Kill Switch: ${C_BLUE}${ROUTER_KILLSWITCH:-false}${C_RESET})"
+            echo -e "  • Режим LAN-роутера (PBR):   ${C_GREEN}✅ ${ROUTER_LAN_IF:-?} (${ROUTER_LAN_IP:-?}) -> ${ROUTER_OUT_IF:-?}${C_RESET} (Хост в VPN: ${C_BLUE}${ROUTER_ROUTE_HOST:-false}${C_RESET}, Kill Switch: ${C_BLUE}${ROUTER_KILLSWITCH:-false}${C_RESET})"
         fi
 
         if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules; then
@@ -1777,7 +1791,7 @@ mod_server_audit() {
     fi
 
     echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Открытые порты ---${C_RESET}"
-    local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' || echo "")
+    local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' || echo "")
     for iface in $active_ifs; do
         local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")
         local speed=$(cat /sys/class/net/"$iface"/speed 2>/dev/null || echo "N/A")
@@ -1866,14 +1880,14 @@ mod_router_sbc() {
     DEFAULT_WAN_IF=$(get_wan_if)
     local wan_if="$DEFAULT_WAN_IF"
     
-    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний LAN-интерфейс для клиентов и целевой внешний канал (WireGuard wg0, Tailscale, TUN-прокси или прямой выход через WAN), а скрипт настроит Policy Routing (приоритет таблиц), DHCP, DNS и Kill Switch." 13 $WT_WIDTH; then
+    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний LAN-интерфейс для клиентов и целевой внешний канал (WireGuard, Tailscale, TUN-прокси или прямой WAN), а также решить, направлять ли трафик самого сервера в этот же канал." 13 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
-    # Шаг 1. Выбор LAN-интерфейса (физические порты, исключая виртуальные туннели)
-    local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|tun[0-9]*|docker|veth|br-" | awk '{print $1}' || echo "")
+    # Шаг 1. Выбор LAN-интерфейса (только реальные физические интерфейсы со статусом и IP)
+    local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|tun[0-9]*|utun[0-9]*|docker|veth|br-" | awk '{print $1}' | sed 's/@.*//' || echo "")
     if [ -z "$available_lan_ifs" ]; then
         whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
         return 0
@@ -1882,10 +1896,11 @@ mod_router_sbc() {
     local lan_menu_items=()
     local iface_desc=""
     for iface in $available_lan_ifs; do
+        local st_tag=$(get_iface_status_tag "$iface")
         if [ "$iface" = "$wan_if" ]; then
-            iface_desc="Текущий WAN интерфейс (Вход интернета)"
+            iface_desc="Вход интернета WAN $st_tag"
         else
-            iface_desc="Свободный порт (Рекомендуется для LAN-клиентов)"
+            iface_desc="Свободный порт LAN $st_tag"
         fi
         lan_menu_items+=("$iface" "$iface_desc")
     done
@@ -1897,27 +1912,43 @@ mod_router_sbc() {
         return 0
     fi
 
-    # Шаг 2. Выбор целевого выходного интерфейса (Uplink / VPN: WireGuard, Tailscale, TUN или WAN)
+    # Шаг 2. Выбор целевого выходного интерфейса (ТОЛЬКО реально существующие в системе интерфейсы со статусом и IP)
     local out_menu_items=()
     local seen_ifs=" lo $lan_if "
-
     local all_sys_ifs=$(ip -br link show | awk '{print $1}' | sed 's/@.*//' || echo "")
-    for candidate in wg0 tailscale0 wg1 tun0 singbox0 $all_sys_ifs; do
+
+    # Сортируем существующие интерфейсы по приоритету удобства: сначала wg*, затем tun*, затем tailscale0, затем WAN
+    local ordered_candidates=()
+    for iface in $all_sys_ifs; do
+        [[ "$iface" == wg* ]] && ordered_candidates+=("$iface")
+    done
+    for iface in $all_sys_ifs; do
+        [[ "$iface" == tun* || "$iface" == utun* || "$iface" == singbox* ]] && ordered_candidates+=("$iface")
+    done
+    for iface in $all_sys_ifs; do
+        [ "$iface" = "tailscale0" ] && ordered_candidates+=("$iface")
+    done
+    for iface in $all_sys_ifs; do
+        [[ "$iface" != "docker"* && "$iface" != "veth"* && "$iface" != "br-"* ]] && ordered_candidates+=("$iface")
+    done
+
+    for candidate in "${ordered_candidates[@]}"; do
         [[ "$seen_ifs" == *" $candidate "* ]] && continue
-        if ip link show "$candidate" >/dev/null 2>&1 || [ "$candidate" = "tailscale0" ] || [ "$candidate" = "wg0" ] || [ "$candidate" = "tun0" ]; then
+        if ip link show "$candidate" >/dev/null 2>&1; then
             seen_ifs="$seen_ifs $candidate "
-            local out_desc="Сетевой интерфейс"
+            local st_tag=$(get_iface_status_tag "$candidate")
+            local out_desc="Сетевой интерфейс $st_tag"
             case "$candidate" in
-                wg*)        out_desc="🛡️ WireGuard / AmneziaWG туннель ($candidate)" ;;
-                tailscale0) out_desc="🔗 Tailscale (Меш-сеть / Exit Node)" ;;
-                tun*|utun*|singbox*) out_desc="🚀 TUN-туннель / Proxy / OpenVPN ($candidate)" ;;
-                "$wan_if")  out_desc="🌍 Прямой выход через WAN провайдера (Без VPN)" ;;
-                *)          out_desc="🔌 Сетевой интерфейс ($candidate)" ;;
+                wg*)        out_desc="🛡️ WireGuard туннель $st_tag" ;;
+                tailscale0) out_desc="🔗 Tailscale меш-сеть $st_tag" ;;
+                tun*|utun*|singbox*) out_desc="🚀 TUN / Прокси туннель $st_tag" ;;
+                "$wan_if")  out_desc="🌍 Прямой WAN провайдера $st_tag" ;;
+                *)          out_desc="🔌 Интерфейс $st_tag" ;;
             esac
             out_menu_items+=("$candidate" "$out_desc")
         fi
     done
-    out_menu_items+=("CUSTOM" "✍️ Ввести имя интерфейса вручную (например, wg2)")
+    out_menu_items+=("CUSTOM" "✍️ Ввести имя вручную (если туннель еще не поднят)")
 
     local out_if=""
     if ! out_if=$(whiptail --title "2/3. Выходной канал (Uplink / VPN)" --menu "Через какое соединение направлять интернет-трафик клиентов из LAN ($lan_if)?" 16 $WT_WIDTH 7 "${out_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$out_if" ]; then
@@ -1944,6 +1975,17 @@ mod_router_sbc() {
     local subnet_prefix=$(echo "$lan_ip" | cut -d. -f1-3)
     local dhcp_start="${subnet_prefix}.50"
     local dhcp_end="${subnet_prefix}.200"
+
+    # Вопрос: Перевести ли трафик самого сервера (NanoPi) в этот же канал?
+    local route_host="false"
+    if [ "$out_if" != "$wan_if" ] && [ "$out_if" != "tailscale0" ]; then
+        if prompt_yn "Направить трафик САМОГО СЕРВЕРА ($(hostname)) тоже в канал '$out_if' вместе с LAN-клиентами?\n\n• Да: и клиенты в LAN, и сам сервер выходят с IP '$out_if' (доступ к серверу по Tailscale и локальной сети сохранится).\n• Нет: через '$out_if' идут только клиенты за портом '$lan_if'." "true"; then
+            route_host="true"
+        else
+            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+            route_host="false"
+        fi
+    fi
 
     local use_killswitch="false"
     if [ -n "$wan_if" ] && [ "$out_if" != "$wan_if" ] && [ "$lan_if" != "$wan_if" ]; then
@@ -2057,6 +2099,7 @@ EOF
 ROUTER_LAN_IF="$lan_if"
 ROUTER_LAN_IP="$lan_ip"
 ROUTER_OUT_IF="$out_if"
+ROUTER_ROUTE_HOST="$route_host"
 ROUTER_KILLSWITCH="$use_killswitch"
 EOF
 
@@ -2089,7 +2132,7 @@ EOF
         silent_run ufw reload
     fi
 
-    # Создаем скрипт и сервис автозапуска Policy Routing (приоритеты 90 и 100 -> таблица 200)
+    # Создаем скрипт и сервис автозапуска Policy Routing (приоритеты 90..105 -> таблица 200 + защита от утечки IPv6)
     cat << 'ROUTER_UP_EOF' > /usr/local/bin/bobarev-router-up.sh
 #!/bin/bash
 [ ! -f /etc/default/bobarev-router ] && exit 0
@@ -2100,21 +2143,68 @@ if ! ip -4 addr show dev "$ROUTER_LAN_IF" 2>/dev/null | grep -q "$ROUTER_LAN_IP"
     ip addr add "$ROUTER_LAN_IP/24" dev "$ROUTER_LAN_IF" 2>/dev/null || true
 fi
 
-# Настройка таблицы 200 и правил приоритета (выше Tailscale 5270 и WireGuard 32765)
-ip rule del prio 90 2>/dev/null || true
-ip rule del prio 100 2>/dev/null || true
+# Очистка прежних правил Policy Routing (IPv4 и IPv6)
+for p in 90 94 95 96 100 105; do
+    ip -4 rule del prio "$p" 2>/dev/null || true
+    ip -6 rule del prio "$p" 2>/dev/null || true
+done
+ip -4 route flush table 200 2>/dev/null || true
+ip -6 route flush table 200 2>/dev/null || true
+
+WAN_DEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
+WAN_GW=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '/via/ {print $3; exit}' || echo "")
 
 if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
-    GW_IP=$(ip -4 route show default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}')
-    if [ -n "$GW_IP" ]; then
-        ip route replace default via "$GW_IP" dev "$ROUTER_OUT_IF" table 200 2>/dev/null || true
+    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
+    if [ -n "$OUT_GW" ]; then
+        ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" table 200 2>/dev/null || true
     else
-        ip route replace default dev "$ROUTER_OUT_IF" table 200 2>/dev/null || true
+        ip -4 route replace default dev "$ROUTER_OUT_IF" table 200 2>/dev/null || true
     fi
-    ip rule add from all lookup main suppress_prefixlength 0 prio 90 2>/dev/null || true
-    ip rule add iif "$ROUTER_LAN_IF" lookup 200 prio 100 2>/dev/null || true
+
+    # 90: Защита всех локальных подсетей (LAN, WAN-подсеть роутера и статические маршруты)
+    ip -4 rule add from all lookup main suppress_prefixlength 0 prio 90 2>/dev/null || true
+    # 100: Весь интернет-трафик клиентов из LAN принудительно идет в таблицу 200 ($ROUTER_OUT_IF)
+    ip -4 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 100 2>/dev/null || true
+
+    # Если включен перевод самого хоста в этот же туннель
+    if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ] && [ "$ROUTER_OUT_IF" != "$WAN_DEV" ]; then
+        # Защита от петли маршрутизации WireGuard (fwmark + прямой маршрут до Endpoint через WAN)
+        if command -v wg &>/dev/null && wg show "$ROUTER_OUT_IF" >/dev/null 2>&1; then
+            WG_FWMARK=$(wg show "$ROUTER_OUT_IF" fwmark 2>/dev/null || echo "off")
+            if [ "$WG_FWMARK" = "off" ] || [ -z "$WG_FWMARK" ]; then
+                wg set "$ROUTER_OUT_IF" fwmark 0xca6c 2>/dev/null || true
+                WG_FWMARK="0xca6c"
+            fi
+            ip -4 rule add fwmark "$WG_FWMARK" lookup main prio 94 2>/dev/null || true
+
+            if [ -n "$WAN_GW" ] && [ -n "$WAN_DEV" ]; then
+                for ep_ip in $(wg show "$ROUTER_OUT_IF" endpoints 2>/dev/null | awk '{print $2}' | sed -E 's/:[0-9]+$//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'); do
+                    ip -4 route replace "$ep_ip/32" via "$WAN_GW" dev "$WAN_DEV" table main 2>/dev/null || true
+                done
+            fi
+        fi
+        # 95: Сохраняем работу демона Tailscale поверх WAN (чтобы сервер всегда был доступен по Tailscale)
+        ip -4 rule add fwmark 0x80000/0xff0000 lookup main prio 95 2>/dev/null || true
+        # 105: Трафик самого сервера идет через таблицу 200 ($ROUTER_OUT_IF)
+        ip -4 rule add from all lookup 200 prio 105 2>/dev/null || true
+    fi
+
+    # Защита от утечки IPv6 (если туннель $ROUTER_OUT_IF имеет только IPv4, блокируем обход по IPv6 с мгновенным фоллбэком на IPv4)
+    OUT_HAS_IPV6=$(ip -6 addr show dev "$ROUTER_OUT_IF" scope global 2>/dev/null || echo "")
+    if [ -z "$OUT_HAS_IPV6" ]; then
+        ip -6 route replace unreachable default table 200 2>/dev/null || true
+        ip -6 rule add from all lookup main suppress_prefixlength 0 prio 90 2>/dev/null || true
+        ip -6 rule add fwmark 0x80000/0xff0000 lookup main prio 95 2>/dev/null || true
+        ip -6 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 100 2>/dev/null || true
+        if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ]; then
+            ip -6 rule add from all lookup 200 prio 105 2>/dev/null || true
+        fi
+    fi
 fi
-ip route flush cache 2>/dev/null || true
+
+ip -4 route flush cache 2>/dev/null || true
+ip -6 route flush cache 2>/dev/null || true
 
 iptables -t nat -D POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null || true
 iptables -t nat -A POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE
@@ -2159,9 +2249,18 @@ ROUTER_SVC_EOF
         fi
     fi
 
-    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор (с Policy Routing) успешно развернут!${C_RESET}"
+    echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
+    local ext_ip_out="Не удалось определить (проверьте связь туннеля)"
+    local probed_ip=$(curl -4 -s --max-time 4 --interface "$out_if" https://ip.gs 2>/dev/null || curl -4 -s --max-time 4 --interface "$out_if" https://ifconfig.me 2>/dev/null || echo "")
+    if [ -n "$probed_ip" ]; then
+        ext_ip_out="$probed_ip"
+    fi
+
+    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор (v1.6 Policy Routing) успешно развернут!${C_RESET}"
     echo -e "  • LAN Интерфейс (Вход):  ${C_BLUE}$lan_if ($lan_ip, bind-dynamic)${C_RESET}"
     echo -e "  • Выходной канал (NAT):  ${C_GREEN}$out_if (Приоритет ip rule: 100 -> таблица 200)${C_RESET}"
+    echo -e "  • Внешний IP канала:     ${C_GREEN}$ext_ip_out${C_RESET}"
+    echo -e "  • Трафик самого сервера: ${C_BLUE}$([ "$route_host" = "true" ] && echo "Тоже идет через $out_if (Prio 105 + IPv6 Leak Guard)" || echo "Стандартный системный маршрут")${C_RESET}"
     echo -e "  • Пул адресов DHCP:      ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
     echo -e "  • Локальный DNS-кэш:     ${C_GREEN}$lan_ip (1500 записей, UDP/TCP порт 53)${C_RESET}"
     echo -e "  • MSS Clamping:          ${C_GREEN}Включен (встроен в UFW)${C_RESET}"
@@ -2261,7 +2360,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v1.5 (Gold Master - Policy Routing Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v1.6 (Gold Master - Smart Policy Routing Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню whiptail"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -2303,7 +2402,7 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.5)" \
+    if ! choice=$(whiptail --title "🛠️ ГЛАВНОЕ МЕНЮ (v1.6)" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($SYSTEM_TYPE)
   • Часовой пояс: $tz

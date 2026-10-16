@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.1 (Gold Master - Reboot-Proof Router & Human-Readable Audit)
+# Версия: 2.2 (Gold Master - Ultimate Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -783,10 +783,14 @@ SSH_HARDENING_EOF
     fi
 }
 
-# 7. Защита ядра и сети
+# 7. Защита ядра и сети (с префиксом 99-zzz-)
 mod_hardening() {
     echo -e "${C_CYAN}🛡️ === 7/19. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
-    backup_file "/etc/sysctl.d/99-server-hardening.conf"
+    
+    # Удаляем старые дублирующиеся строки из главного /etc/sysctl.conf
+    sed -i -E '/^\s*(net\.core\.(rmem|wmem)_(max|default)|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc)\s*=/d' /etc/sysctl.conf 2>/dev/null || true
+    backup_file "/etc/sysctl.d/99-zzz-server-hardening.conf"
+    rm -f /etc/sysctl.d/99-server-hardening.conf 2>/dev/null || true
     
     local icmp_ignore=0
     if prompt_yn "Скрыть сервер от пингов (отключить ответы на ICMP Echo / ping)?" "false"; then
@@ -803,7 +807,7 @@ mod_hardening() {
     disable_ufw_strict_rpfilter
 
     mkdir -p /etc/sysctl.d
-    tee /etc/sysctl.d/99-server-hardening.conf > /dev/null << HARDENING_EOF
+    tee /etc/sysctl.d/99-zzz-server-hardening.conf > /dev/null << HARDENING_EOF
 kernel.dmesg_restrict = 1
 kernel.kptr_restrict = 2
 kernel.yama.ptrace_scope = 1
@@ -845,7 +849,9 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_rfc1337 = 1
 net.ipv4.tcp_timestamps = 1
 HARDENING_EOF
-    sysctl --system > /dev/null
+
+    sysctl --system > /dev/null 2>&1 || true
+    sysctl -p /etc/sysctl.d/99-zzz-server-hardening.conf > /dev/null 2>&1 || true
 
     if [ "$SYSTEM_TYPE" = "SBC_Armbian" ] && [ -f /etc/systemd/system.conf ]; then
         sed -i -E 's/^\s*#?\s*RuntimeWatchdogSec=.*/RuntimeWatchdogSec=15s/' /etc/systemd/system.conf
@@ -1310,7 +1316,7 @@ CONF
     silent_run systemctl restart systemd-journald
 }
 
-# 12. Оптимизация RAM / Flash
+# 12. Оптимизация RAM / Flash (с префиксом 99-zzz-)
 mod_ram_flash_opt() {
     echo -e "${C_CYAN}⚡ === 12/19. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
@@ -1324,7 +1330,8 @@ mod_ram_flash_opt() {
     fi
 
     mkdir -p /etc/sysctl.d
-    cat << EOF > /etc/sysctl.d/99-ram-opt.conf
+    rm -f /etc/sysctl.d/99-ram-opt.conf 2>/dev/null || true
+    cat << EOF > /etc/sysctl.d/99-zzz-ram-opt.conf
 vm.swappiness=$target_swappiness
 vm.page-cluster=$target_page_cluster
 vm.vfs_cache_pressure=50
@@ -1333,7 +1340,7 @@ vm.dirty_background_ratio=5
 vm.dirty_ratio=10
 kernel.dmesg_restrict=1
 EOF
-    sysctl --system > /dev/null
+    sysctl --system > /dev/null 2>&1 || true
 
     local root_fs=$(df -T / 2>/dev/null | awk 'NR==2 {print $2}' || echo "unknown")
     if [ "$root_fs" = "ext3" ] || [ "$root_fs" = "ext4" ]; then
@@ -1612,7 +1619,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (Человекочитаемый формат)
+# 17. Полный аудит сервера (с умным определением CPU для VPS)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1668,12 +1675,25 @@ mod_server_audit() {
         performance) cpu_gov_human="${C_BLUE}Максимальная производительность (performance)${C_RESET}" ;;
         ondemand|schedutil) cpu_gov_human="${C_BLUE}Автоматический сбалансированный ($cpu_gov)${C_RESET}" ;;
         powersave)   cpu_gov_human="${C_BLUE}Энергосберегающий (powersave)${C_RESET}" ;;
+        *)
+            if [ "$SYSTEM_TYPE" = "Cloud_VPS" ]; then
+                cpu_gov_human="${C_BLUE}Управляется гипервизором VPS${C_RESET}"
+            fi
+            ;;
     esac
 
     local cpu_freq="Неизвестно"
     if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]; then
         local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "")
         [ -n "$raw_freq" ] && cpu_freq="$(awk "BEGIN {printf \"%d МГц\", $raw_freq/1000}")"
+    elif [ -f /proc/cpuinfo ]; then
+        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null | awk '{print $4}' || echo "")
+        if [ -n "$proc_mhz" ]; then
+            cpu_freq="$(LC_ALL=C printf "%.0f МГц" "$proc_mhz")"
+        fi
+    fi
+    if [ "$cpu_freq" = "Неизвестно" ] && [ "$SYSTEM_TYPE" = "Cloud_VPS" ]; then
+        cpu_freq="Динамическая (VPS)"
     fi
     
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
@@ -1693,9 +1713,8 @@ mod_server_audit() {
         echo -e "  • Повышение прав (Sudo):     ${C_BLUE}ℹ️ Стандартный запрос пароля${C_RESET}"
     fi
 
-    local root_locked=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
-    
-    if [ "$root_locked" = "L" ] || [ "$root_locked" = "LK" ] || [ "$root_locked" = "NP" ]; then
+    local root_locked=$(passwd -S root 2>/dev/null || echo "")
+    if echo "$root_locked" | grep -qE " L | LK | NP "; then
         echo -e "  • Пароль суперпользователя:  ${C_GREEN}✅ Заблокирован (защищено)${C_RESET}"
     else
         echo -e "  • Пароль суперпользователя:  ${C_RED}❌ Активен (разрешен прямой вход root)${C_RESET}"
@@ -1914,8 +1933,11 @@ mod_server_audit() {
     fi
 
     if command -v ss &>/dev/null; then
-        local listen_ports=$(ss -tulnH 2>/dev/null | awk '{print $1 ":" $5}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
-        [ -n "$listen_ports" ] && echo -e "  • Открытые порты на сервере:  ${C_BLUE}$listen_ports${C_RESET}"
+        local listen_ports=$(ss -tulnH 2>/dev/null || echo "")
+        if [ -n "$listen_ports" ]; then
+            local parsed_ports=$(echo "$listen_ports" | awk '{print $5}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
+            [ -n "$parsed_ports" ] && echo -e "  • Открытые порты на сервере:  ${C_BLUE}$parsed_ports${C_RESET}"
+        fi
     fi
 
     echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и подкачки ---${C_RESET}"
@@ -1980,7 +2002,6 @@ mod_router_sbc() {
         return 0
     fi
 
-    # Шаг 1. Выбор LAN-интерфейса (только реальные физические интерфейсы со статусом и IP)
     local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|tun[0-9]*|utun[0-9]*|docker|veth|br-" | awk '{print $1}' | sed 's/@.*//' || echo "")
     if [ -z "$available_lan_ifs" ]; then
         whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
@@ -2006,7 +2027,6 @@ mod_router_sbc() {
         return 0
     fi
 
-    # Шаг 2. Выбор целевого выходного интерфейса (ТОЛЬКО реально существующие в системе интерфейсы со статусом и IP)
     local out_menu_items=()
     local seen_ifs=" lo $lan_if "
     local all_sys_ifs=$(ip -br link show | awk '{print $1}' | sed 's/@.*//' || echo "")
@@ -2055,7 +2075,6 @@ mod_router_sbc() {
         if [ "$MODULE_CANCELED" = true ] || [ -z "$out_if" ]; then return 0; fi
     fi
 
-    # Шаг 3. Настройка адресации LAN
     local lan_ip="192.168.199.1"
     prompt_default "3/3. Введите статический IP для этого LAN-шлюза ($lan_if):" "$lan_ip" lan_ip
     [ "$MODULE_CANCELED" = true ] && return 0
@@ -2089,13 +2108,11 @@ mod_router_sbc() {
         fi
     fi
 
-    # Автоматическое включение автозапуска службы WireGuard (wg-quick@wg0), чтобы туннель поднимался при ребуте
     if [[ "$out_if" == wg* ]] && [ -f "/etc/wireguard/${out_if}.conf" ]; then
         echo -e "${C_BLUE}🔄 Включение автозапуска туннеля WireGuard (wg-quick@${out_if}.service) при старте системы...${C_RESET}"
         silent_run systemctl enable --now "wg-quick@${out_if}.service"
     fi
 
-    # Автоматическое снятие конфликтующего Tailscale Exit Node и сломанного MagicDNS при выборе другого интерфейса (например, wg0)
     if [ "$out_if" != "tailscale0" ] && command -v tailscale &>/dev/null; then
         local active_ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
         if [ -n "$active_ts_exit" ] && [ "$active_ts_exit" != "none" ] && [ "$active_ts_exit" != "false" ]; then
@@ -2105,7 +2122,6 @@ mod_router_sbc() {
         silent_run tailscale set --accept-dns=false
     fi
 
-    # Определяем внутренний DNS туннеля без дублирования стандартных публичных серверов (1.1.1.1 / 8.8.8.8)
     local vpn_dns=""
     if [ -f "/etc/wireguard/${out_if}.conf" ]; then
         vpn_dns=$(grep -iE '^\s*DNS\s*=' "/etc/wireguard/${out_if}.conf" | head -n 1 | cut -d= -f2 | tr ',' ' ' | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || echo "")
@@ -2119,7 +2135,6 @@ mod_router_sbc() {
         fi
     fi
 
-    # 1. Предварительное освобождение порта 53 ДО установки dnsmasq
     if [ -f /etc/systemd/resolved.conf ] && systemctl is-active --quiet systemd-resolved; then
         echo -e "${C_BLUE}⚙️ Освобождение порта 53 от systemd-resolved...${C_RESET}"
         sed -i -E '/^\s*#?\s*DNSStubListener=/d' /etc/systemd/resolved.conf 2>/dev/null || true
@@ -2131,7 +2146,6 @@ mod_router_sbc() {
         systemctl restart systemd-resolved 2>/dev/null || true
     fi
 
-    # Гарантируем рабочий /etc/resolv.conf на самом хосте
     rm -f /etc/resolv.conf 2>/dev/null || true
     {
         [ -n "$vpn_dns" ] && echo "nameserver $vpn_dns"
@@ -2151,7 +2165,6 @@ mod_router_sbc() {
         echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
     fi
 
-    # 2. Очистка старых конфликтующих конфигов в /etc/systemd/network (чтобы не вылезал 192.168.50.1 после ребута)
     if [ -d /etc/systemd/network ]; then
         for net_file in $(grep -rlE "Name=${lan_if}|192\.168\.50\.1" /etc/systemd/network/ 2>/dev/null || true); do
             rm -f "$net_file" 2>/dev/null || true
@@ -2160,7 +2173,6 @@ mod_router_sbc() {
         rm -f /etc/systemd/network/*.bak 2>/dev/null || true
     fi
 
-    # Настройка статического IP на LAN-интерфейсе
     echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
     if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
         silent_run nmcli dev set "$lan_if" managed yes 2>/dev/null
@@ -2178,7 +2190,6 @@ mod_router_sbc() {
     ip -4 addr flush dev "$lan_if" 2>/dev/null || true
     ip -4 addr add "$lan_ip/24" brd + dev "$lan_if" 2>/dev/null || true
 
-    # 3. Настройка dnsmasq (с поддержкой VPN DNS + публичных апстримов без дубликатов)
     echo -e "${C_BLUE}⚙️ Настройка кэширующего сервера DHCP и DNS (dnsmasq)...${C_RESET}"
     backup_file "/etc/dnsmasq.conf"
     rm -f /etc/dnsmasq.d/* 2>/dev/null || true
@@ -2209,7 +2220,6 @@ mod_router_sbc() {
         journalctl -u dnsmasq -n 10 --no-pager || true
     fi
 
-    # Очистка старых правил роутера, если ранее выбирался другой выходной интерфейс
     if [ -f /etc/default/bobarev-router ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-router
@@ -2221,7 +2231,6 @@ mod_router_sbc() {
         fi
     fi
 
-    # Сохраняем конфигурацию роутера
     cat <<EOF > /etc/default/bobarev-router
 ROUTER_LAN_IF="$lan_if"
 ROUTER_LAN_IP="$lan_ip"
@@ -2266,14 +2275,12 @@ SYSCTL_ROUTER_EOF
     fi
     disable_ufw_strict_rpfilter
 
-    # Создаем скрипт и сервис автозапуска Policy Routing (с авто-стартом wg*, сбросом лишних IP и защитой таблицы 200)
     cat << 'ROUTER_UP_EOF' > /usr/local/bin/bobarev-router-up.sh
 #!/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 [ ! -f /etc/default/bobarev-router ] && exit 0
 source /etc/default/bobarev-router
 
-# 1. Отключаем строгий rp_filter на всех интерфейсах
 if [ -f /etc/ufw/sysctl.conf ]; then
     sed -i 's/rp_filter=1/rp_filter=0/g' /etc/ufw/sysctl.conf 2>/dev/null || true
 fi
@@ -2281,12 +2288,10 @@ for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
     [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
 done
 
-# 2. Чистим LAN-интерфейс от посторонних IP (например, 192.168.50.1) и назначаем строго $ROUTER_LAN_IP
 ip link set dev "$ROUTER_LAN_IF" up 2>/dev/null || true
 ip -4 addr flush dev "$ROUTER_LAN_IF" 2>/dev/null || true
 ip -4 addr add "$ROUTER_LAN_IP/24" brd + dev "$ROUTER_LAN_IF" 2>/dev/null || true
 
-# 3. Если выходной канал — WireGuard (wg*), убеждаемся, что он поднят после ребута (ждем до 15 сек.)
 if [[ "$ROUTER_OUT_IF" == wg* ]] && ! ip link show "$ROUTER_OUT_IF" >/dev/null 2>&1; then
     systemctl start "wg-quick@${ROUTER_OUT_IF}.service" 2>/dev/null || wg-quick up "$ROUTER_OUT_IF" 2>/dev/null || true
     for _ in {1..15}; do
@@ -2295,7 +2300,6 @@ if [[ "$ROUTER_OUT_IF" == wg* ]] && ! ip link show "$ROUTER_OUT_IF" >/dev/null 2
     done
 fi
 
-# 4. Очистка и настройка правил Policy Routing (приоритеты 5290..5310 -> таблица 200)
 for p in 90 94 95 96 100 105 5290 5300 5310; do
     ip -4 rule del prio "$p" 2>/dev/null || true
     ip -6 rule del prio "$p" 2>/dev/null || true
@@ -2306,7 +2310,6 @@ ip -6 route flush table 200 2>/dev/null || true
 WAN_DEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
 
 if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
-    # Страховочный маршрут unreachable с метрикой 9999 в таблице 200 (блокирует утечку через провайдера при падении wg0)
     if [ "${ROUTER_KILLSWITCH:-false}" = "true" ] && [ "$ROUTER_OUT_IF" != "$WAN_DEV" ]; then
         ip -4 route replace unreachable default metric 9999 table 200 2>/dev/null || true
     fi
@@ -2357,7 +2360,6 @@ fi
 ip -4 route flush cache 2>/dev/null || true
 ip -6 route flush cache 2>/dev/null || true
 
-# 5. Прозрачный перехват DNS (порт 53) на LAN-интерфейсе и правила NAT / FORWARD
 iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
 iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
 iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
@@ -2410,17 +2412,17 @@ ROUTER_SVC_EOF
 
     echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
     local ext_ip_out="Не удалось определить (проверьте связь туннеля: wg show $out_if)"
-    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo "")
+    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || echo "")
     if [ -z "$probed_ip" ]; then
-        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
+        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
     fi
     if [ -n "$probed_ip" ]; then
         ext_ip_out="$probed_ip"
     fi
 
-    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор успешно развернут и закреплен в автозагрузке!${C_RESET}"
+    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор успешно развернут и работает!${C_RESET}"
     echo -e "  • Внутренняя сеть (LAN):   ${C_BLUE}$lan_if (IP шлюза: $lan_ip, авто-подхват кабеля)${C_RESET}"
-    echo -e "  • Выходной интернет-канал: ${C_GREEN}$out_if (автозапуск при старте системы включен)${C_RESET}"
+    echo -e "  • Выходной интернет-канал: ${C_GREEN}$out_if (приоритетная маршрутизация трафика)${C_RESET}"
     echo -e "  • Внешний IP-адрес:        ${C_GREEN}$ext_ip_out${C_RESET}"
     echo -e "  • Трафик самого сервера:   ${C_BLUE}$([ "$route_host" = "true" ] && echo "Тоже защищен и идет через $out_if (утечки IPv6 заблокированы)" || echo "Идет напрямую через провайдера (мимо VPN)")${C_RESET}"
     echo -e "  • Раздача адресов (DHCP):  ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
@@ -2523,7 +2525,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.1 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

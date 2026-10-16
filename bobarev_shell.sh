@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.3.1 (Gold Master - Overselling & Fixed CPU Parser Edition)
+# Версия: 2.3.2 (Gold Master - Clean Disk Format Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1618,7 +1618,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с детектором оверселлинга CPU Steal и фиксом парсинга МГц)
+# 17. Полный аудит сервера (с чистым выводом диска и фиксом парсинга частоты)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1696,7 +1696,7 @@ mod_server_audit() {
     fi
     
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
-    local disk_usage=$(df -h / 2>/dev/null || echo "N/A")
+    local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " из " $2 " (" $5 ")"}' || echo "N/A")
 
     # Детектор оверселлинга CPU Steal через /proc/stat
     local steal_status="Неприменимо (физическое железо)"
@@ -2554,7 +2554,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.3.1 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.3.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

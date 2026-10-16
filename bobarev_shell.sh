@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.3 (Gold Master - Overselling Detector Edition)
+# Версия: 2.3.1 (Gold Master - Overselling & Fixed CPU Parser Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -787,7 +787,6 @@ SSH_HARDENING_EOF
 mod_hardening() {
     echo -e "${C_CYAN}🛡️ === 7/19. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
-    # Удаляем старые дублирующиеся строки из главного /etc/sysctl.conf
     sed -i -E '/^\s*(net\.core\.(rmem|wmem)_(max|default)|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc)\s*=/d' /etc/sysctl.conf 2>/dev/null || true
     backup_file "/etc/sysctl.d/99-zzz-server-hardening.conf"
     rm -f /etc/sysctl.d/99-server-hardening.conf 2>/dev/null || true
@@ -1619,7 +1618,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с детектором оверселлинга CPU Steal)
+# 17. Полный аудит сервера (с детектором оверселлинга CPU Steal и фиксом парсинга МГц)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1687,7 +1686,7 @@ mod_server_audit() {
         local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "")
         [ -n "$raw_freq" ] && cpu_freq="$(awk "BEGIN {printf \"%d МГц\", $raw_freq/1000}")"
     elif [ -f /proc/cpuinfo ]; then
-        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null || echo "")
+        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null | awk -F: '{print $2}' | tr -d ' ' || echo "")
         if [ -n "$proc_mhz" ]; then
             cpu_freq="$(LC_ALL=C printf "%.0f МГц" "$proc_mhz")"
         fi
@@ -1706,7 +1705,6 @@ mod_server_audit() {
         sleep 1
         local stat_line2=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
         if [ -n "$stat_line1" ] && [ -n "$stat_line2" ]; then
-            # user nice system idle iowait irq softirq steal guest guest_nice
             read -r _ u1 n1 s1 i1 io1 ir1 si1 st1 _ _ <<< "$stat_line1"
             read -r _ u2 n2 s2 i2 io2 ir2 si2 st2 _ _ <<< "$stat_line2"
             local total1=$((u1 + n1 + s1 + i1 + io1 + ir1 + si1 + st1))
@@ -2345,7 +2343,7 @@ if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
         ip -4 route replace unreachable default metric 9999 table 200 2>/dev/null || true
     fi
 
-    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
+    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null || awk '/via/ {print $3; exit}' || echo "")
     if [ -n "$OUT_GW" ]; then
         ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
     else
@@ -2556,7 +2554,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.3.1 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

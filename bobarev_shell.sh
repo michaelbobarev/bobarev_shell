@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.5.1 (Gold Master - Active Overselling Detector & /32 SNAT Reboot-Proof)
+# Версия: 2.5.2 (Gold Master - Final Clean Text Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1140,7 +1140,7 @@ mod_tailscale() {
                             local wan_dev=$(get_wan_if)
                             if [ -n "$wan_dev" ]; then
                                 iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-                                local pub_ip=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+                                local pub_ip=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null || awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
                                 [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
                                 if [ -f /etc/ufw/before.rules ]; then
                                     sed -i "/-o ${wan_dev} -j MASQUERADE/d" /etc/ufw/before.rules 2>/dev/null || true
@@ -1642,7 +1642,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с активным 4-факторным детектором оверселлинга без fio)
+# 17. Полный аудит сервера (с исправленным текстом и идеальным форматированием)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1722,7 +1722,7 @@ mod_server_audit() {
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
     local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " из " $2 " (занято " $5 ")"}' || echo "N/A")
 
-    # 1. Активный микро-стресс тест CPU (проверка реального Steal под нагрузкой и скорости ядра)
+    # 1. Активный микро-стресс тест CPU
     local steal_status="${C_BLUE}Неприменимо (физическое железо)${C_RESET}"
     local cpu_speed_status="${C_BLUE}Стандартная${C_RESET}"
     local disk_io_status="${C_BLUE}Не проверялся${C_RESET}"
@@ -1736,15 +1736,15 @@ mod_server_audit() {
 
     local cpu_bench_ms=$(LC_ALL=C awk -v t1="$t_cpu1" -v t2="$t_cpu2" 'BEGIN {d=(t2-t1)*1000; if(d<1) d=1; printf "%d", d}')
     if [ "$cpu_bench_ms" -lt 150 ]; then
-        cpu_speed_status="${C_GREEN}✅ Высокая (${cpu_bench_ms} мс — быстрое ядро без троттлинга)${C_RESET}"
+        cpu_speed_status="${C_GREEN}✅ Быстрый (${cpu_bench_ms} мс — без троттлинга)${C_RESET}"
     elif [ "$cpu_bench_ms" -lt 350 ]; then
-        cpu_speed_status="${C_GREEN}✅ Нормальная (${cpu_bench_ms} мс — стандартная скорость ядра)${C_RESET}"
+        cpu_speed_status="${C_GREEN}✅ Нормальный (${cpu_bench_ms} мс — стандартное ядро)${C_RESET}"
     else
-        cpu_speed_status="${C_YELLOW}⚠️ Снижена (${cpu_bench_ms} мс — хостер ограничивает частоту ядра!)${C_RESET}"
+        cpu_speed_status="${C_YELLOW}⚠️ Замедлен (${cpu_bench_ms} мс — хостер лимитирует ядро!)${C_RESET}"
         oversell_score=$((oversell_score + 1))
     fi
 
-    # 2. Встроенный тест задержки диска (4K Sync Latency & IOPS через dd oflag=dsync без fio)
+    # 2. Встроенный тест задержки диска (4K Sync Latency)
     local io_test_file="/root/.bobarev_io_test_$$"
     local t_io1=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
     if dd if=/dev/zero of="$io_test_file" bs=4k count=40 oflag=dsync status=none 2>/dev/null; then
@@ -1762,11 +1762,11 @@ mod_server_audit() {
         local io_lat_int=$(echo "$io_parsed" | cut -d'|' -f3)
 
         if [ "$io_lat_int" -lt 3 ]; then
-            disk_io_status="${C_GREEN}✅ Быстрый NVMe/SSD (отклик ${io_lat} мс, ~${io_iops} sync IOPS)${C_RESET}"
+            disk_io_status="${C_GREEN}✅ Быстрый NVMe/SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
         elif [ "$io_lat_int" -lt 12 ]; then
-            disk_io_status="${C_GREEN}✅ Нормальный SSD (отклик ${io_lat} мс, ~${io_iops} sync IOPS)${C_RESET}"
+            disk_io_status="${C_GREEN}✅ Нормальный SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
         else
-            disk_io_status="${C_YELLOW}⚠️ Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск перегружен соседями!)${C_RESET}"
+            disk_io_status="${C_YELLOW}⚠️ Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск занят!)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         fi
     else
@@ -1798,7 +1798,7 @@ mod_server_audit() {
         elif [ "$steal_int" -lt 5 ]; then
             steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
         elif [ "$steal_int" -lt 15 ]; then
-            steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — заметная очередь за процессором ноды)${C_RESET}"
+            steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — заметная очередь за процессором)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         else
             steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг CPU на ноде!)${C_RESET}"
@@ -1806,7 +1806,7 @@ mod_server_audit() {
         fi
     fi
 
-    # 3. Проверка очередей голодания ядра Linux PSI (/proc/pressure/cpu и /proc/pressure/io)
+    # 3. Проверка очередей голодания ядра Linux PSI
     if [ -f /proc/pressure/cpu ] && [ -f /proc/pressure/io ]; then
         local psi_cpu=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/cpu 2>/dev/null || echo "0.00")
         local psi_io=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/io 2>/dev/null || echo "0.00")
@@ -1821,11 +1821,11 @@ mod_server_audit() {
         fi
     fi
 
-    local verdict_human="${C_GREEN}🟢 Честные ресурсы (признаков оверселлинга CPU и диска не обнаружено)${C_RESET}"
+    local verdict_human="${C_GREEN}🟢 Честные ресурсы (оверселлинг не обнаружен)${C_RESET}"
     if [ "$oversell_score" -eq 1 ]; then
-        verdict_human="${C_YELLOW}🟡 Умеренный оверселлинг (ресурсы ноды делятся с активными соседями)${C_RESET}"
+        verdict_human="${C_YELLOW}🟡 Умеренный оверселлинг (ресурсы делятся с соседями)${C_RESET}"
     elif [ "$oversell_score" -ge 2 ]; then
-        verdict_human="${C_RED}🔴 Жесткий оверселлинг! (хостер сильно урезает процессор или диск)${C_RESET}"
+        verdict_human="${C_RED}🔴 Жесткий оверселлинг! (хостер урезает железо)${C_RESET}"
     fi
 
     echo -e "  • Температура процессора:    $cpu_temp"
@@ -2448,7 +2448,7 @@ if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
         ip -4 route replace unreachable default metric 9999 table 200 2>/dev/null || true
     fi
 
-    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
+    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null || awk '/via/ {print $3; exit}' || echo "")
     if [ -n "$OUT_GW" ]; then
         ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
     else
@@ -2546,9 +2546,9 @@ ROUTER_SVC_EOF
 
     echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
     local ext_ip_out="Не удалось определить (проверьте связь туннеля: wg show $out_if)"
-    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo "")
+    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || echo "")
     if [ -z "$probed_ip" ]; then
-        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
+        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
     fi
     if [ -n "$probed_ip" ]; then
         ext_ip_out="$probed_ip"
@@ -2659,7 +2659,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.5.1 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.5.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

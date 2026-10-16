@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.2 (Gold Master - Ultimate Edition)
+# Версия: 2.3 (Gold Master - Overselling Detector Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1619,7 +1619,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с умным определением CPU для VPS)
+# 17. Полный аудит сервера (с детектором оверселлинга CPU Steal)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1687,7 +1687,7 @@ mod_server_audit() {
         local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "")
         [ -n "$raw_freq" ] && cpu_freq="$(awk "BEGIN {printf \"%d МГц\", $raw_freq/1000}")"
     elif [ -f /proc/cpuinfo ]; then
-        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null | awk '{print $4}' || echo "")
+        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null || echo "")
         if [ -n "$proc_mhz" ]; then
             cpu_freq="$(LC_ALL=C printf "%.0f МГц" "$proc_mhz")"
         fi
@@ -1697,13 +1697,44 @@ mod_server_audit() {
     fi
     
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
-    local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " из " $2 " (" $5 ")"}' || echo "N/A")
+    local disk_usage=$(df -h / 2>/dev/null || echo "N/A")
+
+    # Детектор оверселлинга CPU Steal через /proc/stat
+    local steal_status="Неприменимо (физическое железо)"
+    if [ -f /proc/stat ]; then
+        local stat_line1=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
+        sleep 1
+        local stat_line2=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
+        if [ -n "$stat_line1" ] && [ -n "$stat_line2" ]; then
+            # user nice system idle iowait irq softirq steal guest guest_nice
+            read -r _ u1 n1 s1 i1 io1 ir1 si1 st1 _ _ <<< "$stat_line1"
+            read -r _ u2 n2 s2 i2 io2 ir2 si2 st2 _ _ <<< "$stat_line2"
+            local total1=$((u1 + n1 + s1 + i1 + io1 + ir1 + si1 + st1))
+            local total2=$((u2 + n2 + s2 + i2 + io2 + ir2 + si2 + st2))
+            local total_diff=$((total2 - total1))
+            local steal_diff=$((st2 - st1))
+            if [ "$total_diff" -gt 0 ]; then
+                local steal_pct=$(awk "BEGIN {printf \"%.1f\", ($steal_diff * 100) / $total_diff}")
+                local steal_int=$(awk "BEGIN {printf \"%d\", $steal_pct}")
+                if [ "$steal_int" -eq 0 ]; then
+                    steal_status="${C_GREEN}✅ Отсутствует (0.0% — ресурсы ноды выделяются честно)${C_RESET}"
+                elif [ "$steal_int" -lt 5 ]; then
+                    steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — небольшое фоновое эхо соседей)${C_RESET}"
+                elif [ "$steal_int" -lt 15 ]; then
+                    steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — легкий оверселлинг, в часы пик возможны микрофризы)${C_RESET}"
+                else
+                    steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг! Ядра простаивают в очереди ноды)${C_RESET}"
+                fi
+            fi
+        fi
+    fi
 
     echo -e "  • Температура процессора:    $cpu_temp"
     echo -e "  • Режим питания процессора:  $cpu_gov_human"
     echo -e "  • Текущая частота ядер:      ${C_BLUE}$cpu_freq${C_RESET}"
     echo -e "  • Вычислительная нагрузка:   ${C_BLUE}$load_avg${C_RESET}"
     echo -e "  • Занято места на диске:     ${C_BLUE}$disk_usage${C_RESET}"
+    echo -e "  • Оверселлинг CPU (Steal):   $steal_status"
 
     echo -e "\n${C_BOLD}--- 3. Учетные записи, пользователи и Sudo ---${C_RESET}"
     echo -e "  • Основной администратор:    ${C_GREEN}$active_user${C_RESET}"
@@ -2248,7 +2279,7 @@ EOF
         silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
         silent_run ufw allow in on "$lan_if" to any port 53 comment 'LAN DNS (UDP/TCP)'
         if [ -n "$wan_if" ]; then
-            silent_run ufw route delete deny in on "$lan_if" out on "$wan_if"
+            silent_run ufw route deny in on "$lan_if" out on "$wan_if" comment 'Kill Switch Temp'
         fi
         silent_run ufw route allow in on "$lan_if" out on "$out_if" comment "LAN to $out_if"
         silent_run ufw route allow in on "$out_if" out on "$lan_if" comment "$out_if to LAN"

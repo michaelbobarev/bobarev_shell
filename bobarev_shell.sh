@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.3.2 (Gold Master - Clean Disk Format Edition)
+# Версия: 2.4 (Gold Master - Universal Exit Node & /32 SNAT Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -381,7 +381,6 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Автоматическая установка whiptail на минимальных системах
 if ! command -v whiptail &>/dev/null; then
     echo -e "${C_BLUE}📦 Интерфейс whiptail не обнаружен. Автоматическая установка...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
@@ -1019,7 +1018,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale
+# 10. Tailscale (с поддержкой Universal Exit Node и /32 SNAT Fix)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1080,49 +1079,60 @@ mod_tailscale() {
             2)
                 local en_choice
                 if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 \
-                "1" "Назначить этот сервер шлюзом" \
+                "1" "Назначить этот сервер шлюзом (Exit Node)" \
                 "2" "Отключить трансляцию шлюза" \
                 "3" "Подключиться к удаленному шлюзу" \
                 "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
                         1) 
-                            silent_run tailscale set --advertise-exit-node=true
+                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве Exit Node (с отключенным netfilter и авто-SNAT)...${C_RESET}"
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+                            
+                            # Запускаем tailscale с отключенным встроенным управлением iptables, чтобы не ломать маскарадинг
+                            silent_run tailscale up --advertise-exit-node --netfilter-mode=off --reset
 
                             local wan_dev=$(get_wan_if)
+                            if [ -n "$wan_dev" ]; then
+                                # Проверяем, есть ли на интерфейсе маска /32 (распространенная проблема VPS с SNAT)
+                                local iface_ip_info=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null || echo "")
+                                local pub_ip=$(echo "$iface_ip_info" | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+                                local is_mask_32=$(echo "$iface_ip_info" | grep -qw "/32" && echo "yes" || echo "no")
 
-                            if command -v ufw &>/dev/null; then
-                                silent_run ufw default allow routed
-                                silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
-                                
-                                if [ -n "$wan_dev" ]; then
-                                    silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'TS Exit Node Out'
-                                    silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'TS Exit Node In'
-                                    ensure_ufw_nat_rule "-A POSTROUTING -s 100.64.0.0/10 -o $wan_dev -j MASQUERADE"
+                                # Настраиваем форвардинг и правила трансляции
+                                iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
+                                iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+
+                                iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+                                if [ "$is_mask_32" = "yes" ] && [ -n "$pub_ip" ]; then
+                                    iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
+                                    iptables -t nat -A POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip"
+                                    echo -e "${C_BLUE}ℹ️ Обнаружена маска /32 на интерфейсе $wan_dev: применена жесткая привязка SNAT ($pub_ip).${C_RESET}"
+                                else
+                                    iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
+                                    echo -e "${C_BLUE}ℹ️ Применено стандартное правило маскарадинга (MASQUERADE) для $wan_dev.${C_RESET}"
+                                fi
+
+                                if command -v ufw &>/dev/null; then
+                                    silent_run ufw default allow routed
+                                    silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+                                    silent_run ufw route allow in on tailscale0 out on "$wan_dev"
+                                    silent_run ufw route allow in on "$wan_dev" out on tailscale0
                                     silent_run ufw reload
                                 fi
                             fi
 
-                            if [ -n "$wan_dev" ]; then
-                                iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-                                iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-                            fi
-
-                            echo -e "${C_GREEN}✅ Сервер объявлен сетевым шлюзом, NAT и сквозная маршрутизация включены.${C_RESET}"
+                            echo -e "${C_GREEN}✅ Сервер успешно настроен как Exit Node!${C_RESET}"
                             
-                            whiptail --title "⚠️ ВАЖНО: Подтверждение Exit Node" --msgbox \
-"Сервер объявлен шлюзом, правила UFW и системный NAT успешно настроены!\n\nЧтобы интернет заработал на ваших устройствах:\n1. Откройте панель: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Совет по DNS: Если после подключения сайты не открываются,\nв панели Tailscale (вкладка DNS) включите 'Override local DNS'\nи добавьте публичный резолвер (например, 1.1.1.1)." 16 $WT_WIDTH
+                            whiptail --title "⚠️ ВАЖНО: Активация в панели Tailscale" --msgbox \
+"Сервер объявлен шлюзом, форвардинг и правила NAT настроены автоматически!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
                             ;;
                         2) 
                             silent_run tailscale set --advertise-exit-node=false
                             local wan_dev=$(get_wan_if)
-                            
                             if [ -n "$wan_dev" ]; then
-                                iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-                            fi
-                            if [ -f /etc/ufw/before.rules ]; then
-                                sed -i '/100\.64\.0\.0\/10.*MASQUERADE/d' /etc/ufw/before.rules
-                                silent_run ufw reload
+                                iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+                                local pub_ip=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+                                [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
                             fi
                             echo -e "${C_GREEN}✅ Функция Exit Node и правила NAT отключены.${C_RESET}" 
                             ;;
@@ -1618,7 +1628,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с чистым выводом диска и фиксом парсинга частоты)
+# 17. Полный аудит сервера
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1696,9 +1706,8 @@ mod_server_audit() {
     fi
     
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
-    local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " из " $2 " (" $5 ")"}' || echo "N/A")
+    local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " из " $2 " (занято " $5 ")"}' || echo "N/A")
 
-    # Детектор оверселлинга CPU Steal через /proc/stat
     local steal_status="Неприменимо (физическое железо)"
     if [ -f /proc/stat ]; then
         local stat_line1=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
@@ -2019,13 +2028,13 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Универсальный режим локального маршрутизатора (Policy Routing + NAT + DNS Redirect + Reboot Proof)
+# 18. Универсальный режим локального маршрутизатора
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/19. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     local wan_if="$DEFAULT_WAN_IF"
     
-    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний LAN-интерфейс для клиентов (или Google Wifi) и целевой внешний канал (WireGuard, Tailscale, TUN-прокси или прямой WAN), а также решить, направлять ли трафик самого сервера в этот же канал." 13 $WT_WIDTH; then
+    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний LAN-интерфейс для клиентов и целевой внешний канал (WireGuard, Tailscale, TUN-прокси или прямой WAN), а также решить, направлять ли трафик самого сервера в этот же канал." 13 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         MODULE_CANCELED=true
         return 0
@@ -2050,7 +2059,7 @@ mod_router_sbc() {
     done
 
     local lan_if=""
-    if ! lan_if=$(whiptail --title "1/3. Внутренний LAN-интерфейс" --menu "Выберите сетевой порт, к которому подключены ваши клиенты (или свитч/роутер):" 14 $WT_WIDTH 5 "${lan_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
+    if ! lan_if=$(whiptail --title "1/3. Внутренний LAN-интерфейс" --menu "Выберите сетевой порт, к которому подключены ваши клиенты:" 14 $WT_WIDTH 5 "${lan_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
@@ -2158,7 +2167,7 @@ mod_router_sbc() {
     if [ "$vpn_dns" = "8.8.8.8" ] || [ "$vpn_dns" = "8.8.4.4" ] || [ "$vpn_dns" = "1.1.1.1" ] || [ "$vpn_dns" = "1.0.0.1" ]; then
         vpn_dns=""
     elif [ -z "$vpn_dns" ]; then
-        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null || awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
         if [[ "$out_ip4" == 10.64.* ]]; then
             vpn_dns="10.64.0.1"
         fi
@@ -2554,7 +2563,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.3.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.4 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

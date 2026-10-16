@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.5 (Gold Master - Active Overselling Detector & /32 SNAT Reboot-Proof)
+# Версия: 2.5.1 (Gold Master - Active Overselling Detector & /32 SNAT Reboot-Proof)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -955,7 +955,6 @@ mod_ufw() {
         ensure_ufw_mangle_tcpmss
     fi
 
-    # Сохраняем системный NAT / SNAT (/32) для Exit Node, если узел раздает интернет
     if [ "$(tailscale get advertise-exit-node 2>/dev/null || echo 'false')" = "true" ] && [ -n "$netdev" ]; then
         apply_wan_exit_nat "$netdev"
     fi
@@ -1734,7 +1733,6 @@ mod_server_audit() {
     local t_cpu1=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
     LC_ALL=C awk 'BEGIN {for(i=0;i<2000000;i++){x=i*1.5}}' >/dev/null 2>&1 || true
     local t_cpu2=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
-    local stat_line2=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
 
     local cpu_bench_ms=$(LC_ALL=C awk -v t1="$t_cpu1" -v t2="$t_cpu2" 'BEGIN {d=(t2-t1)*1000; if(d<1) d=1; printf "%d", d}')
     if [ "$cpu_bench_ms" -lt 150 ]; then
@@ -1744,36 +1742,6 @@ mod_server_audit() {
     else
         cpu_speed_status="${C_YELLOW}⚠️ Снижена (${cpu_bench_ms} мс — хостер ограничивает частоту ядра!)${C_RESET}"
         oversell_score=$((oversell_score + 1))
-    fi
-
-    if [ -n "$stat_line1" ] && [ -n "$stat_line2" ]; then
-        local parsed_stat=$(LC_ALL=C awk -v s1="$stat_line1" -v s2="$stat_line2" 'BEGIN {
-            split(s1, a, " "); split(s2, b, " ");
-            t1 = a[2]+a[3]+a[4]+a[5]+a[6]+a[7]+a[8]+a[9];
-            t2 = b[2]+b[3]+b[4]+b[5]+b[6]+b[7]+b[8]+b[9];
-            td = t2 - t1;
-            if (td > 0) {
-                st = ((b[9] - a[9]) * 100) / td;
-                if (st < 0) st = 0;
-                printf "%.1f|%d", st, int(st);
-            } else {
-                print "0.0|0";
-            }
-        }')
-        local steal_pct="${parsed_stat%|*}"
-        local steal_int="${parsed_stat#*|}"
-
-        if [ "$steal_int" -eq 0 ]; then
-            steal_status="${C_GREEN}✅ 0.0% под нагрузкой (хостер честно отдает ядро)${C_RESET}"
-        elif [ "$steal_int" -lt 5 ]; then
-            steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
-        elif [ "$steal_int" -lt 15 ]; then
-            steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — заметная очередь за процессором ноды)${C_RESET}"
-            oversell_score=$((oversell_score + 1))
-        else
-            steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг CPU на ноде!)${C_RESET}"
-            oversell_score=$((oversell_score + 2))
-        fi
     fi
 
     # 2. Встроенный тест задержки диска (4K Sync Latency & IOPS через dd oflag=dsync без fio)
@@ -1805,12 +1773,47 @@ mod_server_audit() {
         rm -f "$io_test_file" 2>/dev/null || true
     fi
 
+    sleep 0.3
+    local stat_line2=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
+
+    if [ -n "$stat_line1" ] && [ -n "$stat_line2" ]; then
+        local parsed_stat=$(LC_ALL=C awk -v s1="$stat_line1" -v s2="$stat_line2" 'BEGIN {
+            split(s1, a, " "); split(s2, b, " ");
+            t1 = a[2]+a[3]+a[4]+a[5]+a[6]+a[7]+a[8]+a[9];
+            t2 = b[2]+b[3]+b[4]+b[5]+b[6]+b[7]+b[8]+b[9];
+            td = t2 - t1;
+            if (td > 0) {
+                st = ((b[9] - a[9]) * 100) / td;
+                if (st < 0) st = 0;
+                printf "%.1f|%d", st, int(st);
+            } else {
+                print "0.0|0";
+            }
+        }')
+        local steal_pct="${parsed_stat%|*}"
+        local steal_int="${parsed_stat#*|}"
+
+        if [ "$steal_int" -eq 0 ]; then
+            steal_status="${C_GREEN}✅ 0.0% под нагрузкой (хостер честно отдает ядро)${C_RESET}"
+        elif [ "$steal_int" -lt 5 ]; then
+            steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
+        elif [ "$steal_int" -lt 15 ]; then
+            steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — заметная очередь за процессором ноды)${C_RESET}"
+            oversell_score=$((oversell_score + 1))
+        else
+            steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг CPU на ноде!)${C_RESET}"
+            oversell_score=$((oversell_score + 2))
+        fi
+    fi
+
     # 3. Проверка очередей голодания ядра Linux PSI (/proc/pressure/cpu и /proc/pressure/io)
     if [ -f /proc/pressure/cpu ] && [ -f /proc/pressure/io ]; then
         local psi_cpu=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/cpu 2>/dev/null || echo "0.00")
         local psi_io=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/io 2>/dev/null || echo "0.00")
-        local psi_ bad_flag=$(LC_ALL=C awk -v c="$psi_cpu" -v d="$psi_io" 'BEGIN {if (c>5.0 || d>10.0) print 1; else print 0}')
-        if [ "$psi_bad_flag" -eq 1 ]; then
+        psi_cpu="${psi_cpu:-0.00}"
+        psi_io="${psi_io:-0.00}"
+        local psi_bad_flag=$(LC_ALL=C awk -v c="$psi_cpu" -v d="$psi_io" 'BEGIN {if (c+0 > 5.0 || d+0 > 10.0) print 1; else print 0}')
+        if [ "${psi_bad_flag:-0}" -eq 1 ]; then
             psi_status="${C_YELLOW}⚠️ Замечены простои в очереди (CPU: ${psi_cpu}%, Диск: ${psi_io}%)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         else
@@ -2656,7 +2659,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.5 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.5.1 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

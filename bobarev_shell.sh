@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.4 (Gold Master - Universal Exit Node & /32 SNAT Fix)
+# Версия: 2.5 (Gold Master - Active Overselling Detector & /32 SNAT Reboot-Proof)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -125,7 +125,7 @@ get_iface_status_tag() {
 }
 
 # ------------------------------------------------------------------------------
-# ИДЕМПОТЕНТНЫЕ ХЕЛПЕРЫ ДЛЯ UFW (NAT, MANGLE, DOCKER, RP_FILTER)
+# ИДЕМПОТЕНТНЫЕ ХЕЛПЕРЫ ДЛЯ UFW (NAT, SNAT /32, MANGLE, DOCKER, RP_FILTER)
 # ------------------------------------------------------------------------------
 disable_ufw_strict_rpfilter() {
     if [ -f /etc/ufw/sysctl.conf ]; then
@@ -160,6 +160,38 @@ ensure_ufw_nat_rule() {
     fi
     if ! grep -qF -- "$rule" /etc/ufw/before.rules; then
         sed -i "/^:POSTROUTING/a $rule" /etc/ufw/before.rules
+    fi
+}
+
+apply_wan_exit_nat() {
+    local wan_dev="$1"
+    [ -z "$wan_dev" ] && return 0
+
+    local iface_ip_info=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null || echo "")
+    local pub_ip=$(echo "$iface_ip_info" | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+    local is_mask_32=$(echo "$iface_ip_info" | grep -qw "/32" && echo "yes" || echo "no")
+
+    iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
+    iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+
+    iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+    [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
+    [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
+
+    if [ -f /etc/ufw/before.rules ]; then
+        sed -i "/-o ${wan_dev} -j MASQUERADE/d" /etc/ufw/before.rules 2>/dev/null || true
+        sed -i "/-o ${wan_dev} -j SNAT/d" /etc/ufw/before.rules 2>/dev/null || true
+    fi
+
+    if [ "$is_mask_32" = "yes" ] && [ -n "$pub_ip" ]; then
+        iptables -t nat -A POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip"
+        ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j SNAT --to-source $pub_ip"
+        echo -e "${C_BLUE}ℹ️ Обнаружена маска /32 на интерфейсе $wan_dev: закреплена постоянная привязка SNAT ($pub_ip).${C_RESET}"
+    else
+        iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
+        ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j MASQUERADE"
+        echo -e "${C_BLUE}ℹ️ Закреплено правило маскарадинга (MASQUERADE) для $wan_dev.${C_RESET}"
     fi
 }
 
@@ -910,7 +942,6 @@ mod_ufw() {
         do_restrict=true
     fi
 
-    # Базовые правила доверия Tailscale и P2P (применяются всегда)
     silent_run ufw allow in on tailscale0 comment 'Allow inside Tailscale'
     silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
 
@@ -920,19 +951,15 @@ mod_ufw() {
         silent_run ufw route allow in on "$netdev" out on tailscale0
     fi
 
-    # Восстановление MSS Clamping, если установлен Tailscale или сервис GRO
     if command -v tailscale &>/dev/null || [ -f /etc/systemd/system/tailscale-gro.service ]; then
         ensure_ufw_mangle_tcpmss
     fi
 
-    # Сохраняем системный NAT для Exit Node, если узел уже раздает интернет
+    # Сохраняем системный NAT / SNAT (/32) для Exit Node, если узел раздает интернет
     if [ "$(tailscale get advertise-exit-node 2>/dev/null || echo 'false')" = "true" ] && [ -n "$netdev" ]; then
-        ensure_ufw_nat_rule "-A POSTROUTING -s 100.64.0.0/10 -o $netdev -j MASQUERADE"
-        iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$netdev" -j MASQUERADE 2>/dev/null || true
-        iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o "$netdev" -j MASQUERADE 2>/dev/null || true
+        apply_wan_exit_nat "$netdev"
     fi
 
-    # Автоматическое сохранение правил универсального роутера (Модуль 18), если он был настроен
     if [ -f /etc/default/bobarev-router ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-router
@@ -952,7 +979,6 @@ mod_ufw() {
         fi
     fi
 
-    # Защита Docker за UFW (ufw-docker)
     if [ -n "$netdev" ]; then
         if prompt_yn "Включить защиту контейнеров Docker за UFW (запретить Docker обходить фаервол снаружи, оставив доступ через Tailscale и WG)?" "true"; then
             apply_ufw_docker_protection "$netdev"
@@ -960,7 +986,6 @@ mod_ufw() {
         fi
     fi
 
-    # Разделение логики доступа к порту SSH с защитой от блокировки
     if [ "$do_restrict" = true ]; then
         if ensure_tailscale_installed && is_tailscale_authenticated; then
             silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
@@ -1018,7 +1043,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (с поддержкой Universal Exit Node и /32 SNAT Fix)
+# 10. Tailscale (с поддержкой Universal Exit Node и постоянным /32 SNAT Fix)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1085,46 +1110,31 @@ mod_tailscale() {
                 "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
                         1) 
-                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве Exit Node (с отключенным netfilter и авто-SNAT)...${C_RESET}"
+                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве Exit Node (с отключенным netfilter и авто-преобразованием SNAT)...${C_RESET}"
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+                            disable_ufw_strict_rpfilter
                             
-                            # Запускаем tailscale с отключенным встроенным управлением iptables, чтобы не ломать маскарадинг
                             silent_run tailscale up --advertise-exit-node --netfilter-mode=off --reset
 
                             local wan_dev=$(get_wan_if)
                             if [ -n "$wan_dev" ]; then
-                                # Проверяем, есть ли на интерфейсе маска /32 (распространенная проблема VPS с SNAT)
-                                local iface_ip_info=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null || echo "")
-                                local pub_ip=$(echo "$iface_ip_info" | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
-                                local is_mask_32=$(echo "$iface_ip_info" | grep -qw "/32" && echo "yes" || echo "no")
-
-                                # Настраиваем форвардинг и правила трансляции
-                                iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
-                                iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-
-                                iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-                                if [ "$is_mask_32" = "yes" ] && [ -n "$pub_ip" ]; then
-                                    iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
-                                    iptables -t nat -A POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip"
-                                    echo -e "${C_BLUE}ℹ️ Обнаружена маска /32 на интерфейсе $wan_dev: применена жесткая привязка SNAT ($pub_ip).${C_RESET}"
-                                else
-                                    iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
-                                    echo -e "${C_BLUE}ℹ️ Применено стандартное правило маскарадинга (MASQUERADE) для $wan_dev.${C_RESET}"
-                                fi
+                                apply_wan_exit_nat "$wan_dev"
+                                ensure_ufw_mangle_tcpmss
 
                                 if command -v ufw &>/dev/null; then
                                     silent_run ufw default allow routed
                                     silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
-                                    silent_run ufw route allow in on tailscale0 out on "$wan_dev"
-                                    silent_run ufw route allow in on "$wan_dev" out on tailscale0
+                                    silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'TS Exit Node Out'
+                                    silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'TS Exit Node In'
                                     silent_run ufw reload
                                 fi
                             fi
+                            disable_ufw_strict_rpfilter
 
-                            echo -e "${C_GREEN}✅ Сервер успешно настроен как Exit Node!${C_RESET}"
+                            echo -e "${C_GREEN}✅ Сервер успешно настроен как Exit Node (правила защищены от перезагрузки)!${C_RESET}"
                             
                             whiptail --title "⚠️ ВАЖНО: Активация в панели Tailscale" --msgbox \
-"Сервер объявлен шлюзом, форвардинг и правила NAT настроены автоматически!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
+"Сервер объявлен шлюзом, форвардинг и правила NAT/SNAT закреплены!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
                             ;;
                         2) 
                             silent_run tailscale set --advertise-exit-node=false
@@ -1133,6 +1143,11 @@ mod_tailscale() {
                                 iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
                                 local pub_ip=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
                                 [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
+                                if [ -f /etc/ufw/before.rules ]; then
+                                    sed -i "/-o ${wan_dev} -j MASQUERADE/d" /etc/ufw/before.rules 2>/dev/null || true
+                                    sed -i "/-o ${wan_dev} -j SNAT/d" /etc/ufw/before.rules 2>/dev/null || true
+                                    silent_run ufw reload
+                                fi
                             fi
                             echo -e "${C_GREEN}✅ Функция Exit Node и правила NAT отключены.${C_RESET}" 
                             ;;
@@ -1628,7 +1643,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера
+# 17. Полный аудит сервера (с активным 4-факторным детектором оверселлинга без fio)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1661,12 +1676,12 @@ mod_server_audit() {
         echo -e "  • Фоновые обновления:        ${C_RED}❌ Отключены${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 2. Аппаратная часть (Процессор, Диск и Температура) ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 2. Аппаратная часть и Детектор оверселлинга ---${C_RESET}"
     local cpu_temp="Нет датчика"
     if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
         local raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "")
         if [ -n "$raw_temp" ] && [ "$raw_temp" -gt 0 ]; then
-            cpu_temp=$(awk "BEGIN {printf \"%.1f°C\", $raw_temp/1000}")
+            cpu_temp=$(LC_ALL=C awk "BEGIN {printf \"%.1f°C\", $raw_temp/1000}")
             if [ "$raw_temp" -gt 75000 ]; then
                 cpu_temp="${C_RED}🔥 $cpu_temp (Критический перегрев / Снижение частот!)${C_RESET}"
             elif [ "$raw_temp" -gt 60000 ]; then
@@ -1694,7 +1709,7 @@ mod_server_audit() {
     local cpu_freq="Неизвестно"
     if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]; then
         local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "")
-        [ -n "$raw_freq" ] && cpu_freq="$(awk "BEGIN {printf \"%d МГц\", $raw_freq/1000}")"
+        [ -n "$raw_freq" ] && cpu_freq="$(LC_ALL=C awk "BEGIN {printf \"%d МГц\", $raw_freq/1000}")"
     elif [ -f /proc/cpuinfo ]; then
         local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null | awk -F: '{print $2}' | tr -d ' ' || echo "")
         if [ -n "$proc_mhz" ]; then
@@ -1708,32 +1723,106 @@ mod_server_audit() {
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
     local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " из " $2 " (занято " $5 ")"}' || echo "N/A")
 
-    local steal_status="Неприменимо (физическое железо)"
-    if [ -f /proc/stat ]; then
-        local stat_line1=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
-        sleep 1
-        local stat_line2=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
-        if [ -n "$stat_line1" ] && [ -n "$stat_line2" ]; then
-            read -r _ u1 n1 s1 i1 io1 ir1 si1 st1 _ _ <<< "$stat_line1"
-            read -r _ u2 n2 s2 i2 io2 ir2 si2 st2 _ _ <<< "$stat_line2"
-            local total1=$((u1 + n1 + s1 + i1 + io1 + ir1 + si1 + st1))
-            local total2=$((u2 + n2 + s2 + i2 + io2 + ir2 + si2 + st2))
-            local total_diff=$((total2 - total1))
-            local steal_diff=$((st2 - st1))
-            if [ "$total_diff" -gt 0 ]; then
-                local steal_pct=$(awk "BEGIN {printf \"%.1f\", ($steal_diff * 100) / $total_diff}")
-                local steal_int=$(awk "BEGIN {printf \"%d\", $steal_pct}")
-                if [ "$steal_int" -eq 0 ]; then
-                    steal_status="${C_GREEN}✅ Отсутствует (0.0% — ресурсы ноды выделяются честно)${C_RESET}"
-                elif [ "$steal_int" -lt 5 ]; then
-                    steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — небольшое фоновое эхо соседей)${C_RESET}"
-                elif [ "$steal_int" -lt 15 ]; then
-                    steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — легкий оверселлинг, в часы пик возможны микрофризы)${C_RESET}"
-                else
-                    steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг! Ядра простаивают в очереди ноды)${C_RESET}"
-                fi
-            fi
+    # 1. Активный микро-стресс тест CPU (проверка реального Steal под нагрузкой и скорости ядра)
+    local steal_status="${C_BLUE}Неприменимо (физическое железо)${C_RESET}"
+    local cpu_speed_status="${C_BLUE}Стандартная${C_RESET}"
+    local disk_io_status="${C_BLUE}Не проверялся${C_RESET}"
+    local psi_status="${C_GREEN}✅ 0.0% (очередей ожидания нет)${C_RESET}"
+    local oversell_score=0
+
+    local stat_line1=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
+    local t_cpu1=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
+    LC_ALL=C awk 'BEGIN {for(i=0;i<2000000;i++){x=i*1.5}}' >/dev/null 2>&1 || true
+    local t_cpu2=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
+    local stat_line2=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
+
+    local cpu_bench_ms=$(LC_ALL=C awk -v t1="$t_cpu1" -v t2="$t_cpu2" 'BEGIN {d=(t2-t1)*1000; if(d<1) d=1; printf "%d", d}')
+    if [ "$cpu_bench_ms" -lt 150 ]; then
+        cpu_speed_status="${C_GREEN}✅ Высокая (${cpu_bench_ms} мс — быстрое ядро без троттлинга)${C_RESET}"
+    elif [ "$cpu_bench_ms" -lt 350 ]; then
+        cpu_speed_status="${C_GREEN}✅ Нормальная (${cpu_bench_ms} мс — стандартная скорость ядра)${C_RESET}"
+    else
+        cpu_speed_status="${C_YELLOW}⚠️ Снижена (${cpu_bench_ms} мс — хостер ограничивает частоту ядра!)${C_RESET}"
+        oversell_score=$((oversell_score + 1))
+    fi
+
+    if [ -n "$stat_line1" ] && [ -n "$stat_line2" ]; then
+        local parsed_stat=$(LC_ALL=C awk -v s1="$stat_line1" -v s2="$stat_line2" 'BEGIN {
+            split(s1, a, " "); split(s2, b, " ");
+            t1 = a[2]+a[3]+a[4]+a[5]+a[6]+a[7]+a[8]+a[9];
+            t2 = b[2]+b[3]+b[4]+b[5]+b[6]+b[7]+b[8]+b[9];
+            td = t2 - t1;
+            if (td > 0) {
+                st = ((b[9] - a[9]) * 100) / td;
+                if (st < 0) st = 0;
+                printf "%.1f|%d", st, int(st);
+            } else {
+                print "0.0|0";
+            }
+        }')
+        local steal_pct="${parsed_stat%|*}"
+        local steal_int="${parsed_stat#*|}"
+
+        if [ "$steal_int" -eq 0 ]; then
+            steal_status="${C_GREEN}✅ 0.0% под нагрузкой (хостер честно отдает ядро)${C_RESET}"
+        elif [ "$steal_int" -lt 5 ]; then
+            steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
+        elif [ "$steal_int" -lt 15 ]; then
+            steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — заметная очередь за процессором ноды)${C_RESET}"
+            oversell_score=$((oversell_score + 1))
+        else
+            steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг CPU на ноде!)${C_RESET}"
+            oversell_score=$((oversell_score + 2))
         fi
+    fi
+
+    # 2. Встроенный тест задержки диска (4K Sync Latency & IOPS через dd oflag=dsync без fio)
+    local io_test_file="/root/.bobarev_io_test_$$"
+    local t_io1=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
+    if dd if=/dev/zero of="$io_test_file" bs=4k count=40 oflag=dsync status=none 2>/dev/null; then
+        local t_io2=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
+        rm -f "$io_test_file" 2>/dev/null || true
+        local io_parsed=$(LC_ALL=C awk -v t1="$t_io1" -v t2="$t_io2" 'BEGIN {
+            el = t2 - t1;
+            if (el <= 0.0001) el = 0.001;
+            lat = (el * 1000) / 40;
+            iops = int(40 / el);
+            printf "%.2f|%d|%d", lat, iops, int(lat);
+        }')
+        local io_lat=$(echo "$io_parsed" | cut -d'|' -f1)
+        local io_iops=$(echo "$io_parsed" | cut -d'|' -f2)
+        local io_lat_int=$(echo "$io_parsed" | cut -d'|' -f3)
+
+        if [ "$io_lat_int" -lt 3 ]; then
+            disk_io_status="${C_GREEN}✅ Быстрый NVMe/SSD (отклик ${io_lat} мс, ~${io_iops} sync IOPS)${C_RESET}"
+        elif [ "$io_lat_int" -lt 12 ]; then
+            disk_io_status="${C_GREEN}✅ Нормальный SSD (отклик ${io_lat} мс, ~${io_iops} sync IOPS)${C_RESET}"
+        else
+            disk_io_status="${C_YELLOW}⚠️ Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск перегружен соседями!)${C_RESET}"
+            oversell_score=$((oversell_score + 1))
+        fi
+    else
+        rm -f "$io_test_file" 2>/dev/null || true
+    fi
+
+    # 3. Проверка очередей голодания ядра Linux PSI (/proc/pressure/cpu и /proc/pressure/io)
+    if [ -f /proc/pressure/cpu ] && [ -f /proc/pressure/io ]; then
+        local psi_cpu=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/cpu 2>/dev/null || echo "0.00")
+        local psi_io=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/io 2>/dev/null || echo "0.00")
+        local psi_ bad_flag=$(LC_ALL=C awk -v c="$psi_cpu" -v d="$psi_io" 'BEGIN {if (c>5.0 || d>10.0) print 1; else print 0}')
+        if [ "$psi_bad_flag" -eq 1 ]; then
+            psi_status="${C_YELLOW}⚠️ Замечены простои в очереди (CPU: ${psi_cpu}%, Диск: ${psi_io}%)${C_RESET}"
+            oversell_score=$((oversell_score + 1))
+        else
+            psi_status="${C_GREEN}✅ В норме (CPU: ${psi_cpu}%, Диск: ${psi_io}% за минуту)${C_RESET}"
+        fi
+    fi
+
+    local verdict_human="${C_GREEN}🟢 Честные ресурсы (признаков оверселлинга CPU и диска не обнаружено)${C_RESET}"
+    if [ "$oversell_score" -eq 1 ]; then
+        verdict_human="${C_YELLOW}🟡 Умеренный оверселлинг (ресурсы ноды делятся с активными соседями)${C_RESET}"
+    elif [ "$oversell_score" -ge 2 ]; then
+        verdict_human="${C_RED}🔴 Жесткий оверселлинг! (хостер сильно урезает процессор или диск)${C_RESET}"
     fi
 
     echo -e "  • Температура процессора:    $cpu_temp"
@@ -1741,7 +1830,11 @@ mod_server_audit() {
     echo -e "  • Текущая частота ядер:      ${C_BLUE}$cpu_freq${C_RESET}"
     echo -e "  • Вычислительная нагрузка:   ${C_BLUE}$load_avg${C_RESET}"
     echo -e "  • Занято места на диске:     ${C_BLUE}$disk_usage${C_RESET}"
-    echo -e "  • Оверселлинг CPU (Steal):   $steal_status"
+    echo -e "  • Отклик ядра (Троттлинг):   $cpu_speed_status"
+    echo -e "  • Кража CPU под нагрузкой:   $steal_status"
+    echo -e "  • Реальный отклик диска:     $disk_io_status"
+    echo -e "  • Ожидание ресурсов (PSI):   $psi_status"
+    echo -e "  • Вердикт по оверселлингу:   $verdict_human"
 
     echo -e "\n${C_BOLD}--- 3. Учетные записи, пользователи и Sudo ---${C_RESET}"
     echo -e "  • Основной администратор:    ${C_GREEN}$active_user${C_RESET}"
@@ -2167,7 +2260,7 @@ mod_router_sbc() {
     if [ "$vpn_dns" = "8.8.8.8" ] || [ "$vpn_dns" = "8.8.4.4" ] || [ "$vpn_dns" = "1.1.1.1" ] || [ "$vpn_dns" = "1.0.0.1" ]; then
         vpn_dns=""
     elif [ -z "$vpn_dns" ]; then
-        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null || awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
         if [[ "$out_ip4" == 10.64.* ]]; then
             vpn_dns="10.64.0.1"
         fi
@@ -2352,7 +2445,7 @@ if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
         ip -4 route replace unreachable default metric 9999 table 200 2>/dev/null || true
     fi
 
-    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null || awk '/via/ {print $3; exit}' || echo "")
+    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
     if [ -n "$OUT_GW" ]; then
         ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
     else
@@ -2450,9 +2543,9 @@ ROUTER_SVC_EOF
 
     echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
     local ext_ip_out="Не удалось определить (проверьте связь туннеля: wg show $out_if)"
-    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || echo "")
+    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo "")
     if [ -z "$probed_ip" ]; then
-        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
+        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
     fi
     if [ -n "$probed_ip" ]; then
         ext_ip_out="$probed_ip"
@@ -2563,7 +2656,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.4 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.5 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

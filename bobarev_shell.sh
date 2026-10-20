@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.5.2 (Gold Master - Final Clean Text Edition)
+# Версия: 2.6 (Gold Master - Zero-Trust Tailscale, Web UI 5252 & Sudo Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -534,7 +534,7 @@ ZRAM_EOF
     echo -e "${C_GREEN}✅ Система успешно обновлена, базовые утилиты установлены.${C_RESET}"
 }
 
-# 4. Пользователь и Sudo
+# 4. Пользователь и Sudo (с гарантированным приоритетом 99-zzz- в /etc/sudoers.d)
 mod_user_setup() {
     echo -e "${C_CYAN}👤 === 4/19. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
     local active_user=$(get_active_user)
@@ -555,7 +555,10 @@ mod_user_setup() {
         echo -e "${C_GREEN}✅ Учетная запись $username создана.${C_RESET}"
     fi
     
+    # Гарантируем наличие группы sudo и включение пользователя в нее
+    groupadd -f sudo 2>/dev/null || true
     usermod -aG sudo "$username" || true
+    echo -e "${C_BLUE}ℹ️ Пользователь $username добавлен в группу администраторов (sudo).${C_RESET}"
 
     local pass
     if ! pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (пусто - отмена):" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
@@ -574,14 +577,43 @@ mod_user_setup() {
         fi
     fi
 
-    if prompt_yn "Разрешить этому пользователю выполнять команды от имени администратора без запроса пароля?" "true"; then
-        echo "$username ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/$username"
-        chmod 0440 "/etc/sudoers.d/$username"
-        echo -e "${C_GREEN}✅ Беспарольный доступ включен.${C_RESET}"
+    # Гарантируем, что директива #includedir /etc/sudoers.d находится в самом конце /etc/sudoers,
+    # чтобы правило %sudo ALL=(ALL:ALL) ALL не перебивало файлы из /etc/sudoers.d/
+    if [ -f /etc/sudoers ]; then
+        backup_file "/etc/sudoers"
+        sed -i -E '/^[#@]includedir[[:space:]]+\/etc\/sudoers\.d/d' /etc/sudoers 2>/dev/null || true
+        echo "#includedir /etc/sudoers.d" >> /etc/sudoers
+    fi
+
+    mkdir -p /etc/sudoers.d
+    chmod 750 /etc/sudoers.d 2>/dev/null || true
+
+    # Очищаем старые/конфликтующие записи для этого пользователя во всех файлах /etc/sudoers.d/
+    rm -f "/etc/sudoers.d/$username" "/etc/sudoers.d/99-zzz-$username" 2>/dev/null || true
+    for sfile in /etc/sudoers.d/*; do
+        [ ! -f "$sfile" ] && continue
+        [[ "$(basename "$sfile")" == "README" || "$sfile" == *.bak ]] && continue
+        if grep -qE "^[[:space:]]*${username}[[:space:]]+" "$sfile" 2>/dev/null; then
+            sed -i -E "/^[[:space:]]*${username}[[:space:]]+/d" "$sfile" 2>/dev/null || true
+            # Если файл после очистки остался без активных правил — удаляем его
+            if ! grep -qE "^[[:space:]]*[^#[:space:]]" "$sfile" 2>/dev/null; then
+                rm -f "$sfile" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    if prompt_yn "Разрешить этому пользователю выполнять команды от имени администратора без запроса пароля (NOPASSWD)?" "true"; then
+        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/99-zzz-$username"
+        chmod 0440 "/etc/sudoers.d/99-zzz-$username"
+        if command -v visudo &>/dev/null && ! visudo -c -f "/etc/sudoers.d/99-zzz-$username" >/dev/null 2>&1; then
+            rm -f "/etc/sudoers.d/99-zzz-$username"
+            echo -e "${C_RED}❌ Ошибка проверки синтаксиса sudoers!${C_RESET}"
+        else
+            echo -e "${C_GREEN}✅ Беспарольный доступ (NOPASSWD) включен с максимальным приоритетом (99-zzz-$username).${C_RESET}"
+        fi
     else
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        rm -f "/etc/sudoers.d/$username"
-        echo "ℹ️ Система будет запрашивать пароль при каждом повышении прав."
+        echo "ℹ️ Система будет запрашивать пароль при каждом повышении прав (через группу %sudo)."
     fi
 }
 
@@ -650,7 +682,7 @@ mod_ssh_key() {
     echo -e "${C_GREEN}✅ Права доступа к директории ключей проверены и настроены.${C_RESET}"
 }
 
-# 6. Конфигурация SSH
+# 6. Конфигурация SSH (с поддержкой полной Zero-Trust изоляции на tailscale0)
 mod_ssh_config() {
     echo -e "${C_CYAN}🔒 === 6/19. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
@@ -724,7 +756,7 @@ mod_ssh_config() {
 
     local ts_restrict_comment=""
     local restrict_choice=false
-    if prompt_yn "Скрыть доступ к серверу (разрешить подключения только участникам вашей закрытой сети Tailscale)?" "true"; then
+    if prompt_yn "Скрыть доступ к серверу (разрешить подключения только участникам вашей закрытой сети Tailscale в режиме полной изоляции Zero-Trust)?" "true"; then
         restrict_choice=true
         ts_restrict_comment="# SSH via Tailscale only"
     else
@@ -783,9 +815,14 @@ SSH_HARDENING_EOF
         if [ "$restrict_choice" = true ]; then
             if ensure_tailscale_installed && is_tailscale_authenticated; then
                 if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
+                    if [ -n "$active_ssh_port" ] && [ "$active_ssh_port" != "$port" ]; then
+                        silent_run ufw delete allow in on tailscale0 to any port "$active_ssh_port" proto tcp
+                        silent_run ufw delete allow "$active_ssh_port"/tcp
+                    fi
                     silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+                    silent_run ufw delete allow in on tailscale0
                     silent_run ufw delete allow "$port"/tcp
-                    echo -e "${C_GREEN}✅ Сервер изолирован от интернета: удаленный доступ разрешен ТОЛЬКО из закрытой сети.${C_RESET}"
+                    echo -e "${C_GREEN}✅ Полная изоляция (Zero-Trust): на tailscale0 открыт только порт SSH ($port/tcp).${C_RESET}"
                 else
                     echo -e "${C_BLUE}ℹ️ Правило изоляции сохранено. Оно вступит в силу при включении брандмауэра (Модуль 8).${C_RESET}"
                 fi
@@ -795,6 +832,10 @@ SSH_HARDENING_EOF
                 silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
             fi
         else
+            if [ -n "$active_ssh_port" ] && [ "$active_ssh_port" != "$port" ]; then
+                silent_run ufw delete allow "$active_ssh_port"/tcp
+                silent_run ufw delete allow in on tailscale0 to any port "$active_ssh_port" proto tcp
+            fi
             silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
             if prompt_yn "Установить легковесную защиту от брутфорса SSH (sshguard — ~2 МБ ОЗУ, авто-бан ботов)?" "true"; then
                 export DEBIAN_FRONTEND=noninteractive
@@ -895,7 +936,7 @@ HARDENING_EOF
     echo -e "${C_GREEN}✅ Защита ядра, расширенные UDP-буферы, TCP BBR и авто-ребут при панике применены.${C_RESET}"
 }
 
-# 8. Firewall UFW
+# 8. Firewall UFW (Полная Zero-Trust изоляция на tailscale0 без Anywhere on tailscale0)
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -915,7 +956,7 @@ mod_ufw() {
     silent_run ufw default deny incoming
     silent_run ufw default allow outgoing
 
-    if prompt_yn "Разрешить сквозную маршрутизацию пакетов (необходимо для работы в качестве роутера)?" "true"; then
+    if prompt_yn "Разрешить сквозную маршрутизацию пакетов (необходимо для работы в качестве роутера и Exit Node)?" "true"; then
         silent_run ufw default allow routed
         silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
     else
@@ -938,12 +979,18 @@ mod_ufw() {
     elif [ "$is_public_in_mod6" = true ]; then
         echo -e "${C_BLUE}ℹ️ Публичный доступ к SSH сохранен автоматически.${C_RESET}"
         do_restrict=false
-    elif prompt_yn "Разрешить подключения к серверу ТОЛЬКО участникам вашей закрытой сети Tailscale?" "true"; then
+    elif prompt_yn "Разрешить подключения к серверу ТОЛЬКО участникам вашей закрытой сети Tailscale (с полной Zero-Trust изоляцией портов)?" "true"; then
         do_restrict=true
     fi
 
-    silent_run ufw allow in on tailscale0 comment 'Allow inside Tailscale'
+    # Открываем только UDP-порт для прямого P2P-туннеля (БЕЗ открытия всех портов Anywhere on tailscale0!)
     silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
+
+    # Если активен веб-интерфейс Tailscale (порт 5252/tcp), открываем его строго внутри tailscale0
+    if is_tailscale_web_active; then
+        silent_run ufw allow in on tailscale0 to any port 5252 proto tcp comment 'Tailscale Web UI'
+        echo -e "${C_BLUE}ℹ️ Обнаружен активный веб-интерфейс Tailscale: открыт порт 5252/tcp на tailscale0.${C_RESET}"
+    fi
 
     local netdev="$DEFAULT_WAN_IF"
     if [ -n "$netdev" ]; then
@@ -988,14 +1035,14 @@ mod_ufw() {
     if [ "$do_restrict" = true ]; then
         if ensure_tailscale_installed && is_tailscale_authenticated; then
             silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
-            echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) доступен ТОЛЬКО из закрытой сети Tailscale.${C_RESET}"
+            echo -e "${C_GREEN}✅ Полная изоляция (Zero-Trust): SSH ($port/tcp) доступен ТОЛЬКО через Tailscale, остальные порты закрыты (безопасно для Share Exit Node).${C_RESET}"
         else
             silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
             echo -e "${C_YELLOW}⚠️ Узел Tailscale не авторизован! Во избежание потери доступа порт SSH ($port) оставлен открытым публично.${C_RESET}"
         fi
     else
         silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
-        echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) открыт публично, P2P (41641/udp) и Tailscale разрешены.${C_RESET}"
+        echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) открыт публично, P2P (41641/udp) и маршрутизация Tailscale разрешены.${C_RESET}"
     fi
 
     silent_run ufw --force enable
@@ -1042,7 +1089,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (с поддержкой Universal Exit Node и постоянным /32 SNAT Fix)
+# 10. Tailscale (с авто-открытием порта 5252/tcp для веб-интерфейса и постоянным /32 SNAT Fix)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1073,7 +1120,7 @@ mod_tailscale() {
         "4" "🛡️ Прием маршрутов" \
         "5" "🔒 Стелс-режим" \
         "6" "⚡ Ускорение и MSS Clamping" \
-        "7" "💻 Локальный веб-интерфейс" \
+        "7" "💻 Локальный веб-интерфейс (порт 5252)" \
         "8" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
             break
@@ -1208,18 +1255,29 @@ mod_tailscale() {
                 pause_enter
                 ;;
             7)
-                if prompt_yn "Включить встроенную панель управления в браузере?" "true"; then
+                if prompt_yn "Включить встроенную панель управления Tailscale в браузере (порт 5252/tcp на tailscale0)?" "true"; then
                     silent_run tailscale set --webclient=true
-                    echo -e "${C_GREEN}✅ Встроенная панель управления успешно запущена.${C_RESET}"
+                    if command -v ufw &>/dev/null; then
+                        silent_run ufw allow in on tailscale0 to any port 5252 proto tcp comment 'Tailscale Web UI'
+                    fi
+                    local ts_ip_now=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "100.x.x.x")
+                    echo -e "${C_GREEN}✅ Веб-интерфейс запущен, порт 5252/tcp открыт в UFW для сети Tailscale.${C_RESET}"
+                    echo -e "${C_BLUE}🌐 Адрес панели: http://${ts_ip_now}:5252${C_RESET}"
                 else
                     silent_run tailscale set --webclient=false
-                    echo -e "${C_BLUE}✅ Панель управления остановлена.${C_RESET}"
+                    if command -v ufw &>/dev/null; then
+                        silent_run ufw delete allow in on tailscale0 to any port 5252 proto tcp
+                    fi
+                    echo -e "${C_BLUE}✅ Панель управления остановлена, порт 5252/tcp закрыт в UFW.${C_RESET}"
                 fi
                 pause_enter
                 ;;
             8)
                 if prompt_yn "Полностью сбросить все сетевые параметры к заводским значениям?" "false"; then
                     tailscale up --reset 2>&1 | grep -v "accept-routes" || true
+                    if command -v ufw &>/dev/null; then
+                        silent_run ufw delete allow in on tailscale0 to any port 5252 proto tcp
+                    fi
                     echo -e "${C_GREEN}✅ Сетевые параметры очищены.${C_RESET}"
                 fi
                 pause_enter
@@ -1642,7 +1700,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с исправленным текстом и идеальным форматированием)
+# 17. Полный аудит сервера (с проверкой Zero-Trust изоляции, порта 5252 и реального приоритета Sudo)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1840,9 +1898,17 @@ mod_server_audit() {
     echo -e "  • Вердикт по оверселлингу:   $verdict_human"
 
     echo -e "\n${C_BOLD}--- 3. Учетные записи, пользователи и Sudo ---${C_RESET}"
-    echo -e "  • Основной администратор:    ${C_GREEN}$active_user${C_RESET}"
-    if [ -f "/etc/sudoers.d/$active_user" ]; then
-        echo -e "  • Повышение прав (Sudo):     ${C_GREEN}✅ Без запроса пароля (NOPASSWD)${C_RESET}"
+    local in_sudo_group="нет"
+    if id -nG "$active_user" 2>/dev/null | grep -qw "sudo"; then
+        in_sudo_group="в группе sudo"
+    fi
+    echo -e "  • Основной администратор:    ${C_GREEN}$active_user ($in_sudo_group)${C_RESET}"
+
+    local sudo_effective_line=$(sudo -l -U "$active_user" 2>/dev/null | grep -E "NOPASSWD|ALL" | tail -n 1 || echo "")
+    if echo "$sudo_effective_line" | grep -q "NOPASSWD"; then
+        echo -e "  • Повышение прав (Sudo):     ${C_GREEN}✅ Без запроса пароля (NOPASSWD активен)${C_RESET}"
+    elif [ -f "/etc/sudoers.d/99-zzz-$active_user" ] || [ -f "/etc/sudoers.d/$active_user" ]; then
+        echo -e "  • Повышение прав (Sudo):     ${C_YELLOW}⚠️ Файл NOPASSWD есть, но перебит другим правилом (перезапустите п. 4)${C_RESET}"
     else
         echo -e "  • Повышение прав (Sudo):     ${C_BLUE}ℹ️ Стандартный запрос пароля${C_RESET}"
     fi
@@ -1913,8 +1979,9 @@ mod_server_audit() {
     check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:    " "Активно" "Стандартное"
     check_param "net.core.rmem_max"               "26214400" "Расширенные буферы VPN:    " "Активны (25 МБ под высокие скорости)" "Стандартные"
 
-    echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW) и Режим роутера ---${C_RESET}"
+    echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
+        local ufw_out=$(LC_ALL=C ufw status 2>/dev/null || echo "")
         echo -e "  • Статус брандмауэра:        ${C_GREEN}✅ Включен и защищает сервер${C_RESET}"
         
         local fwd_policy=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")
@@ -1924,10 +1991,20 @@ mod_server_audit() {
             echo -e "  • Пересылка трафика (Шлюз):  ${C_YELLOW}⚠️ Запрещена (только локальные подключения)${C_RESET}"
         fi
 
-        if LC_ALL=C ufw status 2>/dev/null | grep -iE "SSH via Tailscale only" >/dev/null; then
+        if echo "$ufw_out" | grep -qE "${ssh_port}/tcp[[:space:]]+on[[:space:]]+tailscale0|SSH via Tailscale only"; then
             echo -e "  • Доступ к порту SSH:        ${C_GREEN}🔒 Скрыт снаружи (вход только через Tailscale)${C_RESET}"
         else
             echo -e "  • Доступ к порту SSH:        ${C_YELLOW}🌍 Публичный (открыт для всех сетей)${C_RESET}"
+        fi
+
+        if echo "$ufw_out" | grep -qE "Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW"; then
+            echo -e "  • Изоляция внутри Tailscale: ${C_YELLOW}⚠️ Отключена (открыты все порты на tailscale0)${C_RESET}"
+        else
+            local open_ts_ports="только SSH $ssh_port/tcp"
+            if echo "$ufw_out" | grep -qE "5252/tcp[[:space:]]+on[[:space:]]+tailscale0"; then
+                open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
+            fi
+            echo -e "  • Изоляция внутри Tailscale: ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
         fi
 
         if [ -f /etc/default/bobarev-router ]; then
@@ -2007,12 +2084,22 @@ mod_server_audit() {
         local ts_stealth_human
         [ "$ts_stealth" = "true" ] && ts_stealth_human="${C_GREEN}Включен (отбрасывает входящие из сети)${C_RESET}" || ts_stealth_human="${C_BLUE}Выключен (открыт для своих устройств)${C_RESET}"
 
+        local ts_web_human="${C_BLUE}Отключена (порт 5252 закрыт)${C_RESET}"
+        if is_tailscale_web_active; then
+            if LC_ALL=C ufw status 2>/dev/null | grep -qE "5252/tcp[[:space:]]+on[[:space:]]+tailscale0|Anywhere[[:space:]]+on[[:space:]]+tailscale0"; then
+                ts_web_human="${C_GREEN}✅ Активна (http://${ts_ip}:5252 — порт 5252/tcp открыт в UFW)${C_RESET}"
+            else
+                ts_web_human="${C_YELLOW}⚠️ Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
+            fi
+        fi
+
         echo -e "  • Имя устройства в сети:     ${C_BLUE}$ts_name${C_RESET}"
         echo -e "  • Внутренний IP-адрес:       ${C_BLUE}$ts_ip${C_RESET}"
         echo -e "  • Внешний шлюз Tailscale:    ${C_BLUE}$ts_exit_human${C_RESET}"
         echo -e "  • Раздает свой интернет:     $ts_adv_exit_human"
         echo -e "  • Доступ к чужим подсетям:   $ts_accept_human"
         echo -e "  • Скрытый режим (Stealth):   $ts_stealth_human"
+        echo -e "  • Веб-панель (порт 5252):    $ts_web_human"
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
             echo -e "  • Аппаратное ускорение GRO:  ${C_GREEN}✅ Включено${C_RESET}"
@@ -2590,7 +2677,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -2659,7 +2746,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.5.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.6 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

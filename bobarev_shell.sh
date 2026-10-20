@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.6 (Gold Master - Zero-Trust Tailscale, Web UI 5252 & Sudo Fix)
+# Версия: 2.6.2 (Gold Master - UFW Reset Fix, UFW Ports Sync & Clean UI)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -195,10 +195,18 @@ apply_wan_exit_nat() {
     fi
 }
 
+remove_ufw_docker_protection() {
+    iptables -F DOCKER-USER 2>/dev/null || true
+    ip6tables -F DOCKER-USER 2>/dev/null || true
+    if [ -f /etc/ufw/after.rules ]; then
+        sed -i '/# BEGIN UFW AND DOCKER/,/# END UFW AND DOCKER/d' /etc/ufw/after.rules 2>/dev/null || true
+    fi
+}
+
 apply_ufw_docker_protection() {
     local wan_if="$1"
     [ ! -f /etc/ufw/after.rules ] || [ -z "$wan_if" ] && return 0
-    sed -i '/# BEGIN UFW AND DOCKER/,/# END UFW AND DOCKER/d' /etc/ufw/after.rules
+    remove_ufw_docker_protection
     cat << DOCKER_UFW_EOF >> /etc/ufw/after.rules
 
 # BEGIN UFW AND DOCKER
@@ -555,7 +563,6 @@ mod_user_setup() {
         echo -e "${C_GREEN}✅ Учетная запись $username создана.${C_RESET}"
     fi
     
-    # Гарантируем наличие группы sudo и включение пользователя в нее
     groupadd -f sudo 2>/dev/null || true
     usermod -aG sudo "$username" || true
     echo -e "${C_BLUE}ℹ️ Пользователь $username добавлен в группу администраторов (sudo).${C_RESET}"
@@ -577,8 +584,6 @@ mod_user_setup() {
         fi
     fi
 
-    # Гарантируем, что директива #includedir /etc/sudoers.d находится в самом конце /etc/sudoers,
-    # чтобы правило %sudo ALL=(ALL:ALL) ALL не перебивало файлы из /etc/sudoers.d/
     if [ -f /etc/sudoers ]; then
         backup_file "/etc/sudoers"
         sed -i -E '/^[#@]includedir[[:space:]]+\/etc\/sudoers\.d/d' /etc/sudoers 2>/dev/null || true
@@ -588,14 +593,12 @@ mod_user_setup() {
     mkdir -p /etc/sudoers.d
     chmod 750 /etc/sudoers.d 2>/dev/null || true
 
-    # Очищаем старые/конфликтующие записи для этого пользователя во всех файлах /etc/sudoers.d/
     rm -f "/etc/sudoers.d/$username" "/etc/sudoers.d/99-zzz-$username" 2>/dev/null || true
     for sfile in /etc/sudoers.d/*; do
         [ ! -f "$sfile" ] && continue
         [[ "$(basename "$sfile")" == "README" || "$sfile" == *.bak ]] && continue
         if grep -qE "^[[:space:]]*${username}[[:space:]]+" "$sfile" 2>/dev/null; then
             sed -i -E "/^[[:space:]]*${username}[[:space:]]+/d" "$sfile" 2>/dev/null || true
-            # Если файл после очистки остался без активных правил — удаляем его
             if ! grep -qE "^[[:space:]]*[^#[:space:]]" "$sfile" 2>/dev/null; then
                 rm -f "$sfile" 2>/dev/null || true
             fi
@@ -936,7 +939,7 @@ HARDENING_EOF
     echo -e "${C_GREEN}✅ Защита ядра, расширенные UDP-буферы, TCP BBR и авто-ребут при панике применены.${C_RESET}"
 }
 
-# 8. Firewall UFW (Полная Zero-Trust изоляция на tailscale0 без Anywhere on tailscale0)
+# 8. Firewall UFW (Полная Zero-Trust изоляция + гарантированный сброс цепочки DOCKER-USER)
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -951,12 +954,18 @@ mod_ufw() {
 
     echo -e "${C_BLUE}ℹ️ Автоматически определен порт SSH: $port${C_RESET}"
 
+    # Сначала освобождаем цепочку DOCKER-USER от ссылки на ufw-user-forward,
+    # иначе ufw --force reset не может удалить цепочки и оставляет старые правила!
+    remove_ufw_docker_protection
+    silent_run ufw delete allow in on tailscale0
     silent_run ufw --force reset
+    rm -f /etc/ufw/user.rules.* /etc/ufw/user6.rules.* /etc/ufw/before.rules.* /etc/ufw/after.rules.* /etc/ufw/before6.rules.* /etc/ufw/after6.rules.* 2>/dev/null || true
+
     disable_ufw_strict_rpfilter
     silent_run ufw default deny incoming
     silent_run ufw default allow outgoing
 
-    if prompt_yn "Разрешить сквозную маршрутизацию пакетов (необходимо для работы в качестве роутера и Exit Node)?" "true"; then
+    if prompt_yn "Разрешить сквозную маршрутизацию пакетов (необходимо для работы в качестве роутера и шлюза)?" "true"; then
         silent_run ufw default allow routed
         silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
     else
@@ -983,10 +992,8 @@ mod_ufw() {
         do_restrict=true
     fi
 
-    # Открываем только UDP-порт для прямого P2P-туннеля (БЕЗ открытия всех портов Anywhere on tailscale0!)
     silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
 
-    # Если активен веб-интерфейс Tailscale (порт 5252/tcp), открываем его строго внутри tailscale0
     if is_tailscale_web_active; then
         silent_run ufw allow in on tailscale0 to any port 5252 proto tcp comment 'Tailscale Web UI'
         echo -e "${C_BLUE}ℹ️ Обнаружен активный веб-интерфейс Tailscale: открыт порт 5252/tcp на tailscale0.${C_RESET}"
@@ -994,8 +1001,8 @@ mod_ufw() {
 
     local netdev="$DEFAULT_WAN_IF"
     if [ -n "$netdev" ]; then
-        silent_run ufw route allow in on tailscale0 out on "$netdev"
-        silent_run ufw route allow in on "$netdev" out on tailscale0
+        silent_run ufw route allow in on tailscale0 out on "$netdev" comment 'TS Exit Node Out'
+        silent_run ufw route allow in on "$netdev" out on tailscale0 comment 'TS Exit Node In'
     fi
 
     if command -v tailscale &>/dev/null || [ -f /etc/systemd/system/tailscale-gro.service ]; then
@@ -1035,6 +1042,8 @@ mod_ufw() {
     if [ "$do_restrict" = true ]; then
         if ensure_tailscale_installed && is_tailscale_authenticated; then
             silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
+            silent_run ufw delete allow in on tailscale0
+            silent_run ufw delete allow "$port"/tcp
             echo -e "${C_GREEN}✅ Полная изоляция (Zero-Trust): SSH ($port/tcp) доступен ТОЛЬКО через Tailscale, остальные порты закрыты (безопасно для Share Exit Node).${C_RESET}"
         else
             silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
@@ -1046,6 +1055,7 @@ mod_ufw() {
     fi
 
     silent_run ufw --force enable
+    silent_run ufw delete allow in on tailscale0
     silent_run ufw logging off
     disable_ufw_strict_rpfilter
     [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
@@ -1089,7 +1099,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (с авто-открытием порта 5252/tcp для веб-интерфейса и постоянным /32 SNAT Fix)
+# 10. Tailscale
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1115,12 +1125,12 @@ mod_tailscale() {
         local ts_choice
         if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
         "1" "🔑 Авторизация" \
-        "2" "🌐 Настройка шлюза (Exit Node)" \
+        "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
         "4" "🛡️ Прием маршрутов" \
         "5" "🔒 Стелс-режим" \
         "6" "⚡ Ускорение и MSS Clamping" \
-        "7" "💻 Локальный веб-интерфейс (порт 5252)" \
+        "7" "💻 Локальный веб-интерфейс" \
         "8" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
             break
@@ -1150,13 +1160,13 @@ mod_tailscale() {
             2)
                 local en_choice
                 if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 \
-                "1" "Назначить этот сервер шлюзом (Exit Node)" \
+                "1" "Назначить этот сервер шлюзом" \
                 "2" "Отключить трансляцию шлюза" \
                 "3" "Подключиться к удаленному шлюзу" \
                 "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
                         1) 
-                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве Exit Node (с отключенным netfilter и авто-преобразованием SNAT)...${C_RESET}"
+                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве сетевого шлюза (с отключенным netfilter и авто-преобразованием SNAT)...${C_RESET}"
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
                             disable_ufw_strict_rpfilter
                             
@@ -1177,7 +1187,7 @@ mod_tailscale() {
                             fi
                             disable_ufw_strict_rpfilter
 
-                            echo -e "${C_GREEN}✅ Сервер успешно настроен как Exit Node (правила защищены от перезагрузки)!${C_RESET}"
+                            echo -e "${C_GREEN}✅ Сервер успешно настроен как шлюз (правила защищены от перезагрузки)!${C_RESET}"
                             
                             whiptail --title "⚠️ ВАЖНО: Активация в панели Tailscale" --msgbox \
 "Сервер объявлен шлюзом, форвардинг и правила NAT/SNAT закреплены!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
@@ -1195,7 +1205,7 @@ mod_tailscale() {
                                     silent_run ufw reload
                                 fi
                             fi
-                            echo -e "${C_GREEN}✅ Функция Exit Node и правила NAT отключены.${C_RESET}" 
+                            echo -e "${C_GREEN}✅ Функция шлюза и правила NAT отключены.${C_RESET}" 
                             ;;
                         3)
                             local target_ip=""
@@ -1700,7 +1710,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с проверкой Zero-Trust изоляции, порта 5252 и реального приоритета Sudo)
+# 17. Полный аудит сервера (с синхронизацией открытых портов по UFW и точным выравниванием иконок)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1714,7 +1724,7 @@ mod_server_audit() {
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
     current_tz="${current_tz#Etc/}"
     local ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "no")
-    local ntp_str="${C_YELLOW}⚠️ Нет синхронизации точного времени${C_RESET}"
+    local ntp_str="${C_YELLOW}⚠️  Нет синхронизации точного времени${C_RESET}"
     [ "$ntp_sync" = "yes" ] && ntp_str="${C_GREEN}✅ Время синхронизировано${C_RESET}"
 
     local sys_type_human=$(get_system_type_human)
@@ -1742,9 +1752,9 @@ mod_server_audit() {
             if [ "$raw_temp" -gt 75000 ]; then
                 cpu_temp="${C_RED}🔥 $cpu_temp (Критический перегрев / Снижение частот!)${C_RESET}"
             elif [ "$raw_temp" -gt 60000 ]; then
-                cpu_temp="${C_YELLOW}⚠️ $cpu_temp (Повышенный нагрев)${C_RESET}"
+                cpu_temp="${C_YELLOW}⚠️  $cpu_temp (Повышенный нагрев)${C_RESET}"
             else
-                cpu_temp="${C_GREEN}❄️ $cpu_temp (В норме)${C_RESET}"
+                cpu_temp="${C_GREEN}❄️  $cpu_temp (В норме)${C_RESET}"
             fi
         fi
     fi
@@ -1798,7 +1808,7 @@ mod_server_audit() {
     elif [ "$cpu_bench_ms" -lt 350 ]; then
         cpu_speed_status="${C_GREEN}✅ Нормальный (${cpu_bench_ms} мс — стандартное ядро)${C_RESET}"
     else
-        cpu_speed_status="${C_YELLOW}⚠️ Замедлен (${cpu_bench_ms} мс — хостер лимитирует ядро!)${C_RESET}"
+        cpu_speed_status="${C_YELLOW}⚠️  Замедлен (${cpu_bench_ms} мс — хостер лимитирует ядро!)${C_RESET}"
         oversell_score=$((oversell_score + 1))
     fi
 
@@ -1824,7 +1834,7 @@ mod_server_audit() {
         elif [ "$io_lat_int" -lt 12 ]; then
             disk_io_status="${C_GREEN}✅ Нормальный SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
         else
-            disk_io_status="${C_YELLOW}⚠️ Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск занят!)${C_RESET}"
+            disk_io_status="${C_YELLOW}⚠️  Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск занят!)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         fi
     else
@@ -1856,7 +1866,7 @@ mod_server_audit() {
         elif [ "$steal_int" -lt 5 ]; then
             steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
         elif [ "$steal_int" -lt 15 ]; then
-            steal_status="${C_YELLOW}⚠️ Умеренный (${steal_pct}% — заметная очередь за процессором)${C_RESET}"
+            steal_status="${C_YELLOW}⚠️  Умеренный (${steal_pct}% — заметная очередь за процессором)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         else
             steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг CPU на ноде!)${C_RESET}"
@@ -1872,7 +1882,7 @@ mod_server_audit() {
         psi_io="${psi_io:-0.00}"
         local psi_bad_flag=$(LC_ALL=C awk -v c="$psi_cpu" -v d="$psi_io" 'BEGIN {if (c+0 > 5.0 || d+0 > 10.0) print 1; else print 0}')
         if [ "${psi_bad_flag:-0}" -eq 1 ]; then
-            psi_status="${C_YELLOW}⚠️ Замечены простои в очереди (CPU: ${psi_cpu}%, Диск: ${psi_io}%)${C_RESET}"
+            psi_status="${C_YELLOW}⚠️  Замечены простои в очереди (CPU: ${psi_cpu}%, Диск: ${psi_io}%)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         else
             psi_status="${C_GREEN}✅ В норме (CPU: ${psi_cpu}%, Диск: ${psi_io}% за минуту)${C_RESET}"
@@ -1908,9 +1918,9 @@ mod_server_audit() {
     if echo "$sudo_effective_line" | grep -q "NOPASSWD"; then
         echo -e "  • Повышение прав (Sudo):     ${C_GREEN}✅ Без запроса пароля (NOPASSWD активен)${C_RESET}"
     elif [ -f "/etc/sudoers.d/99-zzz-$active_user" ] || [ -f "/etc/sudoers.d/$active_user" ]; then
-        echo -e "  • Повышение прав (Sudo):     ${C_YELLOW}⚠️ Файл NOPASSWD есть, но перебит другим правилом (перезапустите п. 4)${C_RESET}"
+        echo -e "  • Повышение прав (Sudo):     ${C_YELLOW}⚠️  Файл NOPASSWD есть, но перебит другим правилом (перезапустите п. 4)${C_RESET}"
     else
-        echo -e "  • Повышение прав (Sudo):     ${C_BLUE}ℹ️ Стандартный запрос пароля${C_RESET}"
+        echo -e "  • Повышение прав (Sudo):     ${C_BLUE}ℹ️  Стандартный запрос пароля${C_RESET}"
     fi
 
     local root_locked=$(passwd -S root 2>/dev/null || echo "")
@@ -1936,7 +1946,7 @@ mod_server_audit() {
 
     local port_status_human
     if [ "$ssh_port" = "22" ]; then
-        port_status_human="${C_YELLOW}⚠️ 22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
+        port_status_human="${C_YELLOW}⚠️  22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
     else
         port_status_human="${C_GREEN}✅ $ssh_port (Нестандартный порт)${C_RESET}"
     fi
@@ -1951,7 +1961,7 @@ mod_server_audit() {
     local pass_status_human
     case "${pass_auth,,}" in
         no) pass_status_human="${C_GREEN}✅ Отключен (вход только по SSH-ключам)${C_RESET}" ;;
-        yes|*) pass_status_human="${C_YELLOW}⚠️ Разрешен вход по паролю${C_RESET}" ;;
+        yes|*) pass_status_human="${C_YELLOW}⚠️  Разрешен вход по паролю${C_RESET}" ;;
     esac
 
     echo -e "  • Используемый порт SSH:     $port_status_human"
@@ -1971,7 +1981,7 @@ mod_server_audit() {
         if [ "$val" = "$expected" ]; then
             echo -e "  • ${label}${C_GREEN}✅ $ok_msg${C_RESET}"
         else
-            echo -e "  • ${label}${C_YELLOW}⚠️ $err_msg (сейчас: $val)${C_RESET}"
+            echo -e "  • ${label}${C_YELLOW}⚠️  $err_msg (сейчас: $val)${C_RESET}"
         fi
     }
     check_param "kernel.dmesg_restrict"           "1"        "Защита журнала ядра:       " "Включена" "Отключена"
@@ -1988,7 +1998,7 @@ mod_server_audit() {
         if [ "$fwd_policy" = "ACCEPT" ]; then
             echo -e "  • Пересылка трафика (Шлюз):  ${C_GREEN}✅ Разрешена (сервер может раздавать интернет)${C_RESET}"
         else
-            echo -e "  • Пересылка трафика (Шлюз):  ${C_YELLOW}⚠️ Запрещена (только локальные подключения)${C_RESET}"
+            echo -e "  • Пересылка трафика (Шлюз):  ${C_YELLOW}⚠️  Запрещена (только локальные подключения)${C_RESET}"
         fi
 
         if echo "$ufw_out" | grep -qE "${ssh_port}/tcp[[:space:]]+on[[:space:]]+tailscale0|SSH via Tailscale only"; then
@@ -1998,13 +2008,13 @@ mod_server_audit() {
         fi
 
         if echo "$ufw_out" | grep -qE "Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW"; then
-            echo -e "  • Изоляция внутри Tailscale: ${C_YELLOW}⚠️ Отключена (открыты все порты на tailscale0)${C_RESET}"
+            echo -e "  • Изоляция сети Tailscale:   ${C_YELLOW}⚠️  Отключена (открыты все порты на tailscale0)${C_RESET}"
         else
             local open_ts_ports="только SSH $ssh_port/tcp"
             if echo "$ufw_out" | grep -qE "5252/tcp[[:space:]]+on[[:space:]]+tailscale0"; then
                 open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
             fi
-            echo -e "  • Изоляция внутри Tailscale: ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
+            echo -e "  • Изоляция сети Tailscale:   ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
         fi
 
         if [ -f /etc/default/bobarev-router ]; then
@@ -2016,7 +2026,7 @@ mod_server_audit() {
 
             local r_out_human="${C_GREEN}Через сетевой канал $r_out${C_RESET}"
             case "$r_out" in
-                wg*)        r_out_human="${C_GREEN}🛡️ Через защищенный туннель WireGuard ($r_out)${C_RESET}" ;;
+                wg*)        r_out_human="${C_GREEN}🛡️  Через защищенный туннель WireGuard ($r_out)${C_RESET}" ;;
                 tailscale0) r_out_human="${C_GREEN}🔗 Через закрытую сеть Tailscale${C_RESET}" ;;
                 tun*|utun*) r_out_human="${C_GREEN}🚀 Через прокси-туннель ($r_out)${C_RESET}" ;;
                 "$wan_if")  r_out_human="${C_BLUE}🌍 Напрямую через провайдера ($r_out, без VPN)${C_RESET}" ;;
@@ -2027,7 +2037,7 @@ mod_server_audit() {
                 r_host_human="${C_GREEN}✅ Тоже защищен и идет через $r_out${C_RESET}"
             fi
 
-            local r_ks_human="${C_YELLOW}⚠️ Выключена (при сбое VPN трафик пойдет напрямую)${C_RESET}"
+            local r_ks_human="${C_YELLOW}⚠️  Выключена (при сбое VPN трафик пойдет напрямую)${C_RESET}"
             if [ "${ROUTER_KILLSWITCH:-false}" = "true" ]; then
                 r_ks_human="${C_GREEN}🔒 Включена (блокирует утечку IP в обход VPN)${C_RESET}"
             elif [ "$r_out" = "$wan_if" ]; then
@@ -2089,7 +2099,7 @@ mod_server_audit() {
             if LC_ALL=C ufw status 2>/dev/null | grep -qE "5252/tcp[[:space:]]+on[[:space:]]+tailscale0|Anywhere[[:space:]]+on[[:space:]]+tailscale0"; then
                 ts_web_human="${C_GREEN}✅ Активна (http://${ts_ip}:5252 — порт 5252/tcp открыт в UFW)${C_RESET}"
             else
-                ts_web_human="${C_YELLOW}⚠️ Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
+                ts_web_human="${C_YELLOW}⚠️  Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
             fi
         fi
 
@@ -2104,10 +2114,10 @@ mod_server_audit() {
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
             echo -e "  • Аппаратное ускорение GRO:  ${C_GREEN}✅ Включено${C_RESET}"
         else
-            echo -e "  • Аппаратное ускорение GRO:  ${C_YELLOW}⚠️ Отключено${C_RESET}"
+            echo -e "  • Аппаратное ускорение GRO:  ${C_YELLOW}⚠️  Отключено${C_RESET}"
         fi
     else
-        echo -e "  • Служба Tailscale:          ${C_YELLOW}⚠️ Не установлена${C_RESET}"
+        echo -e "  • Служба Tailscale:          ${C_YELLOW}⚠️  Не установлена${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Открытые порты ---${C_RESET}"
@@ -2150,15 +2160,26 @@ mod_server_audit() {
     if [ "$mss_active" = true ]; then
         echo -e "  • Выравнивание пакетов (MSS): ${C_GREEN}✅ Включено (сайты открываются без зависаний в VPN)${C_RESET}"
     else
-        echo -e "  • Выравнивание пакетов (MSS): ${C_YELLOW}⚠️ Выключено (возможны зависания сайтов в VPN)${C_RESET}"
+        echo -e "  • Выравнивание пакетов (MSS): ${C_YELLOW}⚠️  Выключено (возможны зависания сайтов в VPN)${C_RESET}"
     fi
 
-    if command -v ss &>/dev/null; then
-        local listen_ports=$(ss -tulnH 2>/dev/null || echo "")
-        if [ -n "$listen_ports" ]; then
-            local parsed_ports=$(echo "$listen_ports" | awk '{print $5}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
-            [ -n "$parsed_ports" ] && echo -e "  • Открытые порты на сервере:  ${C_BLUE}$parsed_ports${C_RESET}"
-        fi
+    # Вывод открытых портов строго в соответствии с правилами UFW (без внутренних сокетов 127.0.0.1 и временных UDP-портов)
+    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
+        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '
+            /ALLOW/ && !/\(v6\)/ && !/ALLOW FWD/ {
+                if ($1 == "Anywhere" && $2 == "on") {
+                    print "Все порты (" $3 ")"
+                } else if ($2 == "on") {
+                    print $1 " (" $3 ")"
+                } else {
+                    print $1
+                }
+            }' | awk '!seen[$0]++' | paste -sd ', ' - | sed 's/, /, /g' || echo "")
+        [ -z "$ufw_ports_list" ] && ufw_ports_list="Все входящие порты закрыты"
+        echo -e "  • Открытые порты (по UFW):    ${C_BLUE}$ufw_ports_list${C_RESET}"
+    elif command -v ss &>/dev/null; then
+        local listen_ports=$(ss -tlnH 2>/dev/null | awk '$4 !~ /^127\./ && $4 !~ /^\[::1\]/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
+        [ -n "$listen_ports" ] && echo -e "  • Открытые порты (без UFW):   ${C_YELLOW}$listen_ports${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и подкачки ---${C_RESET}"
@@ -2170,7 +2191,7 @@ mod_server_audit() {
     elif [ "$vm_swappiness" = "100" ] && swapon --show 2>/dev/null | grep -q "zram"; then
         swappiness_human="${C_GREEN}✅ 100 (Активное сжатие данных в быстрой ОЗУ zRAM)${C_RESET}"
     elif [ "$vm_swappiness" = "60" ]; then
-        swappiness_human="${C_YELLOW}⚠️ 60 (Заводское значение, частая запись на диск)${C_RESET}"
+        swappiness_human="${C_YELLOW}⚠️  60 (Заводское значение, частая запись на диск)${C_RESET}"
     elif [ "$vm_swappiness" = "N/A" ]; then
         swappiness_human="${C_RED}❌ Ошибка чтения${C_RESET}"
     else
@@ -2181,13 +2202,13 @@ mod_server_audit() {
     if mount | grep " / " | grep -q "noatime"; then
         echo -e "  • Запись времени чтения:     ${C_GREEN}✅ Отключена (noatime — снижен износ накопителя)${C_RESET}"
     else
-        echo -e "  • Запись времени чтения:     ${C_YELLOW}⚠️ Включена (лишняя нагрузка на диск)${C_RESET}"
+        echo -e "  • Запись времени чтения:     ${C_YELLOW}⚠️  Включена (лишняя нагрузка на диск)${C_RESET}"
     fi
 
     if mount | grep " / " | grep -q "commit=120"; then
         echo -e "  • Буферизация записи диска:  ${C_GREEN}✅ 120 сек. (бережет флеш-память от частых записей)${C_RESET}"
     else
-        echo -e "  • Буферизация записи диска:  ${C_YELLOW}⚠️ Стандартная (5 сек.)${C_RESET}"
+        echo -e "  • Буферизация записи диска:  ${C_YELLOW}⚠️  Стандартная (5 сек.)${C_RESET}"
     fi
 
     local swap_human_list=()
@@ -2746,7 +2767,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.6 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.6.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

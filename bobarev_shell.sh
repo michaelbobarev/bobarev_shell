@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.8 (Gold Master - EasyTier Auto-Sync & Netfilter Priority)
+# Версия: 2.8.1 (Gold Master - EasyTier IP Parse Fix & Clean UI)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -241,7 +241,7 @@ flush_and_reload_nat() {
         fi
     fi
     if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
-        /usr/local/bin/bobarev-router-up.sh || true
+        /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
     fi
     return 0
 }
@@ -269,10 +269,9 @@ TS_EOF
         iptables -t nat -F ts-postrouting 2>/dev/null || true
         iptables -t nat -X ts-postrouting 2>/dev/null || true
 
-        # Автоподхват EasyTier (tun0) при переключении приоритета
         if ip link show tun0 >/dev/null 2>&1 && [ -n "$wan_dev" ]; then
             silent_run ufw route allow in on tun0 out on "$wan_dev" comment 'EasyTier tun0 Out'
-            silent_run silent_run ufw route allow in on "$wan_dev" out on tun0 comment 'EasyTier tun0 In'
+            silent_run ufw route allow in on "$wan_dev" out on tun0 comment 'EasyTier tun0 In'
             echo -e "${C_BLUE}ℹ️ Автоподхват EasyTier (tun0): добавлены правила сквозного транзита через $wan_dev.${C_RESET}"
         fi
 
@@ -316,7 +315,7 @@ print_network_health_summary() {
     fi
 
     if ip link show tun0 >/dev/null 2>&1; then
-        local tun_ip=$(ip -4 -o addr show dev tun0 2>/dev/null || awk '{print $4}' | head -n 1 || echo "без IP")
+        local tun_ip=$(ip -4 -o addr show dev tun0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "без IP")
         echo -e "  • Туннель EasyTier (tun0):   ${C_GREEN}✅ Активен (IP: $tun_ip, сквозной транзит разрешен)${C_RESET}"
     fi
     return 0
@@ -1250,7 +1249,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (без текста "Управление сетевым узлом:" и с автоподхватом tun0)
+# 10. Tailscale (без заголовочного текста в меню и с автоподхватом tun0)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1464,7 +1463,6 @@ mod_tailscale() {
                         1) set_tailscale_netfilter_priority "off" ;;
                         2) set_tailscale_netfilter_priority "on" ;;
                         3)
-                            # Автоподхват tun0 при ручной очистке NAT
                             local wan_dev=$(get_wan_if)
                             if ip link show tun0 >/dev/null 2>&1 && [ -n "$wan_dev" ]; then
                                 silent_run ufw route allow in on tun0 out on "$wan_dev" comment 'EasyTier tun0 Out'
@@ -1906,7 +1904,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с проверкой Zero-Trust, EasyTier tun0, netfilter-mode и NAT)
+# 17. Полный аудит сервера (с корректным парсингом IP для tun0)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -2212,7 +2210,7 @@ mod_server_audit() {
         fi
 
         if [ -n "$wan_if" ]; then
-            local nat_cnt=$(iptables -t nat -S POSTROUTING 2>/dev/null || grep -cE -- "-o ${wan_if}[[:space:]].*-j (MASQUERADE|SNAT)" || true)
+            local nat_cnt=$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -cE -- "-o ${wan_if}[[:space:]].*-j (MASQUERADE|SNAT)" || true)
             if [ "$nat_cnt" -eq 1 ]; then
                 echo -e "  • Трансляция NAT на выходе:  ${C_GREEN}✅ Активна на $wan_if (1 чистое правило без дубликатов)${C_RESET}"
             elif [ "$nat_cnt" -gt 1 ]; then
@@ -2305,7 +2303,7 @@ mod_server_audit() {
 
         local ts_web_human="${C_BLUE}Отключена (порт 5252 закрыт)${C_RESET}"
         if is_tailscale_web_active; then
-            if LC_ALL=C ufw status 2>/dev/null || awk '!/ALLOW FWD/ && (/^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/ || /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/)' | grep -q .; then
+            if LC_ALL=C ufw status 2>/dev/null | awk '!/ALLOW FWD/ && (/^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/ || /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/)' | grep -q .; then
                 ts_web_human="${C_GREEN}✅ Активна (http://${ts_ip}:5252 — порт 5252/tcp открыт в UFW)${C_RESET}"
             else
                 ts_web_human="${C_YELLOW}⚠️  Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
@@ -2374,7 +2372,7 @@ mod_server_audit() {
     fi
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null || awk '
+        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '
             /ALLOW/ && !/\(v6\)/ && !/ALLOW FWD/ {
                 if ($1 == "Anywhere" && $2 == "on") {
                     print "Все порты (" $3 ")"
@@ -2397,7 +2395,7 @@ mod_server_audit() {
     local swappiness_human
     if [ "$vm_swappiness" = "1" ]; then
         swappiness_human="${C_GREEN}✅ 1 (Максимальная защита флеш-памяти от износа)${C_RESET}"
-    elif [ "$vm_swappiness" = "100" ] && swapon --show 2>/dev/null || grep -q "zram"; then
+    elif [ "$vm_swappiness" = "100" ] && swapon --show 2>/dev/null | grep -q "zram"; then
         swappiness_human="${C_GREEN}✅ 100 (Активное сжатие данных в быстрой ОЗУ zRAM)${C_RESET}"
     elif [ "$vm_swappiness" = "60" ]; then
         swappiness_human="${C_YELLOW}⚠️  60 (Заводское значение, частая запись на диск)${C_RESET}"
@@ -2580,7 +2578,7 @@ mod_router_sbc() {
     if [ "$vpn_dns" = "8.8.8.8" ] || [ "$vpn_dns" = "8.8.4.4" ] || [ "$vpn_dns" = "1.1.1.1" ] || [ "$vpn_dns" = "1.0.0.1" ]; then
         vpn_dns=""
     elif [ -z "$vpn_dns" ]; then
-        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null || awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
         if [[ "$out_ip4" == 10.64.* ]]; then
             vpn_dns="10.64.0.1"
         fi

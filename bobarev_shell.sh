@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.7.1 (Gold Master - Clean Menu, NAT Regex Fix & EasyTier Support)
+# Версия: 2.7.2 (Gold Master - Crash Fix, Clean Menu & EasyTier Support)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -210,12 +210,17 @@ apply_wan_exit_nat() {
     if [ "$is_mask_32" = "yes" ] && [ -n "$pub_ip" ]; then
         iptables -t nat -A POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip"
         ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j SNAT --to-source $pub_ip"
-        [ "$quiet" != "true" ] && echo -e "${C_BLUE}ℹ️ Обнаружена маска /32 на интерфейсе $wan_dev: закреплена постоянная привязка SNAT ($pub_ip).${C_RESET}"
+        if [ "$quiet" != "true" ]; then
+            echo -e "${C_BLUE}ℹ️ Обнаружена маска /32 на интерфейсе $wan_dev: закреплена постоянная привязка SNAT ($pub_ip).${C_RESET}"
+        fi
     else
         iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
         ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j MASQUERADE"
-        [ "$quiet" != "true" ] && echo -e "${C_BLUE}ℹ️ Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
+        if [ "$quiet" != "true" ]; then
+            echo -e "${C_BLUE}ℹ️ Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
+        fi
     fi
+    return 0
 }
 
 flush_and_reload_nat() {
@@ -227,10 +232,13 @@ flush_and_reload_nat() {
     if [ -n "$wan_dev" ]; then
         local fwd_pol=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")
         if [ "$fwd_pol" = "ACCEPT" ] || [ "$(tailscale get advertise-exit-node 2>/dev/null || echo 'false')" = "true" ] || ip link show tun0 >/dev/null 2>&1; then
-            apply_wan_exit_nat "$wan_dev" "true"
+            apply_wan_exit_nat "$wan_dev" "true" || true
         fi
     fi
-    [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
+    if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
+        /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 set_tailscale_netfilter_priority() {
@@ -264,6 +272,7 @@ TS_EOF
         flush_and_reload_nat
         echo -e "${C_GREEN}✅ Приоритет передан Tailscale (netfilter-mode=on): автоматическое управление правилами включено.${C_RESET}"
     fi
+    return 0
 }
 
 print_network_health_summary() {
@@ -298,6 +307,7 @@ print_network_health_summary() {
         local tun_ip=$(ip -4 -o addr show dev tun0 2>/dev/null | awk '{print $4}' | head -n 1 || echo "без IP")
         echo -e "  • Туннель EasyTier (tun0):   ${C_GREEN}✅ Активен (IP: $tun_ip, сквозной транзит разрешен)${C_RESET}"
     fi
+    return 0
 }
 
 remove_ufw_docker_protection() {
@@ -1179,10 +1189,14 @@ mod_ufw() {
     silent_run ufw --force enable
     silent_run ufw delete allow in on tailscale0
     silent_run ufw reload
-    [ -n "$netdev" ] && [ "$allow_routed" = true ] && apply_wan_exit_nat "$netdev" "true"
+    if [ -n "$netdev" ] && [ "$allow_routed" = true ]; then
+        apply_wan_exit_nat "$netdev" "true" || true
+    fi
     silent_run ufw logging off
     disable_ufw_strict_rpfilter
-    [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
+    if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
+        /usr/local/bin/bobarev-router-up.sh || true
+    fi
     echo -e "${C_GREEN}✅ Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
     print_network_health_summary
 }
@@ -1224,7 +1238,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (чистый заголовок меню + управление приоритетом сетевых правил)
+# 10. Tailscale (без текста "Управление сетевым узлом:" и без вылетов)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1256,7 +1270,7 @@ mod_tailscale() {
         local nf_cur=$(get_tailscale_netfilter_mode)
 
         local ts_choice
-        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 19 $WT_WIDTH 10 \
+        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "" 17 $WT_WIDTH 10 \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -2733,7 +2747,7 @@ if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
         ip -4 route replace unreachable default metric 9999 table 200 2>/dev/null || true
     fi
 
-    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
+    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null || awk '/via/ {print $3; exit}' || echo "")
     if [ -n "$OUT_GW" ]; then
         ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
     else
@@ -2944,7 +2958,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.7.1 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.7.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

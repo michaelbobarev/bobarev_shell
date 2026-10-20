@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.6.2 (Gold Master - UFW Reset Fix, UFW Ports Sync & Clean UI)
+# Версия: 2.6.3 (Gold Master - Zero-Trust Audit FWD Filter & Clean UI)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -954,8 +954,6 @@ mod_ufw() {
 
     echo -e "${C_BLUE}ℹ️ Автоматически определен порт SSH: $port${C_RESET}"
 
-    # Сначала освобождаем цепочку DOCKER-USER от ссылки на ufw-user-forward,
-    # иначе ufw --force reset не может удалить цепочки и оставляет старые правила!
     remove_ufw_docker_protection
     silent_run ufw delete allow in on tailscale0
     silent_run ufw --force reset
@@ -1710,7 +1708,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с синхронизацией открытых портов по UFW и точным выравниванием иконок)
+# 17. Полный аудит сервера (с фильтром ALLOW FWD при проверке изоляции tailscale0)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -2007,11 +2005,12 @@ mod_server_audit() {
             echo -e "  • Доступ к порту SSH:        ${C_YELLOW}🌍 Публичный (открыт для всех сетей)${C_RESET}"
         fi
 
-        if echo "$ufw_out" | grep -qE "Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW"; then
+        # Исключаем транзитные правила ALLOW FWD, чтобы проверять строго входящие подключения ALLOW IN на tailscale0
+        if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
             echo -e "  • Изоляция сети Tailscale:   ${C_YELLOW}⚠️  Отключена (открыты все порты на tailscale0)${C_RESET}"
         else
             local open_ts_ports="только SSH $ssh_port/tcp"
-            if echo "$ufw_out" | grep -qE "5252/tcp[[:space:]]+on[[:space:]]+tailscale0"; then
+            if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
                 open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
             fi
             echo -e "  • Изоляция сети Tailscale:   ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
@@ -2096,7 +2095,7 @@ mod_server_audit() {
 
         local ts_web_human="${C_BLUE}Отключена (порт 5252 закрыт)${C_RESET}"
         if is_tailscale_web_active; then
-            if LC_ALL=C ufw status 2>/dev/null | grep -qE "5252/tcp[[:space:]]+on[[:space:]]+tailscale0|Anywhere[[:space:]]+on[[:space:]]+tailscale0"; then
+            if LC_ALL=C ufw status 2>/dev/null | awk '!/ALLOW FWD/ && (/^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/ || /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/)' | grep -q .; then
                 ts_web_human="${C_GREEN}✅ Активна (http://${ts_ip}:5252 — порт 5252/tcp открыт в UFW)${C_RESET}"
             else
                 ts_web_human="${C_YELLOW}⚠️  Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
@@ -2163,7 +2162,6 @@ mod_server_audit() {
         echo -e "  • Выравнивание пакетов (MSS): ${C_YELLOW}⚠️  Выключено (возможны зависания сайтов в VPN)${C_RESET}"
     fi
 
-    # Вывод открытых портов строго в соответствии с правилами UFW (без внутренних сокетов 127.0.0.1 и временных UDP-портов)
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '
             /ALLOW/ && !/\(v6\)/ && !/ALLOW FWD/ {
@@ -2174,7 +2172,7 @@ mod_server_audit() {
                 } else {
                     print $1
                 }
-            }' | awk '!seen[$0]++' | paste -sd ', ' - | sed 's/, /, /g' || echo "")
+            }' | awk '!seen[$0]++' | paste -sd ',' - | sed 's/,/, /g' || echo "")
         [ -z "$ufw_ports_list" ] && ufw_ports_list="Все входящие порты закрыты"
         echo -e "  • Открытые порты (по UFW):    ${C_BLUE}$ufw_ports_list${C_RESET}"
     elif command -v ss &>/dev/null; then
@@ -2767,7 +2765,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.6.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.6.3 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

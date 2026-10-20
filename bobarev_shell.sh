@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.7.2 (Gold Master - Crash Fix, Clean Menu & EasyTier Support)
+# Версия: 2.8 (Gold Master - EasyTier Auto-Sync & Netfilter Priority)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -194,6 +194,11 @@ apply_wan_exit_nat() {
     iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
     iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
+    if ip link show tun0 >/dev/null 2>&1; then
+        iptables -C FORWARD -i tun0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tun0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
+        iptables -C FORWARD -i "$wan_dev" -o tun0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tun0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    fi
+
     iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
     iptables -t nat -D POSTROUTING -s 10.144.144.0/24 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null; do :; done
@@ -236,7 +241,7 @@ flush_and_reload_nat() {
         fi
     fi
     if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
-        /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
+        /usr/local/bin/bobarev-router-up.sh || true
     fi
     return 0
 }
@@ -263,6 +268,13 @@ TS_EOF
         iptables -X ts-input 2>/dev/null || true
         iptables -t nat -F ts-postrouting 2>/dev/null || true
         iptables -t nat -X ts-postrouting 2>/dev/null || true
+
+        # Автоподхват EasyTier (tun0) при переключении приоритета
+        if ip link show tun0 >/dev/null 2>&1 && [ -n "$wan_dev" ]; then
+            silent_run ufw route allow in on tun0 out on "$wan_dev" comment 'EasyTier tun0 Out'
+            silent_run silent_run ufw route allow in on "$wan_dev" out on tun0 comment 'EasyTier tun0 In'
+            echo -e "${C_BLUE}ℹ️ Автоподхват EasyTier (tun0): добавлены правила сквозного транзита через $wan_dev.${C_RESET}"
+        fi
 
         [ -n "$wan_dev" ] && apply_wan_exit_nat "$wan_dev"
         flush_and_reload_nat
@@ -304,7 +316,7 @@ print_network_health_summary() {
     fi
 
     if ip link show tun0 >/dev/null 2>&1; then
-        local tun_ip=$(ip -4 -o addr show dev tun0 2>/dev/null | awk '{print $4}' | head -n 1 || echo "без IP")
+        local tun_ip=$(ip -4 -o addr show dev tun0 2>/dev/null || awk '{print $4}' | head -n 1 || echo "без IP")
         echo -e "  • Туннель EasyTier (tun0):   ${C_GREEN}✅ Активен (IP: $tun_ip, сквозной транзит разрешен)${C_RESET}"
     fi
     return 0
@@ -1238,7 +1250,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (без текста "Управление сетевым узлом:" и без вылетов)
+# 10. Tailscale (без текста "Управление сетевым узлом:" и с автоподхватом tun0)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1452,8 +1464,14 @@ mod_tailscale() {
                         1) set_tailscale_netfilter_priority "off" ;;
                         2) set_tailscale_netfilter_priority "on" ;;
                         3)
+                            # Автоподхват tun0 при ручной очистке NAT
+                            local wan_dev=$(get_wan_if)
+                            if ip link show tun0 >/dev/null 2>&1 && [ -n "$wan_dev" ]; then
+                                silent_run ufw route allow in on tun0 out on "$wan_dev" comment 'EasyTier tun0 Out'
+                                silent_run ufw route allow in on "$wan_dev" out on tun0 comment 'EasyTier tun0 In'
+                            fi
                             flush_and_reload_nat
-                            echo -e "${C_GREEN}✅ Таблица NAT очищена от дубликатов, правила UFW перезагружены.${C_RESET}"
+                            echo -e "${C_GREEN}✅ Таблица NAT очищена от дубликатов, правила UFW (включая tun0) перезагружены.${C_RESET}"
                             ;;
                     esac
                     print_network_health_summary
@@ -2194,7 +2212,7 @@ mod_server_audit() {
         fi
 
         if [ -n "$wan_if" ]; then
-            local nat_cnt=$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -cE -- "-o ${wan_if}[[:space:]].*-j (MASQUERADE|SNAT)" || true)
+            local nat_cnt=$(iptables -t nat -S POSTROUTING 2>/dev/null || grep -cE -- "-o ${wan_if}[[:space:]].*-j (MASQUERADE|SNAT)" || true)
             if [ "$nat_cnt" -eq 1 ]; then
                 echo -e "  • Трансляция NAT на выходе:  ${C_GREEN}✅ Активна на $wan_if (1 чистое правило без дубликатов)${C_RESET}"
             elif [ "$nat_cnt" -gt 1 ]; then
@@ -2249,7 +2267,7 @@ mod_server_audit() {
         echo -e "  • Служба Tailscale:          ${C_GREEN}✅ Установлена и работает${C_RESET}"
         local ts_name ts_ip ts_exit ts_adv_exit ts_accept ts_stealth
         IFS="|" read -r ts_name _ <<< "$(get_tailscale_whoami)"
-        ts_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "Не авторизован")
+        ts_ip=$(tailscale ip -4 2>/dev/null || echo "Не авторизован")
         
         ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
         local ts_exit_human
@@ -2287,7 +2305,7 @@ mod_server_audit() {
 
         local ts_web_human="${C_BLUE}Отключена (порт 5252 закрыт)${C_RESET}"
         if is_tailscale_web_active; then
-            if LC_ALL=C ufw status 2>/dev/null | awk '!/ALLOW FWD/ && (/^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/ || /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/)' | grep -q .; then
+            if LC_ALL=C ufw status 2>/dev/null || awk '!/ALLOW FWD/ && (/^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/ || /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/)' | grep -q .; then
                 ts_web_human="${C_GREEN}✅ Активна (http://${ts_ip}:5252 — порт 5252/tcp открыт в UFW)${C_RESET}"
             else
                 ts_web_human="${C_YELLOW}⚠️  Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
@@ -2356,7 +2374,7 @@ mod_server_audit() {
     fi
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '
+        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null || awk '
             /ALLOW/ && !/\(v6\)/ && !/ALLOW FWD/ {
                 if ($1 == "Anywhere" && $2 == "on") {
                     print "Все порты (" $3 ")"
@@ -2369,7 +2387,7 @@ mod_server_audit() {
         [ -z "$ufw_ports_list" ] && ufw_ports_list="Все входящие порты закрыты"
         echo -e "  • Открытые порты (по UFW):    ${C_BLUE}$ufw_ports_list${C_RESET}"
     elif command -v ss &>/dev/null; then
-        local listen_ports=$(ss -tlnH 2>/dev/null | awk '$4 !~ /^127\./ && $4 !~ /^\[::1\]/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
+        local listen_ports=$(ss -tlnH 2>/dev/null || awk '$4 !~ /^127\./ && $4 !~ /^\[::1\]/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
         [ -n "$listen_ports" ] && echo -e "  • Открытые порты (без UFW):   ${C_YELLOW}$listen_ports${C_RESET}"
     fi
 
@@ -2379,7 +2397,7 @@ mod_server_audit() {
     local swappiness_human
     if [ "$vm_swappiness" = "1" ]; then
         swappiness_human="${C_GREEN}✅ 1 (Максимальная защита флеш-памяти от износа)${C_RESET}"
-    elif [ "$vm_swappiness" = "100" ] && swapon --show 2>/dev/null | grep -q "zram"; then
+    elif [ "$vm_swappiness" = "100" ] && swapon --show 2>/dev/null || grep -q "zram"; then
         swappiness_human="${C_GREEN}✅ 100 (Активное сжатие данных в быстрой ОЗУ zRAM)${C_RESET}"
     elif [ "$vm_swappiness" = "60" ]; then
         swappiness_human="${C_YELLOW}⚠️  60 (Заводское значение, частая запись на диск)${C_RESET}"
@@ -2410,7 +2428,7 @@ mod_server_audit() {
         else
             swap_human_list+=("Файл на диске $sw_dev ($sw_size)")
         fi
-    done < <(swapon --show --noheadings 2>/dev/null | awk '{print $1, $3}')
+    done < <(swapon --show --noheadings 2>/dev/null || awk '{print $1, $3}')
 
     if [ "${#swap_human_list[@]}" -gt 0 ]; then
         local joined_swap=$(printf "%s, " "${swap_human_list[@]}")
@@ -2845,9 +2863,9 @@ ROUTER_SVC_EOF
 
     echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
     local ext_ip_out="Не удалось определить (проверьте связь туннеля: wg show $out_if)"
-    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo "")
+    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || echo "")
     if [ -z "$probed_ip" ]; then
-        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
+        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
     fi
     if [ -n "$probed_ip" ]; then
         ext_ip_out="$probed_ip"

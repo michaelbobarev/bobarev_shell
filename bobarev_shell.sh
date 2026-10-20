@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.6.3 (Gold Master - Zero-Trust Audit FWD Filter & Clean UI)
+# Версия: 2.7 (Gold Master - Network Health, EasyTier & Netfilter Priority)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -16,10 +16,8 @@ C_RESET='\033[0m'
 
 MODULE_CANCELED=false
 
-# Безопасное добавление (а не перезапись) путей
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-# Глобальные переменные UI
 export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
 export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
 export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
@@ -110,6 +108,27 @@ is_tailscale_web_active() {
     return 1
 }
 
+get_tailscale_netfilter_mode() {
+    ! command -v tailscale &>/dev/null && { echo "none"; return 0; }
+    local nf_mode=$(tailscale get netfilter-mode 2>/dev/null || echo "")
+    if [ -z "$nf_mode" ]; then
+        local nf_num=$(tailscale debug prefs 2>/dev/null | grep -i '"NetfilterMode"' | grep -oE '[0-9]+' | head -n 1 || echo "")
+        case "$nf_num" in
+            0) nf_mode="off" ;;
+            1) nf_mode="nodivert" ;;
+            2) nf_mode="on" ;;
+        esac
+    fi
+    if [ -z "$nf_mode" ]; then
+        if iptables -S FORWARD 2>/dev/null | grep -q "ts-forward"; then
+            nf_mode="on"
+        else
+            nf_mode="off"
+        fi
+    fi
+    echo "$nf_mode"
+}
+
 get_iface_status_tag() {
     local iface="$1"
     local state="Отключен"
@@ -175,9 +194,12 @@ apply_wan_exit_nat() {
     iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
     iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-    [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
-    [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -s 10.144.144.0/24 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+    while iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null; do :; done
+    if [ -n "$pub_ip" ]; then
+        iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
+        while iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null; do :; done
+    fi
 
     if [ -f /etc/ufw/before.rules ]; then
         sed -i "/-o ${wan_dev} -j MASQUERADE/d" /etc/ufw/before.rules 2>/dev/null || true
@@ -191,7 +213,85 @@ apply_wan_exit_nat() {
     else
         iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
         ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j MASQUERADE"
-        echo -e "${C_BLUE}ℹ️ Закреплено правило маскарадинга (MASQUERADE) для $wan_dev.${C_RESET}"
+        echo -e "${C_BLUE}ℹ️ Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
+    fi
+}
+
+flush_and_reload_nat() {
+    local wan_dev=$(get_wan_if)
+    iptables -t nat -F 2>/dev/null || true
+    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
+        silent_run ufw reload
+    elif [ -n "$wan_dev" ]; then
+        apply_wan_exit_nat "$wan_dev" >/dev/null 2>&1 || true
+    fi
+    [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
+}
+
+set_tailscale_netfilter_priority() {
+    local target_mode="$1"
+    local wan_dev=$(get_wan_if)
+
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    mkdir -p /etc/sysctl.d
+    cat << 'TS_EOF' > /etc/sysctl.d/99-tailscale-forward.conf
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+TS_EOF
+
+    if [ "$target_mode" = "off" ]; then
+        silent_run tailscale set --netfilter-mode=off
+        iptables -D FORWARD -j ts-forward 2>/dev/null || true
+        iptables -D INPUT -j ts-input 2>/dev/null || true
+        iptables -t nat -D POSTROUTING -j ts-postrouting 2>/dev/null || true
+        iptables -F ts-forward 2>/dev/null || true
+        iptables -X ts-forward 2>/dev/null || true
+        iptables -F ts-input 2>/dev/null || true
+        iptables -X ts-input 2>/dev/null || true
+        iptables -t nat -F ts-postrouting 2>/dev/null || true
+        iptables -t nat -X ts-postrouting 2>/dev/null || true
+
+        [ -n "$wan_dev" ] && apply_wan_exit_nat "$wan_dev"
+        flush_and_reload_nat
+        echo -e "${C_GREEN}✅ Приоритет передан системе (netfilter-mode=off): цепочки Tailscale очищены, NAT в UFW перезагружен.${C_RESET}"
+    else
+        silent_run tailscale set --netfilter-mode=on
+        flush_and_reload_nat
+        echo -e "${C_GREEN}✅ Приоритет передан Tailscale (netfilter-mode=on): автоматическое управление правилами включено.${C_RESET}"
+    fi
+}
+
+print_network_health_summary() {
+    local wan_dev=$(get_wan_if)
+    local ip_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+    local nf_mode=$(get_tailscale_netfilter_mode)
+    local nat_count=0
+    [ -n "$wan_dev" ] && nat_count=$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -cE -- "-o ${wan_dev} .* -j (MASQUERADE|SNAT)" || true)
+
+    echo -e "\n${C_CYAN}🩺 --- Сводка сетевого здоровья (Маршрутизация и Туннели) ---${C_RESET}"
+    if [ "$ip_fwd" = "1" ]; then
+        echo -e "  • Форвардинг пакетов (IPv4): ${C_GREEN}✅ Включен (net.ipv4.ip_forward = 1)${C_RESET}"
+    else
+        echo -e "  • Форвардинг пакетов (IPv4): ${C_RED}❌ Выключен (туннели не смогут раздавать интернет!)${C_RESET}"
+    fi
+
+    if [ "$nf_mode" = "off" ]; then
+        echo -e "  • Фильтрация Tailscale:      ${C_GREEN}✅ Отключена (netfilter-mode=off — совместимо с EasyTier и UFW)${C_RESET}"
+    elif [ "$nf_mode" = "on" ]; then
+        echo -e "  • Фильтрация Tailscale:      ${C_BLUE}ℹ️  Включена (netfilter-mode=on — Tailscale сам управляет iptables)${C_RESET}"
+    fi
+
+    if [ "$nat_count" -eq 1 ]; then
+        echo -e "  • Трансляция NAT ($wan_dev):     ${C_GREEN}✅ Активна (1 чистое правило в POSTROUTING без дубликатов)${C_RESET}"
+    elif [ "$nat_count" -gt 1 ]; then
+        echo -e "  • Трансляция NAT ($wan_dev):     ${C_YELLOW}⚠️  Активна, но найдено дубликатов: $nat_count (рекомендуется очистка NAT)${C_RESET}"
+    else
+        echo -e "  • Трансляция NAT ($wan_dev):     ${C_YELLOW}⚠️  Не найдена в POSTROUTING для $wan_dev${C_RESET}"
+    fi
+
+    if ip link show tun0 >/dev/null 2>&1; then
+        local tun_ip=$(ip -4 -o addr show dev tun0 2>/dev/null | awk '{print $4}' | head -n 1 || echo "без IP")
+        echo -e "  • Туннель EasyTier (tun0):   ${C_GREEN}✅ Активен (IP: $tun_ip, сквозной транзит разрешен)${C_RESET}"
     fi
 }
 
@@ -216,6 +316,7 @@ apply_ufw_docker_protection() {
 -A DOCKER-USER -j ufw-user-forward
 -A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
 -A DOCKER-USER -i tailscale0 -j RETURN
+-A DOCKER-USER -i tun+ -j RETURN
 -A DOCKER-USER -i wg+ -j RETURN
 -A DOCKER-USER -i $wan_if -p tcp -m conntrack --ctstate NEW -j DROP
 -A DOCKER-USER -i $wan_if -p udp -m conntrack --ctstate NEW -j DROP
@@ -266,7 +367,7 @@ ETHTOOL_SVC_EOF
     disable_ufw_strict_rpfilter
     if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
         ensure_ufw_mangle_tcpmss
-        silent_run ufw reload
+        flush_and_reload_nat
     fi
     disable_ufw_strict_rpfilter
 
@@ -858,7 +959,7 @@ SSH_HARDENING_EOF
     fi
 }
 
-# 7. Защита ядра и сети (с префиксом 99-zzz-)
+# 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6 форвардингом)
 mod_hardening() {
     echo -e "${C_CYAN}🛡️ === 7/19. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
@@ -898,6 +999,8 @@ net.core.rmem_default = 1048576
 net.core.wmem_default = 1048576
 net.core.netdev_max_backlog = 10000
 net.netfilter.nf_conntrack_max = 131072
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
@@ -936,10 +1039,10 @@ HARDENING_EOF
         echo -e "${C_GREEN}✅ Аппаратный таймер защиты от зависаний (Watchdog 15s) для мини-ПК активирован.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN}✅ Защита ядра, расширенные UDP-буферы, TCP BBR и авто-ребут при панике применены.${C_RESET}"
+    echo -e "${C_GREEN}✅ Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
 }
 
-# 8. Firewall UFW (Полная Zero-Trust изоляция + гарантированный сброс цепочки DOCKER-USER)
+# 8. Firewall UFW (Полная Zero-Trust изоляция + поддержка EasyTier tun0 и приоритета UFW)
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -963,7 +1066,10 @@ mod_ufw() {
     silent_run ufw default deny incoming
     silent_run ufw default allow outgoing
 
-    if prompt_yn "Разрешить сквозную маршрутизацию пакетов (необходимо для работы в качестве роутера и шлюза)?" "true"; then
+    local allow_routed=false
+    if prompt_yn "Разрешить сквозную маршрутизацию пакетов (необходимо для работы Tailscale Exit Node, EasyTier tun0 и роутера)?" "true"; then
+        allow_routed=true
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
         silent_run ufw default allow routed
         silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
     else
@@ -998,17 +1104,29 @@ mod_ufw() {
     fi
 
     local netdev="$DEFAULT_WAN_IF"
-    if [ -n "$netdev" ]; then
+    if [ -n "$netdev" ] && [ "$allow_routed" = true ]; then
         silent_run ufw route allow in on tailscale0 out on "$netdev" comment 'TS Exit Node Out'
         silent_run ufw route allow in on "$netdev" out on tailscale0 comment 'TS Exit Node In'
-    fi
 
-    if command -v tailscale &>/dev/null || [ -f /etc/systemd/system/tailscale-gro.service ]; then
+        if ip link show tun0 >/dev/null 2>&1; then
+            silent_run ufw route allow in on tun0 out on "$netdev" comment 'EasyTier tun0 Out'
+            silent_run ufw route allow in on "$netdev" out on tun0 comment 'EasyTier tun0 In'
+            echo -e "${C_BLUE}ℹ️ Обнаружен туннель tun0 (EasyTier): добавлены правила сквозного транзита через $netdev.${C_RESET}"
+        fi
+
+        apply_wan_exit_nat "$netdev"
         ensure_ufw_mangle_tcpmss
     fi
 
-    if [ "$(tailscale get advertise-exit-node 2>/dev/null || echo 'false')" = "true" ] && [ -n "$netdev" ]; then
-        apply_wan_exit_nat "$netdev"
+    if command -v tailscale &>/dev/null; then
+        ensure_ufw_mangle_tcpmss
+        if prompt_yn "Отдать приоритет сетевых правил системе и UFW (tailscale set --netfilter-mode=off)?\n\n• Да (Рекомендуется): Tailscale не перехватывает iptables, работают и шлюз Tailscale, и туннели вроде EasyTier (tun0).\n• Нет: Tailscale сам управляет своими цепочками фильтрации." "true"; then
+            silent_run tailscale set --netfilter-mode=off
+            echo -e "${C_GREEN}✅ Включен режим совместимости с UFW и EasyTier (netfilter-mode=off).${C_RESET}"
+        else
+            silent_run tailscale set --netfilter-mode=on
+            echo -e "${C_BLUE}ℹ️ Оставлен стандартный режим фильтрации Tailscale (netfilter-mode=on).${C_RESET}"
+        fi
     fi
 
     if [ -f /etc/default/bobarev-router ]; then
@@ -1031,7 +1149,7 @@ mod_ufw() {
     fi
 
     if [ -n "$netdev" ]; then
-        if prompt_yn "Включить защиту контейнеров Docker за UFW (запретить Docker обходить фаервол снаружи, оставив доступ через Tailscale и WG)?" "true"; then
+        if prompt_yn "Включить защиту контейнеров Docker за UFW (запретить Docker обходить фаервол снаружи, оставив доступ через Tailscale, EasyTier и WG)?" "true"; then
             apply_ufw_docker_protection "$netdev"
             echo -e "${C_GREEN}✅ Защита контейнеров Docker снаружи успешно включена.${C_RESET}"
         fi
@@ -1052,12 +1170,15 @@ mod_ufw() {
         echo -e "${C_GREEN}✅ Брандмауэр настроен: SSH ($port) открыт публично, P2P (41641/udp) и маршрутизация Tailscale разрешены.${C_RESET}"
     fi
 
+    iptables -t nat -F 2>/dev/null || true
     silent_run ufw --force enable
     silent_run ufw delete allow in on tailscale0
+    silent_run ufw reload
     silent_run ufw logging off
     disable_ufw_strict_rpfilter
     [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
     echo -e "${C_GREEN}✅ Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
+    print_network_health_summary
 }
 
 # 9. Блокировка Root
@@ -1097,7 +1218,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale
+# 10. Tailscale (с управлением приоритетом сетевых правил netfilter-mode и диагностикой здоровья)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1112,6 +1233,12 @@ mod_tailscale() {
                 enable_routing_optimizations || true
             else
                 echo -e "${C_YELLOW}⏭️ Установка Tailscale пропущена пользователем.${C_RESET}"
+                return 0
+            fi
+        fi
+        if command -v tailscale &>/dev/null; then
+            if prompt_yn "Отдать приоритет сетевых правил системе и UFW (netfilter-mode=off — рекомендуется для совместимости с EasyTier и чистым NAT)?" "true"; then
+                set_tailscale_netfilter_priority "off"
             fi
         fi
         return 0
@@ -1120,8 +1247,12 @@ mod_tailscale() {
     while true; do
         MODULE_CANCELED=false
         DEFAULT_WAN_IF=$(get_wan_if)
+        local nf_cur=$(get_tailscale_netfilter_mode)
+        local nf_label="Авто (Tailscale)"
+        [ "$nf_cur" = "off" ] && nf_label="Система / UFW (off)"
+
         local ts_choice
-        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом:" 18 $WT_WIDTH 9 \
+        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "Управление сетевым узлом (Фильтрация: $nf_label):" 19 $WT_WIDTH 10 \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -1129,7 +1260,8 @@ mod_tailscale() {
         "5" "🔒 Стелс-режим" \
         "6" "⚡ Ускорение и MSS Clamping" \
         "7" "💻 Локальный веб-интерфейс" \
-        "8" "🔄 Полный сброс" \
+        "8" "🎛️ Приоритет сетевых правил" \
+        "9" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
             break
         fi
@@ -1164,11 +1296,18 @@ mod_tailscale() {
                 "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
                     case "$en_choice" in
                         1) 
-                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве сетевого шлюза (с отключенным netfilter и авто-преобразованием SNAT)...${C_RESET}"
+                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве сетевого шлюза...${C_RESET}"
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
                             disable_ufw_strict_rpfilter
-                            
-                            silent_run tailscale up --advertise-exit-node --netfilter-mode=off --reset
+
+                            local use_nf_off="off"
+                            if prompt_yn "Отключить вмешательство Tailscale в фаервол (netfilter-mode=off)?\n\n• Да (Рекомендуется): приоритет остается у UFW, системного NAT и туннелей вроде EasyTier (tun0).\n• Нет: Tailscale сам управляет цепочками iptables." "true"; then
+                                use_nf_off="off"
+                                silent_run tailscale up --advertise-exit-node --netfilter-mode=off --reset
+                            else
+                                use_nf_off="on"
+                                silent_run tailscale up --advertise-exit-node --netfilter-mode=on --reset
+                            fi
 
                             local wan_dev=$(get_wan_if)
                             if [ -n "$wan_dev" ]; then
@@ -1180,12 +1319,17 @@ mod_tailscale() {
                                     silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
                                     silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'TS Exit Node Out'
                                     silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'TS Exit Node In'
-                                    silent_run ufw reload
+                                    if ip link show tun0 >/dev/null 2>&1; then
+                                        silent_run ufw route allow in on tun0 out on "$wan_dev" comment 'EasyTier tun0 Out'
+                                        silent_run ufw route allow in on "$netdev" out on tun0 comment 'EasyTier tun0 In'
+                                    fi
+                                    flush_and_reload_nat
                                 fi
                             fi
                             disable_ufw_strict_rpfilter
 
-                            echo -e "${C_GREEN}✅ Сервер успешно настроен как шлюз (правила защищены от перезагрузки)!${C_RESET}"
+                            echo -e "${C_GREEN}✅ Сервер успешно настроен как шлюз (netfilter-mode=$use_nf_off, правила защищены от перезагрузки)!${C_RESET}"
+                            print_network_health_summary
                             
                             whiptail --title "⚠️ ВАЖНО: Активация в панели Tailscale" --msgbox \
 "Сервер объявлен шлюзом, форвардинг и правила NAT/SNAT закреплены!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
@@ -1193,17 +1337,17 @@ mod_tailscale() {
                         2) 
                             silent_run tailscale set --advertise-exit-node=false
                             local wan_dev=$(get_wan_if)
-                            if [ -n "$wan_dev" ]; then
+                            if [ -n "$wan_dev" ] && ! ip link show tun0 >/dev/null 2>&1; then
                                 iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
                                 local pub_ip=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null || awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
                                 [ -n "$pub_ip" ] && iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
                                 if [ -f /etc/ufw/before.rules ]; then
                                     sed -i "/-o ${wan_dev} -j MASQUERADE/d" /etc/ufw/before.rules 2>/dev/null || true
                                     sed -i "/-o ${wan_dev} -j SNAT/d" /etc/ufw/before.rules 2>/dev/null || true
-                                    silent_run ufw reload
+                                    flush_and_reload_nat
                                 fi
                             fi
-                            echo -e "${C_GREEN}✅ Функция шлюза и правила NAT отключены.${C_RESET}" 
+                            echo -e "${C_GREEN}✅ Функция шлюза Tailscale отключена.${C_RESET}" 
                             ;;
                         3)
                             local target_ip=""
@@ -1281,6 +1425,24 @@ mod_tailscale() {
                 pause_enter
                 ;;
             8)
+                local nf_choice
+                if nf_choice=$(whiptail --title "Приоритет сетевых правил" --menu "\nТекущий режим netfilter-mode: $nf_cur\n\nЕсли на сервере используется EasyTier (tun0) или собственный NAT в UFW, рекомендуется отключить перехват со стороны Tailscale:" 16 $WT_WIDTH 3 \
+                "1" "🛡️ Приоритет системы и UFW (netfilter-mode=off, для EasyTier)" \
+                "2" "🔗 Приоритет Tailscale (netfilter-mode=on, авто-правила)" \
+                "3" "🧹 Очистить дубликаты NAT и перезагрузить UFW" 3>&1 1>&2 2>&3); then
+                    case "$nf_choice" in
+                        1) set_tailscale_netfilter_priority "off" ;;
+                        2) set_tailscale_netfilter_priority "on" ;;
+                        3)
+                            flush_and_reload_nat
+                            echo -e "${C_GREEN}✅ Таблица NAT очищена от дубликатов, правила UFW перезагружены.${C_RESET}"
+                            ;;
+                    esac
+                    print_network_health_summary
+                    pause_enter
+                fi
+                ;;
+            9)
                 if prompt_yn "Полностью сбросить все сетевые параметры к заводским значениям?" "false"; then
                     tailscale up --reset 2>&1 | grep -v "accept-routes" || true
                     if command -v ufw &>/dev/null; then
@@ -1708,7 +1870,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с фильтром ALLOW FWD при проверке изоляции tailscale0)
+# 17. Полный аудит сервера (с проверкой Zero-Trust, EasyTier tun0, netfilter-mode и NAT)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -1788,7 +1950,6 @@ mod_server_audit() {
     local load_avg=$(uptime | awk -F'load average:' '{ print $2 }' | sed 's/^[ \t]*//')
     local disk_usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " из " $2 " (занято " $5 ")"}' || echo "N/A")
 
-    # 1. Активный микро-стресс тест CPU
     local steal_status="${C_BLUE}Неприменимо (физическое железо)${C_RESET}"
     local cpu_speed_status="${C_BLUE}Стандартная${C_RESET}"
     local disk_io_status="${C_BLUE}Не проверялся${C_RESET}"
@@ -1810,7 +1971,6 @@ mod_server_audit() {
         oversell_score=$((oversell_score + 1))
     fi
 
-    # 2. Встроенный тест задержки диска (4K Sync Latency)
     local io_test_file="/root/.bobarev_io_test_$$"
     local t_io1=$(LC_ALL=C date +%s.%N 2>/dev/null || awk '{print $1}' /proc/uptime)
     if dd if=/dev/zero of="$io_test_file" bs=4k count=40 oflag=dsync status=none 2>/dev/null; then
@@ -1872,7 +2032,6 @@ mod_server_audit() {
         fi
     fi
 
-    # 3. Проверка очередей голодания ядра Linux PSI
     if [ -f /proc/pressure/cpu ] && [ -f /proc/pressure/io ]; then
         local psi_cpu=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/cpu 2>/dev/null || echo "0.00")
         local psi_io=$(LC_ALL=C awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {split($i,a,"="); print a[2]}}' /proc/pressure/io 2>/dev/null || echo "0.00")
@@ -1983,6 +2142,7 @@ mod_server_audit() {
         fi
     }
     check_param "kernel.dmesg_restrict"           "1"        "Защита журнала ядра:       " "Включена" "Отключена"
+    check_param "net.ipv4.ip_forward"             "1"        "Форвардинг пакетов (IPv4): " "Включен (маршрутизация активна)" "Отключен"
     check_param "net.ipv4.tcp_syncookies"         "1"        "Защита от флуда (SYN):     " "Включена" "Отключена"
     check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:    " "Активно" "Стандартное"
     check_param "net.core.rmem_max"               "26214400" "Расширенные буферы VPN:    " "Активны (25 МБ под высокие скорости)" "Стандартные"
@@ -2005,7 +2165,6 @@ mod_server_audit() {
             echo -e "  • Доступ к порту SSH:        ${C_YELLOW}🌍 Публичный (открыт для всех сетей)${C_RESET}"
         fi
 
-        # Исключаем транзитные правила ALLOW FWD, чтобы проверять строго входящие подключения ALLOW IN на tailscale0
         if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
             echo -e "  • Изоляция сети Tailscale:   ${C_YELLOW}⚠️  Отключена (открыты все порты на tailscale0)${C_RESET}"
         else
@@ -2014,6 +2173,15 @@ mod_server_audit() {
                 open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
             fi
             echo -e "  • Изоляция сети Tailscale:   ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
+        fi
+
+        if [ -n "$wan_if" ]; then
+            local nat_cnt=$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -cE -- "-o ${wan_if} .* -j (MASQUERADE|SNAT)" || true)
+            if [ "$nat_cnt" -eq 1 ]; then
+                echo -e "  • Трансляция NAT ($wan_if):     ${C_GREEN}✅ Активна (1 чистое правило без дубликатов)${C_RESET}"
+            elif [ "$nat_cnt" -gt 1 ]; then
+                echo -e "  • Трансляция NAT ($wan_if):     ${C_YELLOW}⚠️  Найдено дубликатов: $nat_cnt (очистите через п. 10 -> 8 -> 3)${C_RESET}"
+            fi
         fi
 
         if [ -f /etc/default/bobarev-router ]; then
@@ -2093,6 +2261,10 @@ mod_server_audit() {
         local ts_stealth_human
         [ "$ts_stealth" = "true" ] && ts_stealth_human="${C_GREEN}Включен (отбрасывает входящие из сети)${C_RESET}" || ts_stealth_human="${C_BLUE}Выключен (открыт для своих устройств)${C_RESET}"
 
+        local ts_nf_mode=$(get_tailscale_netfilter_mode)
+        local ts_nf_human="${C_BLUE}Автоматический (netfilter-mode=on)${C_RESET}"
+        [ "$ts_nf_mode" = "off" ] && ts_nf_human="${C_GREEN}✅ Отключен (netfilter-mode=off — приоритет у UFW и EasyTier)${C_RESET}"
+
         local ts_web_human="${C_BLUE}Отключена (порт 5252 закрыт)${C_RESET}"
         if is_tailscale_web_active; then
             if LC_ALL=C ufw status 2>/dev/null | awk '!/ALLOW FWD/ && (/^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/ || /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/)' | grep -q .; then
@@ -2108,6 +2280,7 @@ mod_server_audit() {
         echo -e "  • Раздает свой интернет:     $ts_adv_exit_human"
         echo -e "  • Доступ к чужим подсетям:   $ts_accept_human"
         echo -e "  • Скрытый режим (Stealth):   $ts_stealth_human"
+        echo -e "  • Перехват правил фаервола:  $ts_nf_human"
         echo -e "  • Веб-панель (порт 5252):    $ts_web_human"
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
@@ -2605,7 +2778,7 @@ iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to
 iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
 iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
 
-iptables -t nat -D POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null || true
+while iptables -t nat -D POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null; do :; done
 iptables -t nat -A POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE
 iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
@@ -2652,9 +2825,9 @@ ROUTER_SVC_EOF
 
     echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
     local ext_ip_out="Не удалось определить (проверьте связь туннеля: wg show $out_if)"
-    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || echo "")
+    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo "")
     if [ -z "$probed_ip" ]; then
-        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
+        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
     fi
     if [ -n "$probed_ip" ]; then
         ext_ip_out="$probed_ip"
@@ -2720,7 +2893,7 @@ mod_backup_manager() {
             [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
             silent_run systemctl restart systemd-journald
             silent_run systemctl restart sshd || silent_run systemctl restart ssh
-            command -v ufw &>/dev/null && silent_run ufw reload
+            command -v ufw &>/dev/null && flush_and_reload_nat
             disable_ufw_strict_rpfilter
             echo -e "${C_GREEN}✅ Настройки успешно восстановлены и применены!${C_RESET}"
         fi
@@ -2765,7 +2938,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.6.3 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.7 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

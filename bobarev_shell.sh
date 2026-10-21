@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.9 (Gold Master - Dynamic Interface Routing & Clean Audit Edition)
+# Версия: 2.9.1 (Gold Master - Clear Priority Menu & Dynamic Interface Routing)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -306,11 +306,11 @@ TS_EOF
             apply_wan_exit_nat "$wan_dev"
         fi
         flush_and_reload_nat
-        echo -e "${C_GREEN}✅ Приоритет сетевых правил передан системе (UFW).${C_RESET}"
+        echo -e "${C_GREEN}✅ Приоритет сетевых правил передан брандмауэру UFW (системный режим).${C_RESET}"
     else
         silent_run tailscale set --netfilter-mode=on
         flush_and_reload_nat
-        echo -e "${C_GREEN}✅ Приоритет сетевых правил передан службе Tailscale.${C_RESET}"
+        echo -e "${C_GREEN}✅ Приоритет сетевых правил передан Tailscale (встроенный авто-режим).${C_RESET}"
     fi
     return 0
 }
@@ -330,9 +330,9 @@ print_network_health_summary() {
     fi
 
     if [ "$nf_mode" = "off" ]; then
-        echo -e "  • Приоритет правил фаервола: ${C_GREEN}✅ Системный (управляется через UFW)${C_RESET}"
+        echo -e "  • Приоритет правил фаервола: ${C_GREEN}✅ Брандмауэр UFW (системный режим)${C_RESET}"
     elif [ "$nf_mode" = "on" ]; then
-        echo -e "  • Приоритет правил фаервола: ${C_BLUE}ℹ️  Автоматический (управляется Tailscale)${C_RESET}"
+        echo -e "  • Приоритет правил фаервола: ${C_BLUE}ℹ️  Tailscale (встроенный авто-режим)${C_RESET}"
     fi
 
     if [ "$nat_count" -eq 1 ]; then
@@ -1169,10 +1169,10 @@ mod_ufw() {
         ensure_ufw_mangle_tcpmss
         if prompt_yn "Передать приоритет управления сетевыми правилами системе (UFW)?" "true"; then
             silent_run tailscale set --netfilter-mode=off
-            echo -e "${C_GREEN}✅ Приоритет сетевых правил передан системе (UFW).${C_RESET}"
+            echo -e "${C_GREEN}✅ Приоритет сетевых правил передан брандмауэру UFW (системный режим).${C_RESET}"
         else
             silent_run tailscale set --netfilter-mode=on
-            echo -e "${C_BLUE}ℹ️ Управление правилами оставлено службе Tailscale.${C_RESET}"
+            echo -e "${C_BLUE}ℹ️ Приоритет сетевых правил оставлен Tailscale (встроенный авто-режим).${C_RESET}"
         fi
     fi
 
@@ -1270,7 +1270,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (лаконичные вопросы и динамический выбор интерфейсов)
+# 10. Tailscale (понятное меню приоритета UFW vs Tailscale и выбор интерфейсов)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1471,10 +1471,10 @@ mod_tailscale() {
                 ;;
             8)
                 local nf_choice
-                if nf_choice=$(whiptail --title "Приоритет сетевых правил" --menu "\nВыберите режим управления сетевыми правилами и маршрутизацией:" 15 $WT_WIDTH 4 \
-                "1" "🛡️ Приоритет системы (UFW управляет всеми интерфейсами)" \
-                "2" "🔗 Приоритет службы (Автоматическое управление)" \
-                "3" "🔀 Выбрать интерфейсы для сквозной маршрутизации" \
+                if nf_choice=$(whiptail --title "Приоритет сетевых правил" --menu "Действие:" 13 $WT_WIDTH 4 \
+                "1" "🛡️ Приоритет брандмауэра UFW (системный режим)" \
+                "2" "🔗 Приоритет Tailscale (встроенный авто-режим)" \
+                "3" "🔀 Выбрать интерфейсы для сквозного транзита" \
                 "4" "🧹 Очистить дубликаты NAT и перезагрузить UFW" 3>&1 1>&2 2>&3); then
                     case "$nf_choice" in
                         1) set_tailscale_netfilter_priority "off" ;;
@@ -1484,7 +1484,7 @@ mod_tailscale() {
                             if [ -n "$wan_dev" ]; then
                                 select_and_apply_routed_interfaces "$wan_dev"
                                 flush_and_reload_nat
-                                echo -e "${C_GREEN}✅ Правила сквозной маршрутизации для выбранных интерфейсов обновлены.${C_RESET}"
+                                echo -e "${C_GREEN}✅ Правила сквозного транзита для выбранных интерфейсов обновлены.${C_RESET}"
                             fi
                             ;;
                         4)
@@ -2318,8 +2318,8 @@ mod_server_audit() {
         [ "$ts_stealth" = "true" ] && ts_stealth_human="${C_GREEN}Включен (отбрасывает входящие из сети)${C_RESET}" || ts_stealth_human="${C_BLUE}Выключен (открыт для своих устройств)${C_RESET}"
 
         local ts_nf_mode=$(get_tailscale_netfilter_mode)
-        local ts_nf_human="${C_BLUE}Автоматический (управляется Tailscale)${C_RESET}"
-        [ "$ts_nf_mode" = "off" ] && ts_nf_human="${C_GREEN}✅ Системный (приоритет передан UFW)${C_RESET}"
+        local ts_nf_human="${C_BLUE}Tailscale (встроенный авто-режим)${C_RESET}"
+        [ "$ts_nf_mode" = "off" ] && ts_nf_human="${C_GREEN}✅ Брандмауэр UFW (системный режим)${C_RESET}"
 
         local ts_web_human="${C_BLUE}Отключена (порт 5252 закрыт)${C_RESET}"
         if is_tailscale_web_active; then
@@ -2994,7 +2994,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.9 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.9.1 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

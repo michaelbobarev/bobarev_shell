@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.9.1 (Gold Master - Clear Priority Menu & Dynamic Interface Routing)
+# Версия: 2.9.2 (Gold Master - Smart Priority Persistence & No Duplicate Prompts)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -110,23 +110,29 @@ is_tailscale_web_active() {
 
 get_tailscale_netfilter_mode() {
     ! command -v tailscale &>/dev/null && { echo "none"; return 0; }
-    local nf_mode=$(tailscale get netfilter-mode 2>/dev/null || echo "")
-    if [ -z "$nf_mode" ]; then
-        local nf_num=$(tailscale debug prefs 2>/dev/null | grep -i '"NetfilterMode"' | grep -oE '[0-9]+' | head -n 1 || echo "")
-        case "$nf_num" in
-            0) nf_mode="off" ;;
-            1) nf_mode="nodivert" ;;
-            2) nf_mode="on" ;;
-        esac
-    fi
-    if [ -z "$nf_mode" ]; then
-        if iptables -S FORWARD 2>/dev/null | grep -q "ts-forward"; then
-            nf_mode="on"
-        else
-            nf_mode="off"
+    if [ -f /etc/default/bobarev-netfilter ]; then
+        local saved_mode=$(grep -E '^TS_NETFILTER_MODE=' /etc/default/bobarev-netfilter 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+        if [ "$saved_mode" = "off" ] || [ "$saved_mode" = "on" ]; then
+            echo "$saved_mode"
+            return 0
         fi
     fi
-    echo "$nf_mode"
+    local pref_line=$(tailscale debug prefs 2>/dev/null | grep -i '"NetfilterMode"' || echo "")
+    if echo "$pref_line" | grep -q -iE '"off"|:[[:space:]]*0[,[:space:]]*$'; then
+        echo "off"
+        return 0
+    elif echo "$pref_line" | grep -q -iE '"nodivert"|:[[:space:]]*1[,[:space:]]*$'; then
+        echo "nodivert"
+        return 0
+    elif echo "$pref_line" | grep -q -iE '"on"|:[[:space:]]*2[,[:space:]]*$'; then
+        echo "on"
+        return 0
+    fi
+    if iptables -S FORWARD 2>/dev/null | grep -q "ts-forward"; then
+        echo "on"
+    else
+        echo "off"
+    fi
 }
 
 get_iface_status_tag() {
@@ -275,8 +281,33 @@ flush_and_reload_nat() {
     return 0
 }
 
+clean_tailscale_iptables_chains() {
+    while iptables -D FORWARD -j ts-forward 2>/dev/null; do :; done
+    while iptables -D INPUT -j ts-input 2>/dev/null; do :; done
+    while iptables -t nat -D POSTROUTING -j ts-postrouting 2>/dev/null; do :; done
+    iptables -F ts-forward 2>/dev/null || true
+    iptables -X ts-forward 2>/dev/null || true
+    iptables -F ts-input 2>/dev/null || true
+    iptables -X ts-input 2>/dev/null || true
+    iptables -t nat -F ts-postrouting 2>/dev/null || true
+    iptables -t nat -X ts-postrouting 2>/dev/null || true
+
+    if command -v ip6tables &>/dev/null; then
+        while ip6tables -D FORWARD -j ts-forward 2>/dev/null; do :; done
+        while ip6tables -D INPUT -j ts-input 2>/dev/null; do :; done
+        while ip6tables -t nat -D POSTROUTING -j ts-postrouting 2>/dev/null; do :; done
+        ip6tables -F ts-forward 2>/dev/null || true
+        ip6tables -X ts-forward 2>/dev/null || true
+        ip6tables -F ts-input 2>/dev/null || true
+        ip6tables -X ts-input 2>/dev/null || true
+        ip6tables -t nat -F ts-postrouting 2>/dev/null || true
+        ip6tables -t nat -X ts-postrouting 2>/dev/null || true
+    fi
+}
+
 set_tailscale_netfilter_priority() {
     local target_mode="$1"
+    local quiet="${2:-false}"
     local wan_dev=$(get_wan_if)
 
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
@@ -286,31 +317,30 @@ net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 TS_EOF
 
+    echo "TS_NETFILTER_MODE=\"$target_mode\"" > /etc/default/bobarev-netfilter
+
     if [ "$target_mode" = "off" ]; then
         silent_run tailscale set --netfilter-mode=off
-        iptables -D FORWARD -j ts-forward 2>/dev/null || true
-        iptables -D INPUT -j ts-input 2>/dev/null || true
-        iptables -t nat -D POSTROUTING -j ts-postrouting 2>/dev/null || true
-        iptables -F ts-forward 2>/dev/null || true
-        iptables -X ts-forward 2>/dev/null || true
-        iptables -F ts-input 2>/dev/null || true
-        iptables -X ts-input 2>/dev/null || true
-        iptables -t nat -F ts-postrouting 2>/dev/null || true
-        iptables -t nat -X ts-postrouting 2>/dev/null || true
+        clean_tailscale_iptables_chains
 
         if [ -n "$wan_dev" ]; then
             for r_if in $(ip -br link show 2>/dev/null | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' | grep -vE "^(lo|${wan_dev}|docker.*|veth.*|br-.*)$" || true); do
                 silent_run ufw route allow in on "$r_if" out on "$wan_dev" comment "Route $r_if to $wan_dev"
                 silent_run ufw route allow in on "$wan_dev" out on "$r_if" comment "Route $wan_dev to $r_if"
             done
-            apply_wan_exit_nat "$wan_dev"
+            apply_wan_exit_nat "$wan_dev" "true"
         fi
         flush_and_reload_nat
-        echo -e "${C_GREEN}✅ Приоритет сетевых правил передан брандмауэру UFW (системный режим).${C_RESET}"
+        clean_tailscale_iptables_chains
+        if [ "$quiet" != "true" ]; then
+            echo -e "${C_GREEN}✅ Приоритет сетевых правил передан брандмауэру UFW (системный режим).${C_RESET}"
+        fi
     else
         silent_run tailscale set --netfilter-mode=on
         flush_and_reload_nat
-        echo -e "${C_GREEN}✅ Приоритет сетевых правил передан Tailscale (встроенный авто-режим).${C_RESET}"
+        if [ "$quiet" != "true" ]; then
+            echo -e "${C_BLUE}ℹ️ Приоритет сетевых правил оставлен Tailscale (встроенный авто-режим).${C_RESET}"
+        fi
     fi
     return 0
 }
@@ -1098,7 +1128,7 @@ HARDENING_EOF
     echo -e "${C_GREEN}✅ Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
 }
 
-# 8. Firewall UFW (Динамический выбор активных интерфейсов и лаконичные вопросы)
+# 8. Firewall UFW (Динамический выбор активных интерфейсов и сохранение приоритета)
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1165,15 +1195,15 @@ mod_ufw() {
         echo -e "${C_BLUE}ℹ️ Обнаружен активный веб-интерфейс: открыт порт 5252/tcp на tailscale0.${C_RESET}"
     fi
 
+    local chosen_nf_mode=""
     if command -v tailscale &>/dev/null; then
         ensure_ufw_mangle_tcpmss
         if prompt_yn "Передать приоритет управления сетевыми правилами системе (UFW)?" "true"; then
-            silent_run tailscale set --netfilter-mode=off
-            echo -e "${C_GREEN}✅ Приоритет сетевых правил передан брандмауэру UFW (системный режим).${C_RESET}"
+            chosen_nf_mode="off"
         else
-            silent_run tailscale set --netfilter-mode=on
-            echo -e "${C_BLUE}ℹ️ Приоритет сетевых правил оставлен Tailscale (встроенный авто-режим).${C_RESET}"
+            chosen_nf_mode="on"
         fi
+        echo "TS_NETFILTER_MODE=\"$chosen_nf_mode\"" > /etc/default/bobarev-netfilter
     fi
 
     if [ -f /etc/default/bobarev-router ]; then
@@ -1221,7 +1251,9 @@ mod_ufw() {
     silent_run ufw --force enable
     silent_run ufw delete allow in on tailscale0
     silent_run ufw reload
-    if [ -n "$netdev" ] && [ "$allow_routed" = true ]; then
+    if [ -n "$chosen_nf_mode" ]; then
+        set_tailscale_netfilter_priority "$chosen_nf_mode"
+    elif [ -n "$netdev" ] && [ "$allow_routed" = true ]; then
         apply_wan_exit_nat "$netdev" "true" || true
     fi
     silent_run ufw logging off
@@ -1270,7 +1302,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (понятное меню приоритета UFW vs Tailscale и выбор интерфейсов)
+# 10. Tailscale (без дублирования вопросов в автонастройке и при включении шлюза)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1289,8 +1321,16 @@ mod_tailscale() {
             fi
         fi
         if command -v tailscale &>/dev/null; then
-            if prompt_yn "Передать приоритет управления сетевыми правилами системе (UFW)?" "true"; then
-                set_tailscale_netfilter_priority "off"
+            # Задаем вопрос только если он еще не был задан в Модуле 8
+            if [ -f /etc/default/bobarev-netfilter ]; then
+                local saved_nf=$(get_tailscale_netfilter_mode)
+                set_tailscale_netfilter_priority "$saved_nf" "true"
+            else
+                if prompt_yn "Передать приоритет управления сетевыми правилами системе (UFW)?" "true"; then
+                    set_tailscale_netfilter_priority "off"
+                else
+                    set_tailscale_netfilter_priority "on"
+                fi
             fi
         fi
         return 0
@@ -1350,14 +1390,11 @@ mod_tailscale() {
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
                             disable_ufw_strict_rpfilter
 
-                            local use_nf_off="off"
-                            if prompt_yn "Передать приоритет управления сетевыми правилами системе (UFW)?" "true"; then
-                                use_nf_off="off"
-                                silent_run tailscale up --advertise-exit-node --netfilter-mode=off --reset
-                            else
-                                use_nf_off="on"
-                                silent_run tailscale up --advertise-exit-node --netfilter-mode=on --reset
-                            fi
+                            # Используем уже выбранный приоритет без повторного опроса
+                            local active_nf=$(get_tailscale_netfilter_mode)
+                            [ "$active_nf" = "none" ] && active_nf="off"
+
+                            silent_run tailscale set --advertise-exit-node=true
 
                             local wan_dev=$(get_wan_if)
                             if [ -n "$wan_dev" ]; then
@@ -1367,10 +1404,13 @@ mod_tailscale() {
                                 if command -v ufw &>/dev/null; then
                                     silent_run ufw default allow routed
                                     silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
-                                    select_and_apply_routed_interfaces "$wan_dev"
-                                    flush_and_reload_nat
+                                    for r_if in $(ip -br link show 2>/dev/null | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' | grep -vE "^(lo|${wan_dev}|docker.*|veth.*|br-.*)$" || true); do
+                                        silent_run ufw route allow in on "$r_if" out on "$wan_dev" comment "Route $r_if to $wan_dev"
+                                        silent_run ufw route allow in on "$wan_dev" out on "$r_if" comment "Route $wan_dev to $r_if"
+                                    done
                                 fi
                             fi
+                            set_tailscale_netfilter_priority "$active_nf" "true"
                             disable_ufw_strict_rpfilter
 
                             echo -e "${C_GREEN}✅ Сервер успешно настроен как шлюз (правила защищены от перезагрузки)!${C_RESET}"
@@ -1489,6 +1529,7 @@ mod_tailscale() {
                             ;;
                         4)
                             flush_and_reload_nat
+                            [ "$(get_tailscale_netfilter_mode)" = "off" ] && clean_tailscale_iptables_chains
                             echo -e "${C_GREEN}✅ Таблица NAT очищена от дубликатов, правила UFW перезагружены.${C_RESET}"
                             ;;
                     esac
@@ -1499,6 +1540,7 @@ mod_tailscale() {
             9)
                 if prompt_yn "Полностью сбросить все сетевые параметры к заводским значениям?" "false"; then
                     tailscale up --reset 2>&1 | grep -v "accept-routes" || true
+                    rm -f /etc/default/bobarev-netfilter 2>/dev/null || true
                     if command -v ufw &>/dev/null; then
                         silent_run ufw delete allow in on tailscale0 to any port 5252 proto tcp
                     fi
@@ -2925,7 +2967,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -2994,7 +3036,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.9.1 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.9.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

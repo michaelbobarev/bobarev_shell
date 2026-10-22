@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.9.2 (Gold Master - Smart Priority Persistence & No Duplicate Prompts)
+# Версия: 2.9.3 (Gold Master - Conditional Tailscale Port & Clean Audit)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -101,6 +101,7 @@ is_tailscale_authenticated() {
 }
 
 is_tailscale_web_active() {
+    ! command -v tailscale &>/dev/null && return 1
     local web_val=$(tailscale get webclient 2>/dev/null || echo "false")
     [ "$web_val" = "true" ] && return 0
     systemctl is-active --quiet tailscale-web.service 2>/dev/null && return 0
@@ -510,6 +511,10 @@ net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 TS_EOF
         sysctl --system > /dev/null
+    fi
+
+    if command -v ufw &>/dev/null; then
+        silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
     fi
 
     if is_tailscale_authenticated; then
@@ -1128,7 +1133,7 @@ HARDENING_EOF
     echo -e "${C_GREEN}✅ Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
 }
 
-# 8. Firewall UFW (Динамический выбор активных интерфейсов и сохранение приоритета)
+# 8. Firewall UFW (открывает 41641/udp только при наличии Tailscale в системе)
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1145,6 +1150,7 @@ mod_ufw() {
 
     remove_ufw_docker_protection
     silent_run ufw delete allow in on tailscale0
+    silent_run ufw delete allow 41641/udp
     silent_run ufw --force reset
     rm -f /etc/ufw/user.rules.* /etc/ufw/user6.rules.* /etc/ufw/before.rules.* /etc/ufw/after.rules.* /etc/ufw/before6.rules.* /etc/ufw/after6.rules.* 2>/dev/null || true
 
@@ -1188,16 +1194,14 @@ mod_ufw() {
         do_restrict=true
     fi
 
-    silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
-
-    if is_tailscale_web_active; then
-        silent_run ufw allow in on tailscale0 to any port 5252 proto tcp comment 'Tailscale Web UI'
-        echo -e "${C_BLUE}ℹ️ Обнаружен активный веб-интерфейс: открыт порт 5252/tcp на tailscale0.${C_RESET}"
-    fi
-
     local chosen_nf_mode=""
     if command -v tailscale &>/dev/null; then
+        silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
         ensure_ufw_mangle_tcpmss
+        if is_tailscale_web_active; then
+            silent_run ufw allow in on tailscale0 to any port 5252 proto tcp comment 'Tailscale Web UI'
+            echo -e "${C_BLUE}ℹ️ Обнаружен активный веб-интерфейс: открыт порт 5252/tcp на tailscale0.${C_RESET}"
+        fi
         if prompt_yn "Передать приоритет управления сетевыми правилами системе (UFW)?" "true"; then
             chosen_nf_mode="off"
         else
@@ -1234,6 +1238,7 @@ mod_ufw() {
 
     if [ "$do_restrict" = true ]; then
         if ensure_tailscale_installed && is_tailscale_authenticated; then
+            silent_run ufw allow 41641/udp comment 'Tailscale Direct P2P'
             silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
             silent_run ufw delete allow in on tailscale0
             silent_run ufw delete allow "$port"/tcp
@@ -1250,6 +1255,9 @@ mod_ufw() {
     iptables -t nat -F 2>/dev/null || true
     silent_run ufw --force enable
     silent_run ufw delete allow in on tailscale0
+    if ! command -v tailscale &>/dev/null; then
+        silent_run ufw delete allow 41641/udp
+    fi
     silent_run ufw reload
     if [ -n "$chosen_nf_mode" ]; then
         set_tailscale_netfilter_priority "$chosen_nf_mode"
@@ -1302,7 +1310,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (без дублирования вопросов в автонастройке и при включении шлюза)
+# 10. Tailscale (без дублирования вопросов и с автоматическим открытием 41641/udp при установке)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1316,12 +1324,14 @@ mod_tailscale() {
                 ensure_tailscale_installed || true
                 enable_routing_optimizations || true
             else
+                if command -v ufw &>/dev/null; then
+                    silent_run ufw delete allow 41641/udp
+                fi
                 echo -e "${C_YELLOW}⏭️ Установка Tailscale пропущена пользователем.${C_RESET}"
                 return 0
             fi
         fi
         if command -v tailscale &>/dev/null; then
-            # Задаем вопрос только если он еще не был задан в Модуле 8
             if [ -f /etc/default/bobarev-netfilter ]; then
                 local saved_nf=$(get_tailscale_netfilter_mode)
                 set_tailscale_netfilter_priority "$saved_nf" "true"
@@ -1390,7 +1400,6 @@ mod_tailscale() {
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
                             disable_ufw_strict_rpfilter
 
-                            # Используем уже выбранный приоритет без повторного опроса
                             local active_nf=$(get_tailscale_netfilter_mode)
                             [ "$active_nf" = "none" ] && active_nf="off"
 
@@ -1966,7 +1975,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с коротким и чистым выводом виртуальной памяти)
+# 17. Полный аудит сервера
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -2261,14 +2270,16 @@ mod_server_audit() {
             echo -e "  • Доступ к порту SSH:        ${C_YELLOW}🌍 Публичный (открыт для всех сетей)${C_RESET}"
         fi
 
-        if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
-            echo -e "  • Изоляция сети Tailscale:   ${C_YELLOW}⚠️  Отключена (открыты все порты на tailscale0)${C_RESET}"
-        else
-            local open_ts_ports="только SSH $ssh_port/tcp"
-            if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
-                open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
+        if command -v tailscale &>/dev/null; then
+            if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
+                echo -e "  • Изоляция сети Tailscale:   ${C_YELLOW}⚠️  Отключена (открыты все порты на tailscale0)${C_RESET}"
+            else
+                local open_ts_ports="только SSH $ssh_port/tcp"
+                if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
+                    open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
+                fi
+                echo -e "  • Изоляция сети Tailscale:   ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
             fi
-            echo -e "  • Изоляция сети Tailscale:   ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
         fi
 
         if [ -n "$wan_if" ]; then
@@ -3036,7 +3047,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.9.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v2.9.3 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

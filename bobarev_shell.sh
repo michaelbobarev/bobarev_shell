@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 2.9.3 (Gold Master - Conditional Tailscale Port & Clean Audit)
+# Версия: 3.0 (Gold Master - Personal DERP via Cloudflare & Hybrid STUN Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -109,6 +109,11 @@ is_tailscale_web_active() {
     return 1
 }
 
+is_derp_active() {
+    systemctl is-active --quiet derper.service 2>/dev/null && return 0
+    return 1
+}
+
 get_tailscale_netfilter_mode() {
     ! command -v tailscale &>/dev/null && { echo "none"; return 0; }
     if [ -f /etc/default/bobarev-netfilter ]; then
@@ -151,7 +156,7 @@ get_iface_status_tag() {
 }
 
 # ------------------------------------------------------------------------------
-# ДИНАМИЧЕСКИЙ ВЫБОР ИНТЕРФЕЙСОВ И ХЕЛПЕРЫ UFW / NAT
+# ДИНАМИЧЕСКИЙ ВЫБОР ИНТЕРФЕЙСОВ И ХЕЛПЕРЫ UFW / NAT / DERP
 # ------------------------------------------------------------------------------
 disable_ufw_strict_rpfilter() {
     if [ -f /etc/ufw/sysctl.conf ]; then
@@ -344,6 +349,217 @@ TS_EOF
         fi
     fi
     return 0
+}
+
+print_derp_json_snippet() {
+    local d_domain="$1"
+    local d_ip="$2"
+    echo -e "\n${C_CYAN}📋 === ГОТОВЫЙ БЛОК derpMap ДЛЯ КОНСОЛИ TAILSCALE ===${C_RESET}"
+    echo -e "Откройте: ${C_BLUE}https://login.tailscale.com/admin/acls/file${C_RESET} (Access controls -> JSON editor)"
+    echo -e "и добавьте этот блок перед последней закрывающей скобкой ${C_BOLD}}${C_RESET}:\n"
+    cat << DERP_JSON_EOF
+	"derpMap": {
+		"OmitDefaultRegions": false,
+		"Regions": {
+			"900": {
+				"RegionID":   900,
+				"RegionCode": "custom-de",
+				"RegionName": "Personal DERP via Cloudflare ($d_domain)",
+				"Nodes": [
+					{
+						"Name":     "900a-derp",
+						"RegionID": 900,
+						"HostName": "$d_domain",
+						"DERPPort": 443,
+						"STUNPort": -1
+					},
+					{
+						"Name":     "900b-stun",
+						"RegionID": 900,
+						"HostName": "$d_ip",
+						"STUNPort": 3478,
+						"STUNOnly": true
+					},
+					{
+						"Name":     "900c-stun-google",
+						"RegionID": 900,
+						"HostName": "stun.l.google.com",
+						"STUNPort": 19302,
+						"STUNOnly": true
+					}
+				]
+			}
+		}
+	}
+DERP_JSON_EOF
+    echo -e "\n${C_BLUE}💡 Команды проверки на клиентах после сохранения ACL:${C_RESET}"
+    echo -e "  • ${C_GREEN}tailscale netcheck${C_RESET}"
+    echo -e "  • ${C_GREEN}tailscale debug derp 900${C_RESET}"
+}
+
+manage_custom_derp() {
+    while true; do
+        MODULE_CANCELED=false
+        local saved_domain="derp.yourdomain.com"
+        local saved_ip=""
+        if [ -f /etc/default/bobarev-derp ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-derp
+            saved_domain="${DERP_DOMAIN:-derp.yourdomain.com}"
+            saved_ip="${DERP_SERVER_IP:-}"
+        fi
+        if [ -z "$saved_ip" ]; then
+            saved_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || ip -4 -o addr show dev "${DEFAULT_WAN_IF:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+        fi
+
+        local derp_state="Не установлен"
+        if is_derp_active; then
+            derp_state="Активен ($saved_domain)"
+        elif [ -f /etc/systemd/system/derper.service ]; then
+            derp_state="Остановлен ($saved_domain)"
+        fi
+
+        local d_choice
+        if ! d_choice=$(whiptail --title "Личный ретранслятор (DERP)" --menu "\nСтатус ретранслятора: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 \
+        "1" "🚀 Установить / Обновить узел DERP (Cloudflare + STUN)" \
+        "2" "📋 Показать готовый JSON-код (derpMap) для консоли" \
+        "3" "🔑 Редактировать сертификаты Cloudflare (.crt / .key)" \
+        "4" "🛑 Остановить и удалить службу DERP" \
+        "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3) || [ "$d_choice" = "0" ]; then
+            break
+        fi
+
+        clear
+        case "$d_choice" in
+            1)
+                echo -e "${C_CYAN}🛰️ === УСТАНОВКА ЛИЧНОГО РЕТРАНСЛЯТОРА DERP (CLOUDFLARE + STUN) ===${C_RESET}"
+                ensure_tailscale_installed || true
+
+                local d_dom=""
+                prompt_default "Введите ваш поддомен для DERP (в Cloudflare должен быть включен Proxied и WebSockets):" "$saved_domain" d_dom
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$d_dom" ]; then continue; fi
+
+                local d_ip=""
+                prompt_default "Введите внешний IPv4-адрес этого сервера (для локального STUN 3478/udp):" "$saved_ip" d_ip
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$d_ip" ]; then continue; fi
+
+                echo -e "${C_BLUE}📦 Установка компилятора Go и сборка актуального бинарника derper...${C_RESET}"
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq
+                apt-get install -yq golang git nano
+
+                export GOTOOLCHAIN=auto
+                export GOPATH="/root/go"
+                GOBIN=/usr/local/bin go install tailscale.com/cmd/derper@latest || {
+                    go install tailscale.com/cmd/derper@latest
+                    if [ -f "/root/go/bin/derper" ]; then
+                        cp /root/go/bin/derper /usr/local/bin/derper
+                    elif [ -f "$HOME/go/bin/derper" ]; then
+                        cp "$HOME/go/bin/derper" /usr/local/bin/derper
+                    fi
+                }
+
+                if [ ! -x /usr/local/bin/derper ]; then
+                    echo -e "${C_RED}❌ Ошибка: не удалось собрать бинарник /usr/local/bin/derper.${C_RESET}"
+                    pause_enter
+                    continue
+                fi
+                echo -e "${C_GREEN}✅ Бинарник /usr/local/bin/derper успешно скомпилирован.${C_RESET}"
+
+                mkdir -p /etc/derp/certs
+                local crt_file="/etc/derp/certs/${d_dom}.crt"
+                local key_file="/etc/derp/certs/${d_dom}.key"
+
+                local edit_certs=true
+                if [ -s "$crt_file" ] && [ -s "$key_file" ]; then
+                    if ! prompt_yn "Сертификаты для $d_dom уже существуют. Желаете ввести их заново?" "false"; then
+                        edit_certs=false
+                    fi
+                fi
+
+                if [ "$edit_certs" = true ]; then
+                    whiptail --title "Сертификаты Cloudflare Origin CA" --msgbox \
+"Сейчас по очереди откроются два окна редактора nano:\n\n1. В первое окно вставьте Origin Certificate (.crt) от Cloudflare.\n2. Во второе окно вставьте Private Key (.key).\n\nДля сохранения в nano нажмите: Ctrl+O -> Enter -> Ctrl+X." 14 $WT_WIDTH
+                    nano "$crt_file"
+                    nano "$key_file"
+                fi
+
+                chmod 600 "$key_file" 2>/dev/null || true
+
+                cat << EOF > /etc/default/bobarev-derp
+DERP_DOMAIN="$d_dom"
+DERP_SERVER_IP="$d_ip"
+DERP_HTTPS_PORT="443"
+DERP_STUN_PORT="3478"
+EOF
+
+                echo -e "${C_BLUE}⚙️ Создание и запуск защищенной системной службы derper.service...${C_RESET}"
+                cat << EOF > /etc/systemd/system/derper.service
+[Unit]
+Description=Tailscale DERP Relay Server ($d_dom)
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/derper --hostname=$d_dom --certmode=manual --certdir=/etc/derp/certs --a=:443 --http-port=-1 --stun-port=3478 --verify-clients
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+                systemctl daemon-reload
+                systemctl enable --now derper.service
+                systemctl restart derper.service || true
+
+                if command -v ufw &>/dev/null; then
+                    silent_run ufw allow 443/tcp comment 'DERP HTTPS Relay'
+                    silent_run ufw allow 3478/udp comment 'DERP Local STUN'
+                    echo -e "${C_GREEN}✅ Порты 443/tcp (DERP HTTPS) и 3478/udp (STUN) открыты в UFW.${C_RESET}"
+                fi
+
+                if is_derp_active; then
+                    echo -e "${C_GREEN}✅ Служба личного ретранслятора DERP ($d_dom) успешно запущена и защищена флагом --verify-clients!${C_RESET}"
+                else
+                    echo -e "${C_YELLOW}⚠️ Служба derper не запустилась. Проверьте правильность сертификатов и не занят ли порт 443:${C_RESET}"
+                    journalctl -u derper.service -n 10 --no-pager || true
+                fi
+
+                print_derp_json_snippet "$d_dom" "$d_ip"
+                pause_enter
+                ;;
+            2)
+                print_derp_json_snippet "$saved_domain" "${saved_ip:-ВАШ_IP_СЕРВЕРА}"
+                pause_enter
+                ;;
+            3)
+                mkdir -p /etc/derp/certs
+                nano "/etc/derp/certs/${saved_domain}.crt"
+                nano "/etc/derp/certs/${saved_domain}.key"
+                chmod 600 "/etc/derp/certs/${saved_domain}.key" 2>/dev/null || true
+                silent_run systemctl restart derper.service
+                echo -e "${C_GREEN}✅ Сертификаты обновлены, служба derper перезапущена.${C_RESET}"
+                pause_enter
+                ;;
+            4)
+                if prompt_yn "Остановить и полностью удалить службу личного ретранслятора DERP и закрыть порты 443/tcp и 3478/udp в UFW?" "false"; then
+                    silent_run systemctl stop derper.service
+                    silent_run systemctl disable derper.service
+                    rm -f /etc/systemd/system/derper.service /etc/default/bobarev-derp
+                    systemctl daemon-reload
+                    if command -v ufw &>/dev/null; then
+                        silent_run ufw delete allow 443/tcp
+                        silent_run ufw delete allow 3478/udp
+                    fi
+                    echo -e "${C_GREEN}✅ Служба DERP удалена, порты 443/tcp и 3478/udp закрыты в UFW.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
 }
 
 print_network_health_summary() {
@@ -1133,7 +1349,7 @@ HARDENING_EOF
     echo -e "${C_GREEN}✅ Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
 }
 
-# 8. Firewall UFW (открывает 41641/udp только при наличии Tailscale в системе)
+# 8. Firewall UFW (сохраняет правила личного DERP и открывает 41641/udp только при наличии Tailscale)
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1208,6 +1424,12 @@ mod_ufw() {
             chosen_nf_mode="on"
         fi
         echo "TS_NETFILTER_MODE=\"$chosen_nf_mode\"" > /etc/default/bobarev-netfilter
+    fi
+
+    if [ -f /etc/default/bobarev-derp ] || is_derp_active; then
+        silent_run ufw allow 443/tcp comment 'DERP HTTPS Relay'
+        silent_run ufw allow 3478/udp comment 'DERP Local STUN'
+        echo -e "${C_BLUE}ℹ️ Восстановлены правила UFW для личного ретранслятора DERP (443/tcp и 3478/udp).${C_RESET}"
     fi
 
     if [ -f /etc/default/bobarev-router ]; then
@@ -1310,7 +1532,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (без дублирования вопросов и с автоматическим открытием 41641/udp при установке)
+# 10. Tailscale (включая пункт 9 "🛰️ Личный ретранслятор (DERP)")
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1352,7 +1574,7 @@ mod_tailscale() {
         local nf_cur=$(get_tailscale_netfilter_mode)
 
         local ts_choice
-        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "" 17 $WT_WIDTH 10 \
+        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "" 18 $WT_WIDTH 11 \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -1361,7 +1583,8 @@ mod_tailscale() {
         "6" "⚡ Ускорение и MSS Clamping" \
         "7" "💻 Локальный веб-интерфейс" \
         "8" "🎛️ Приоритет сетевых правил" \
-        "9" "🔄 Полный сброс" \
+        "9" "🛰️ Личный ретранслятор (DERP)" \
+        "10" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
             break
         fi
@@ -1547,6 +1770,9 @@ mod_tailscale() {
                 fi
                 ;;
             9)
+                manage_custom_derp
+                ;;
+            10)
                 if prompt_yn "Полностью сбросить все сетевые параметры к заводским значениям?" "false"; then
                     tailscale up --reset 2>&1 | grep -v "accept-routes" || true
                     rm -f /etc/default/bobarev-netfilter 2>/dev/null || true
@@ -1975,7 +2201,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера
+# 17. Полный аудит сервера (с проверкой ретранслятора DERP)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -2383,6 +2609,15 @@ mod_server_audit() {
             fi
         fi
 
+        local ts_derp_human="${C_BLUE}Не настроен${C_RESET}"
+        if is_derp_active; then
+            local d_dom_audit="активен"
+            [ -f /etc/default/bobarev-derp ] && d_dom_audit=$(grep -E '^DERP_DOMAIN=' /etc/default/bobarev-derp 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "активен")
+            ts_derp_human="${C_GREEN}✅ Работает ($d_dom_audit — 443/tcp и STUN 3478/udp)${C_RESET}"
+        elif [ -f /etc/systemd/system/derper.service ]; then
+            ts_derp_human="${C_YELLOW}⚠️  Установлен, но служба derper остановлена${C_RESET}"
+        fi
+
         echo -e "  • Имя устройства в сети:     ${C_BLUE}$ts_name${C_RESET}"
         echo -e "  • Внутренний IP-адрес:       ${C_BLUE}$ts_ip${C_RESET}"
         echo -e "  • Внешний шлюз Tailscale:    ${C_BLUE}$ts_exit_human${C_RESET}"
@@ -2390,6 +2625,7 @@ mod_server_audit() {
         echo -e "  • Доступ к чужим подсетям:   $ts_accept_human"
         echo -e "  • Скрытый режим (Stealth):   $ts_stealth_human"
         echo -e "  • Приоритет правил фаервола: $ts_nf_human"
+        echo -e "  • Личный ретранслятор DERP:  $ts_derp_human"
         echo -e "  • Веб-панель (порт 5252):    $ts_web_human"
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
@@ -2959,7 +3195,7 @@ ROUTER_SVC_EOF
     fi
 }
 
-# 19. Экспорт и импорт резервной копии конфигураций
+# 19. Экспорт и импорт резервной копии конфигураций (включая сертификаты и службу DERP)
 mod_backup_manager() {
     echo -e "${C_CYAN}📦 === 19/19. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
@@ -2978,7 +3214,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/derp /etc/systemd/system/derper.service /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -3000,6 +3236,7 @@ mod_backup_manager() {
             systemctl daemon-reload 2>/dev/null || true
             sysctl --system >/dev/null 2>&1 || true
             [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
+            [ -f /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
             silent_run systemctl restart systemd-journald
             silent_run systemctl restart sshd || silent_run systemctl restart ssh
             command -v ufw &>/dev/null && flush_and_reload_nat
@@ -3047,7 +3284,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v2.9.3 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.0 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -3070,7 +3307,13 @@ fi
 while true; do
     ts_main_status="Отсутствует"
     if command -v tailscale &>/dev/null; then
-        if is_tailscale_web_active; then ts_main_status="Активна (веб-панель)"; else ts_main_status="Активна"; fi
+        if is_derp_active; then
+            ts_main_status="Активна + Личный DERP"
+        elif is_tailscale_web_active; then
+            ts_main_status="Активна (веб-панель)"
+        else
+            ts_main_status="Активна"
+        fi
     fi
     
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then

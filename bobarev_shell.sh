@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.0 (Gold Master - Personal DERP via Cloudflare & Hybrid STUN Edition)
+# Версия: 3.0.2 (Gold Master - Smart Privacy DERP JSON & Conditional UFW)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -352,77 +352,103 @@ TS_EOF
 }
 
 print_derp_json_snippet() {
-    local d_domain="$1"
-    local d_ip="$2"
-    echo -e "\n${C_CYAN}📋 === ГОТОВЫЙ БЛОК derpMap ДЛЯ КОНСОЛИ TAILSCALE ===${C_RESET}"
+    local d_domain="${1:-derp.yourdomain.com}"
+    local d_ip="${2:-ВАШ_IP_СЕРВЕРА}"
+    local is_real="${3:-false}"
+
+    echo -e "\n${C_CYAN}📋 === БЛОК derpMap ДЛЯ КОНСОЛИ TAILSCALE ===${C_RESET}"
     echo -e "Откройте: ${C_BLUE}https://login.tailscale.com/admin/acls/file${C_RESET} (Access controls -> JSON editor)"
     echo -e "и добавьте этот блок перед последней закрывающей скобкой ${C_BOLD}}${C_RESET}:\n"
     cat << DERP_JSON_EOF
-	"derpMap": {
-		"OmitDefaultRegions": false,
-		"Regions": {
-			"900": {
-				"RegionID":   900,
-				"RegionCode": "custom-de",
-				"RegionName": "Personal DERP via Cloudflare ($d_domain)",
-				"Nodes": [
-					{
-						"Name":     "900a-derp",
-						"RegionID": 900,
-						"HostName": "$d_domain",
-						"DERPPort": 443,
-						"STUNPort": -1
-					},
-					{
-						"Name":     "900b-stun",
-						"RegionID": 900,
-						"HostName": "$d_ip",
-						"STUNPort": 3478,
-						"STUNOnly": true
-					},
-					{
-						"Name":     "900c-stun-google",
-						"RegionID": 900,
-						"HostName": "stun.l.google.com",
-						"STUNPort": 19302,
-						"STUNOnly": true
-					}
-				]
-			}
-		}
-	}
+  "derpMap": {
+    "OmitDefaultRegions": false,
+    "Regions": {
+      "900": {
+        "RegionID":   900,
+        "RegionCode": "custom",
+        "RegionName": "My Custom DERP via Cloudflare",
+        "Nodes": [
+          {
+            "Name":     "900a-derp",
+            "RegionID": 900,
+            "HostName": "$d_domain",
+            "DERPPort": 443,
+            "STUNPort": -1
+          },
+          {
+            "Name":     "900b-stun",
+            "RegionID": 900,
+            "HostName": "$d_ip",
+            "STUNPort": 3478,
+            "STUNOnly": true
+          },
+          {
+            "Name":     "900c-stun-google",
+            "RegionID": 900,
+            "HostName": "stun.l.google.com",
+            "STUNPort": 19302,
+            "STUNOnly": true
+          }
+        ]
+      }
+    }
+  }
 DERP_JSON_EOF
+    if [ "$is_real" = "true" ]; then
+        echo -e "\n${C_GREEN}✅ В код подставлены ваш реальный домен ($d_domain) и IP-адрес ($d_ip) — можно сразу копировать!${C_RESET}"
+    else
+        echo -e "\n${C_YELLOW}⚠️ Показан обезличенный шаблон. Не забудьте заменить 'derp.yourdomain.com' и 'ВАШ_IP_СЕРВЕРА' на ваши реальные данные!${C_RESET}"
+    fi
     echo -e "\n${C_BLUE}💡 Команды проверки на клиентах после сохранения ACL:${C_RESET}"
     echo -e "  • ${C_GREEN}tailscale netcheck${C_RESET}"
     echo -e "  • ${C_GREEN}tailscale debug derp 900${C_RESET}"
+}
+
+show_derp_json_interactive() {
+    local saved_domain="derp.yourdomain.com"
+    local is_installed=false
+    if [ -f /etc/default/bobarev-derp ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-derp
+        saved_domain="${DERP_DOMAIN:-derp.yourdomain.com}"
+        is_installed=true
+    elif [ -f /etc/systemd/system/derper.service ]; then
+        is_installed=true
+    fi
+
+    if [ "$is_installed" = true ] && [ "$saved_domain" != "derp.yourdomain.com" ]; then
+        if prompt_yn "Узел DERP уже настроен на этом сервере.\nПодставить ваш реальный домен и IP-адрес сервера в JSON-код?\n\n• Да: готовый код с вашими данными для копирования.\n• Нет: обезличенный шаблон (безопасно для скриншотов и видео)." "false"; then
+            local real_ip=""
+            real_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || ip -4 -o addr show dev "${DEFAULT_WAN_IF:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "ВАШ_IP_СЕРВЕРА")
+            [ -z "$real_ip" ] && real_ip="ВАШ_IP_СЕРВЕРА"
+            print_derp_json_snippet "$saved_domain" "$real_ip" "true"
+            return 0
+        fi
+    fi
+    print_derp_json_snippet "derp.yourdomain.com" "ВАШ_IP_СЕРВЕРА" "false"
 }
 
 manage_custom_derp() {
     while true; do
         MODULE_CANCELED=false
         local saved_domain="derp.yourdomain.com"
-        local saved_ip=""
         if [ -f /etc/default/bobarev-derp ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-derp
             saved_domain="${DERP_DOMAIN:-derp.yourdomain.com}"
-            saved_ip="${DERP_SERVER_IP:-}"
-        fi
-        if [ -z "$saved_ip" ]; then
-            saved_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || ip -4 -o addr show dev "${DEFAULT_WAN_IF:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
         fi
 
         local derp_state="Не установлен"
         if is_derp_active; then
-            derp_state="Активен ($saved_domain)"
+            derp_state="Активен"
         elif [ -f /etc/systemd/system/derper.service ]; then
-            derp_state="Остановлен ($saved_domain)"
+            derp_state="Остановлен"
         fi
 
         local d_choice
         if ! d_choice=$(whiptail --title "Личный ретранслятор (DERP)" --menu "\nСтатус ретранслятора: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 \
         "1" "🚀 Установить / Обновить узел DERP (Cloudflare + STUN)" \
-        "2" "📋 Показать готовый JSON-код (derpMap) для консоли" \
+        "2" "📋 Показать JSON-код (derpMap) для консоли" \
         "3" "🔑 Редактировать сертификаты Cloudflare (.crt / .key)" \
         "4" "🛑 Остановить и удалить службу DERP" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3) || [ "$d_choice" = "0" ]; then
@@ -436,12 +462,8 @@ manage_custom_derp() {
                 ensure_tailscale_installed || true
 
                 local d_dom=""
-                prompt_default "Введите ваш поддомен для DERP (в Cloudflare должен быть включен Proxied и WebSockets):" "$saved_domain" d_dom
+                prompt_default "Введите ваш поддомен для DERP (например, derp.yourdomain.com):" "$saved_domain" d_dom
                 if [ "$MODULE_CANCELED" = true ] || [ -z "$d_dom" ]; then continue; fi
-
-                local d_ip=""
-                prompt_default "Введите внешний IPv4-адрес этого сервера (для локального STUN 3478/udp):" "$saved_ip" d_ip
-                if [ "$MODULE_CANCELED" = true ] || [ -z "$d_ip" ]; then continue; fi
 
                 echo -e "${C_BLUE}📦 Установка компилятора Go и сборка актуального бинарника derper...${C_RESET}"
                 export DEBIAN_FRONTEND=noninteractive
@@ -488,7 +510,6 @@ manage_custom_derp() {
 
                 cat << EOF > /etc/default/bobarev-derp
 DERP_DOMAIN="$d_dom"
-DERP_SERVER_IP="$d_ip"
 DERP_HTTPS_PORT="443"
 DERP_STUN_PORT="3478"
 EOF
@@ -522,17 +543,17 @@ EOF
                 fi
 
                 if is_derp_active; then
-                    echo -e "${C_GREEN}✅ Служба личного ретранслятора DERP ($d_dom) успешно запущена и защищена флагом --verify-clients!${C_RESET}"
+                    echo -e "${C_GREEN}✅ Служба личного ретранслятора DERP успешно запущена и защищена флагом --verify-clients!${C_RESET}"
                 else
                     echo -e "${C_YELLOW}⚠️ Служба derper не запустилась. Проверьте правильность сертификатов и не занят ли порт 443:${C_RESET}"
                     journalctl -u derper.service -n 10 --no-pager || true
                 fi
 
-                print_derp_json_snippet "$d_dom" "$d_ip"
+                show_derp_json_interactive
                 pause_enter
                 ;;
             2)
-                print_derp_json_snippet "$saved_domain" "${saved_ip:-ВАШ_IP_СЕРВЕРА}"
+                show_derp_json_interactive
                 pause_enter
                 ;;
             3)
@@ -2611,9 +2632,7 @@ mod_server_audit() {
 
         local ts_derp_human="${C_BLUE}Не настроен${C_RESET}"
         if is_derp_active; then
-            local d_dom_audit="активен"
-            [ -f /etc/default/bobarev-derp ] && d_dom_audit=$(grep -E '^DERP_DOMAIN=' /etc/default/bobarev-derp 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "активен")
-            ts_derp_human="${C_GREEN}✅ Работает ($d_dom_audit — 443/tcp и STUN 3478/udp)${C_RESET}"
+            ts_derp_human="${C_GREEN}✅ Работает (443/tcp и STUN 3478/udp открыты)${C_RESET}"
         elif [ -f /etc/systemd/system/derper.service ]; then
             ts_derp_human="${C_YELLOW}⚠️  Установлен, но служба derper остановлена${C_RESET}"
         fi
@@ -3284,7 +3303,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.0 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.0.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

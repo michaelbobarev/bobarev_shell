@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.12 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.13 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1392,7 +1392,8 @@ except Exception as e:
     if [ -z "${s2_ip:-}" ] || [ -z "${s2_port:-}" ] || [ -z "${s2_pub:-}" ] || [ -z "${s1_priv:-}" ] || [ -z "${psk:-}" ]; then
         echo -e "${C_RED}❌ Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
         return 1
-    filocal n_dom=""
+    fi
+    local n_dom=""
     prompt_default "2/4. Введите ваш домен на этом РФ-сервере (A-запись DNS):" "${saved_dom:-ru.yourdomain.com}" n_dom
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
 

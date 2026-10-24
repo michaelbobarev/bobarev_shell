@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.0.2 (Gold Master - Smart Privacy DERP JSON & Conditional UFW)
+# Версия: 3.2 (Gold Master - Cascade NaiveProxy -> Tailscale -> WARP Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -16,12 +16,29 @@ C_RESET='\033[0m'
 
 MODULE_CANCELED=false
 
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export PATH="/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
 export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
 export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
 export WT_HEIGHT=$((TERM_LINES < 27 ? TERM_LINES : 27))
+
+# Пиннинг проверенных версий из стека NaiveProxy
+CADDY_VERSION_PIN="v2.11.7"
+XCADDY_VERSION_PIN="v0.4.6"
+FORWARDPROXY_REF_PIN="d62c80d3dd2c706b6b87579844d2397bddd18317"
+GO_VERSION_PIN="1.26.5"
+GO_SHA256_AMD64="5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
+GO_SHA256_ARM64="fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49"
+
+CADDY_BIN="/usr/local/bin/caddy"
+CADDYFILE="/etc/caddy/Caddyfile"
+CADDY_SERVICE="/etc/systemd/system/caddy.service"
+NAIVE_DIR="/etc/naiveproxy"
+NAIVE_USERS_FILE="/etc/naiveproxy/users.conf"
+NAIVE_PASS_FILE="/etc/naiveproxy/users.pass"
+WEBROOT="/var/www/html"
+LOG_DIR="/var/log/caddy"
 
 SYSTEM_TYPE="Cloud_VPS"
 if [ -f /etc/armbian-release ] || [ -f /etc/default/armbian-zram ] || grep -q -i "armbian\|nanopi\|raspberry" /etc/os-release 2>/dev/null; then
@@ -51,7 +68,7 @@ get_system_type_short() {
 }
 
 get_wan_if() {
-    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|warp|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
 }
 
 DEFAULT_WAN_IF=$(get_wan_if)
@@ -114,6 +131,28 @@ is_derp_active() {
     return 1
 }
 
+is_naive_active() {
+    systemctl is-active --quiet caddy.service 2>/dev/null && [ -f "$CADDYFILE" ] && grep -q "forward_proxy" "$CADDYFILE" 2>/dev/null && return 0
+    return 1
+}
+
+is_warp_active() {
+    systemctl is-active --quiet wg-quick@warp.service 2>/dev/null && return 0
+    ip link show warp >/dev/null 2>&1 && return 0
+    return 1
+}
+
+ensure_wg_kernel_modules() {
+    silent_run modprobe wireguard
+    silent_run modprobe ip6table_mangle
+    silent_run modprobe xt_TCPMSS
+    mkdir -p /etc/modules-load.d
+    cat << 'MOD_EOF' > /etc/modules-load.d/bobarev-network-modules.conf
+ip6table_mangle
+xt_TCPMSS
+MOD_EOF
+}
+
 get_tailscale_netfilter_mode() {
     ! command -v tailscale &>/dev/null && { echo "none"; return 0; }
     if [ -f /etc/default/bobarev-netfilter ]; then
@@ -156,7 +195,7 @@ get_iface_status_tag() {
 }
 
 # ------------------------------------------------------------------------------
-# ДИНАМИЧЕСКИЙ ВЫБОР ИНТЕРФЕЙСОВ И ХЕЛПЕРЫ UFW / NAT / DERP
+# ДИНАМИЧЕСКИЙ ВЫБОР ИНТЕРФЕЙСОВ И ХЕЛПЕРЫ UFW / NAT / DERP / КАСКАД
 # ------------------------------------------------------------------------------
 disable_ufw_strict_rpfilter() {
     if [ -f /etc/ufw/sysctl.conf ]; then
@@ -281,6 +320,12 @@ flush_and_reload_nat() {
             apply_wan_exit_nat "$wan_dev" "true" || true
         fi
     fi
+    if is_warp_active; then
+        iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE 2>/dev/null || true
+    fi
+    if [ -x /usr/local/bin/bobarev-cascade-ru.sh ]; then
+        /usr/local/bin/bobarev-cascade-ru.sh >/dev/null 2>&1 || true
+    fi
     if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
         /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
     fi
@@ -351,6 +396,553 @@ TS_EOF
     return 0
 }
 
+# ------------------------------------------------------------------------------
+# СТЕК КАСКАДА: NAIVEPROXY (CADDY 2) -> TAILSCALE -> CLOUDFLARE WARP
+# ------------------------------------------------------------------------------
+install_naive_camouflage_site() {
+    mkdir -p "$WEBROOT"
+    cat << 'CAMO_EOF' > "$WEBROOT/index.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DevStack — Linux & Infrastructure Notes</title>
+<style>
+:root{--bg:#080B0F;--bg2:#0D1117;--border:#21262D;--gold:#D4A017;--text:#E6EDF3;--dim:#7D8590}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;line-height:1.6}
+header{border-bottom:1px solid var(--border);background:var(--bg2);padding:18px 24px}
+.wrap{max-width:960px;margin:0 auto;padding:48px 24px}
+h1{font-size:38px;margin-bottom:16px}
+h1 span{color:var(--gold)}
+p{color:var(--dim);max-width:640px;margin-bottom:24px}
+.card{border:1px solid var(--border);border-radius:10px;padding:24px;background:var(--bg2);margin-bottom:16px}
+.tag{font-family:monospace;font-size:12px;color:var(--gold);text-transform:uppercase}
+</style>
+</head>
+<body>
+<header><strong>&gt;_ DevStack</strong> &middot; Infrastructure &amp; Kernel Notes</header>
+<div class="wrap">
+  <h1>Linux, Networking &amp; <span>Self-Hosted Systems</span></h1>
+  <p>Technical notes on low-latency routing, kernel hardening, BBR congestion control, and modern HTTP/3 edge servers.</p>
+  <div class="card">
+    <div class="tag">Networking &bull; 2026</div>
+    <h3>Tuning Linux Kernel UDP Buffers and TCP BBR for High-Throughput Tunnels</h3>
+    <p>Practical sysctl configurations for minimizing packet loss and jitter across distributed mesh networks.</p>
+  </div>
+  <div class="card">
+    <div class="tag">Security &bull; 2026</div>
+    <h3>Zero-Trust SSH Hardening and Automated Firewall Isolation</h3>
+    <p>Replacing legacy port exposure with encrypted mesh interfaces and strict conntrack policies.</p>
+  </div>
+</div>
+</body>
+</html>
+CAMO_EOF
+    chmod 644 "$WEBROOT/index.html"
+}
+
+ensure_go_and_build_caddy_naive() {
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -yq curl wget git tar unzip openssl ca-certificates apache2-utils
+
+    export PATH="/usr/local/go/bin:$PATH"
+    local need_go=true
+    if command -v go &>/dev/null; then
+        local gver=$(go version 2>/dev/null | grep -oP 'go\K[0-9]+\.[0-9]+' || echo "0.0")
+        local gmaj=$(echo "$gver" | cut -d. -f1)
+        local gmin=$(echo "$gver" | cut -d. -f2)
+        if [ "${gmaj:-0}" -gt 1 ] || { [ "${gmaj:-0}" -eq 1 ] && [ "${gmin:-0}" -ge 25 ]; }; then
+            need_go=false
+        fi
+    fi
+
+    if [ "$need_go" = true ]; then
+        echo -e "${C_BLUE}📦 Установка компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
+        local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+        local exp_sha="$GO_SHA256_AMD64"
+        if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
+            arch="arm64"
+            exp_sha="$GO_SHA256_ARM64"
+        else
+            arch="amd64"
+        fi
+        local go_tmp=$(mktemp /tmp/go_XXXXXX.tar.gz)
+        wget -q --tries=3 --timeout=30 "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" -O "$go_tmp"
+        local act_sha=$(sha256sum "$go_tmp" | awk '{print $1}')
+        if [ "$act_sha" != "$exp_sha" ]; then
+            rm -f "$go_tmp"
+            echo -e "${C_RED}❌ Ошибка: контрольная сумма SHA256 архива Go не совпала!${C_RESET}"
+            return 1
+        fi
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf "$go_tmp"
+        rm -f "$go_tmp"
+        echo 'export PATH="/usr/local/go/bin:$PATH"' > /etc/profile.d/go.sh
+        export PATH="/usr/local/go/bin:$PATH"
+        echo -e "${C_GREEN}✅ Компилятор Go ${GO_VERSION_PIN} успешно установлен.${C_RESET}"
+    fi
+
+    if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy"; then
+        echo -e "${C_GREEN}✅ Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
+        return 0
+    fi
+
+    echo -e "${C_BLUE}🔨 Сборка Caddy ${CADDY_VERSION_PIN} с модулем klzgrad/forwardproxy@naive (занимает 3-10 минут)...${C_RESET}"
+    export GOPATH="/root/go"
+    export GOCACHE="/root/.cache/go-build"
+    go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}"
+
+    "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
+        --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
+        --output "$CADDY_BIN"
+
+    chmod +x "$CADDY_BIN"
+    if ! "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy"; then
+        echo -e "${C_RED}❌ Ошибка сборки: модуль http.handlers.forward_proxy не найден в Caddy.${C_RESET}"
+        return 1
+    fi
+    echo -e "${C_GREEN}✅ Caddy ${CADDY_VERSION_PIN} + NaiveProxy успешно собран!${C_RESET}"
+    return 0
+}
+
+render_naive_caddyfile() {
+    [ ! -f /etc/default/bobarev-cascade ] && return 1
+    # shellcheck disable=SC1091
+    source /etc/default/bobarev-cascade
+    local dom="${NAIVE_DOMAIN:-}"
+    local email="${NAIVE_EMAIL:-admin@${dom}}"
+    [ -z "$dom" ] && return 1
+
+    mkdir -p /etc/caddy "$NAIVE_DIR" "$WEBROOT" "$LOG_DIR"
+    touch "$NAIVE_USERS_FILE"
+    chmod 600 "$NAIVE_USERS_FILE"
+    install_naive_camouflage_site
+
+    local auth_lines=""
+    while IFS=: read -r u h; do
+        [ -z "$u" ] || [ -z "$h" ] && continue
+        auth_lines+="            ${u} ${h}"$'\n'
+    done < "$NAIVE_USERS_FILE"
+
+    if [ -z "$auth_lines" ]; then
+        local dummy_hash=$(printf '%s\n' "disabled_placeholder" | htpasswd -niBC 12 "__disabled__" | cut -d: -f2)
+        auth_lines="            __disabled__ ${dummy_hash}"$'\n'
+    fi
+
+    cat << EOF > "$CADDYFILE"
+{
+    order forward_proxy before file_server
+    servers :443 {
+        protocols h1 h2 h3
+    }
+    log {
+        output file "${LOG_DIR}/access.log" {
+            roll_size 20mb
+            roll_keep 3
+        }
+    }
+}
+
+:443, ${dom} {
+    tls ${email}
+
+    @naive_proxy method CONNECT
+    route @naive_proxy {
+        request_header Authorization "{http.request.header.Proxy-Authorization}"
+        basic_auth bcrypt {
+${auth_lines}        }
+        request_header -Authorization
+        forward_proxy {
+            hide_ip
+            hide_via
+        }
+    }
+
+    file_server {
+        root "${WEBROOT}"
+    }
+
+    handle_errors {
+        @proxy_auth_error expression {http.error.status_code} == 401
+        handle @proxy_auth_error {
+            header -WWW-Authenticate
+            respond "Not Found" 404
+        }
+    }
+}
+EOF
+    chmod 600 "$CADDYFILE"
+
+    cat << 'SVC_EOF' > "$CADDY_SERVICE"
+[Unit]
+Description=Bobarev Shell NaiveProxy (Caddy 2)
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+SVC_EOF
+
+    systemctl daemon-reload
+    systemctl enable caddy.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet caddy.service; then
+        systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service
+    else
+        systemctl restart caddy.service
+    fi
+}
+
+add_or_update_naive_user() {
+    local u_name="$1"
+    local u_pass="$2"
+    mkdir -p "$NAIVE_DIR"
+    touch "$NAIVE_USERS_FILE" "$NAIVE_PASS_FILE"
+    chmod 600 "$NAIVE_USERS_FILE" "$NAIVE_PASS_FILE"
+
+    if ! command -v htpasswd &>/dev/null; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq && apt-get install -yq apache2-utils >/dev/null 2>&1
+    fi
+
+    local b_hash=$(printf '%s\n' "$u_pass" | htpasswd -niBC 12 "$u_name" 2>/dev/null | cut -d: -f2)
+    if [ -z "$b_hash" ]; then
+        echo -e "${C_RED}❌ Не удалось создать bcrypt-хеш пароля.${C_RESET}"
+        return 1
+    fi
+
+    sed -i "/^${u_name}:/d" "$NAIVE_USERS_FILE" 2>/dev/null || true
+    echo "${u_name}:${b_hash}" >> "$NAIVE_USERS_FILE"
+
+    sed -i "/^${u_name}:/d" "$NAIVE_PASS_FILE" 2>/dev/null || true
+    echo "${u_name}:${u_pass}" >> "$NAIVE_PASS_FILE"
+    chmod 600 "$NAIVE_USERS_FILE" "$NAIVE_PASS_FILE"
+    return 0
+}
+
+print_naive_shadowrocket_links() {
+    if [ ! -f /etc/default/bobarev-cascade ] || [ ! -s "$NAIVE_PASS_FILE" ]; then
+        echo -e "${C_YELLOW}⚠️ Пользователи NaiveProxy еще не созданы или Сервер 1 не настроен.${C_RESET}"
+        return 0
+    fi
+    # shellcheck disable=SC1091
+    source /etc/default/bobarev-cascade
+    local dom="${NAIVE_DOMAIN:-yourdomain.com}"
+
+    local show_real=false
+    if prompt_yn "Показать реальные пароли в ссылках для копирования в Shadowrocket?\n\n• Да: готовые рабочие ссылки.\n• Нет: скрыть пароли звездочками (безопасно для скриншотов)." "true"; then
+        show_real=true
+    fi
+
+    echo -e "\n${C_CYAN}📋 === ГОТОВЫЕ ССЫЛКИ ДЛЯ SHADOWROCKET / STREISAND / HIDDIFY ===${C_RESET}"
+    while IFS=: read -r u p; do
+        [ -z "$u" ] || [ -z "$p" ] && continue
+        local disp_p="********"
+        local b64_str="Скрыто_для_скриншота"
+        if [ "$show_real" = true ]; then
+            disp_p="$p"
+            b64_str=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64)
+        fi
+        echo -e "\n👤 Пользователь: ${C_BOLD}${u}${C_RESET} (Домен: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
+        echo -e "  • ${C_BLUE}Универсальная ссылка (Shadowrocket / Streisand / Hiddify / NekoBox):${C_RESET}"
+        echo -e "    ${C_GREEN}naive+https://${u}:${disp_p}@${dom}:443?padding=true#RU-Cascade-${u}${C_RESET}"
+        echo -e "  • ${C_BLUE}Прямая ссылка HTTP/2 (альтернативный формат Shadowrocket):${C_RESET}"
+        echo -e "    ${C_GREEN}http2://${b64_str}?obfs=none#RU-HTTP2-${u}${C_RESET}"
+    done < "$NAIVE_PASS_FILE"
+
+    echo -e "\n${C_BLUE}💡 Ручная настройка в Shadowrocket (если добавляете вручную):${C_RESET}"
+    echo -e "  • Тип (Type): ${C_BOLD}HTTPS${C_RESET} или ${C_BOLD}HTTP2${C_RESET}"
+    echo -e "  • Адрес (Address): ${C_BOLD}${dom}${C_RESET} | Порт (Port): ${C_BOLD}443${C_RESET}"
+    echo -e "  • Пользователь и Пароль: ваши данные выше | TLS: ${C_BOLD}Включен (ON)${C_RESET}"
+}
+
+setup_cascade_server1_ru() {
+    echo -e "${C_CYAN}🇷🇺 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
+    ensure_tailscale_installed || true
+    enable_routing_optimizations || true
+
+    local saved_dom=""
+    local saved_email=""
+    local saved_exit=""
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        saved_dom="${NAIVE_DOMAIN:-}"
+        saved_email="${NAIVE_EMAIL:-}"
+        saved_exit="${EXIT_TS_IP:-}"
+    fi
+
+    local n_dom=""
+    prompt_default "1/4. Введите ваш домен, направленный по DNS (A-запись без прокси Cloudflare) на этот РФ-сервер:" "${saved_dom:-ru.yourdomain.com}" n_dom
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
+
+    local n_email=""
+    prompt_default "2/4. Введите ваш Email для автоматического выпуска SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then return 0; fi
+
+    local n_user=""
+    prompt_default "3/4. Введите имя пользователя для подключения в Shadowrocket:" "user1" n_user
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
+    n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
+
+    local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "NaivePass2026")
+    local n_pass=""
+    prompt_default "Пароль для пользователя $n_user (минимум 8 символов):" "$rand_pass" n_pass
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
+
+    local ts_peers=$(tailscale status 2>/dev/null | awk 'NR>1 {print $1 " (" $2 ")"}' | tr '\n' ' ' || echo "")
+    [ -n "$ts_peers" ] && echo -e "${C_BLUE}ℹ️ Доступные узлы в вашей сети Tailscale: $ts_peers${C_RESET}"
+
+    local exit_ts_ip=""
+    prompt_default "4/4. Введите Tailscale IP вашего Зарубежного Сервера 2 (например, 100.x.y.z):" "${saved_exit:-}" exit_ts_ip
+    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+
+    if is_derp_active; then
+        echo -e "${C_YELLOW}⚠️ Внимание: служба личного DERP на порту 443 остановлена, так как порт 443 передается NaiveProxy (Caddy).${C_RESET}"
+        silent_run systemctl stop derper.service
+        silent_run systemctl disable derper.service
+    fi
+
+    ensure_go_and_build_caddy_naive || return 1
+
+    local wan_dev=$(get_wan_if)
+    local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+
+    cat << EOF > /etc/default/bobarev-cascade
+CASCADE_ROLE="ru_entry"
+NAIVE_DOMAIN="$n_dom"
+NAIVE_EMAIL="$n_email"
+EXIT_TS_IP="$exit_ts_ip"
+SERVER_PUB_IP="$pub_ip"
+EOF
+    chmod 600 /etc/default/bobarev-cascade
+
+    add_or_update_naive_user "$n_user" "$n_pass"
+    render_naive_caddyfile
+
+    # Создание службы маршрутизации для российского сервера (защита обратного маршрута + NAT в tailscale0)
+    cat << 'RU_SH_EOF' > /usr/local/bin/bobarev-cascade-ru.sh
+#!/bin/bash
+[ ! -f /etc/default/bobarev-cascade ] && exit 0
+source /etc/default/bobarev-cascade
+[ "${CASCADE_ROLE:-}" != "ru_entry" ] && exit 0
+
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|warp|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+PUB_IP="${SERVER_PUB_IP:-}"
+if [ -z "$PUB_IP" ] && [ -n "$WAN_IF" ]; then
+    PUB_IP=$(ip -4 -o addr show dev "$WAN_IF" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+fi
+
+if [ -n "$PUB_IP" ]; then
+    ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null || true
+    ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
+fi
+
+iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
+iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
+    tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true 2>/dev/null || true
+fi
+RU_SH_EOF
+    chmod +x /usr/local/bin/bobarev-cascade-ru.sh
+
+    cat << 'RU_SVC_EOF' > /etc/systemd/system/bobarev-cascade-ru.service
+[Unit]
+Description=Bobarev Cascade RU Routing (NaiveProxy -> Tailscale)
+After=network-online.target tailscaled.service caddy.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/bobarev-cascade-ru.sh
+
+[Install]
+WantedBy=multi-user.target
+RU_SVC_EOF
+
+    systemctl daemon-reload
+    silent_run systemctl enable --now bobarev-cascade-ru.service
+    /usr/local/bin/bobarev-cascade-ru.sh
+
+    if command -v ufw &>/dev/null; then
+        silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
+        silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
+        silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
+        echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
+    fi
+
+    echo -e "${C_GREEN}✅ Сервер 1 (Вход в РФ на базе NaiveProxy + Tailscale) успешно настроен и запущен!${C_RESET}"
+    print_naive_shadowrocket_links
+}
+
+setup_cascade_server2_warp() {
+    echo -e "${C_CYAN}🌍 === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> WARP ===${C_RESET}"
+    ensure_tailscale_installed || true
+    enable_routing_optimizations || true
+
+    echo -e "${C_BLUE}📦 Установка пакетов wireguard-tools, iptables и curl...${C_RESET}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -yq wireguard-tools iptables curl
+
+    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+    local wgcf_arch="amd64"
+    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
+        wgcf_arch="arm64"
+    fi
+
+    if [ ! -x /usr/local/bin/wgcf ]; then
+        echo -e "${C_BLUE}⬇️ Скачивание утилиты wgcf для генерации профиля Cloudflare WARP...${C_RESET}"
+        if ! curl -fsSL "https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux_${wgcf_arch}" -o /usr/local/bin/wgcf 2>/dev/null; then
+            local latest_url=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null | grep "browser_download_url.*linux_${wgcf_arch}" | head -n 1 | cut -d'"' -f4 || echo "")
+            [ -n "$latest_url" ] && curl -fsSL "$latest_url" -o /usr/local/bin/wgcf
+        fi
+        chmod +x /usr/local/bin/wgcf
+    fi
+
+    mkdir -p /etc/wireguard
+    if [ ! -f /etc/wireguard/warp.conf ] || prompt_yn "Профиль /etc/wireguard/warp.conf уже существует. Сгенерировать новый профиль WARP?" "false"; then
+        echo -e "${C_BLUE}🔑 Регистрация аккаунта Cloudflare WARP и создание конфигурации...${C_RESET}"
+        (
+            cd /root
+            rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null || true
+            /usr/local/bin/wgcf register --accept-tos
+            /usr/local/bin/wgcf generate --keepalive
+            cp /root/wgcf-profile.conf /etc/wireguard/warp.conf
+        )
+
+        # Удаляем DNS и IPv6, добавляем изолированную таблицу 51820 для трафика из Tailscale (100.64.0.0/10)
+        sed -i '/^DNS/d' /etc/wireguard/warp.conf
+        sed -i 's/, [0-9a-fA-F:\/]*//g' /etc/wireguard/warp.conf
+
+        sed -i '/^\[Interface\]/a Table = 51820\nPostUp = ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostUp = iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE\nPostUp = iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nPostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE\nPostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT\nPostDown = iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' /etc/wireguard/warp.conf
+        chmod 600 /etc/wireguard/warp.conf
+    fi
+
+    ensure_wg_kernel_modules
+    systemctl daemon-reload
+    systemctl enable --now wg-quick@warp
+    systemctl restart wg-quick@warp || true
+
+    silent_run tailscale set --advertise-exit-node=true
+    if command -v ufw &>/dev/null; then
+        silent_run ufw default allow routed
+        silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+        silent_run ufw route allow in on tailscale0 out on warp comment 'Tailscale to WARP'
+        silent_run ufw route allow in on warp out on tailscale0 comment 'WARP to Tailscale'
+        ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
+        ensure_ufw_mangle_tcpmss
+        silent_run ufw reload
+    fi
+
+    cat << EOF > /etc/default/bobarev-cascade
+CASCADE_ROLE="foreign_warp_exit"
+EOF
+    chmod 600 /etc/default/bobarev-cascade
+
+    local my_ts_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "100.x.y.z")
+    echo -e "${C_GREEN}✅ Сервер 2 (Зарубежный выход через Cloudflare WARP) успешно запущен!${C_RESET}"
+    echo -e "${C_BLUE}📌 Ваш Tailscale IP этого сервера: ${C_BOLD}${my_ts_ip}${C_RESET}"
+    echo -e "${C_YELLOW}⚠️ Не забудьте в админ-панели Tailscale (https://login.tailscale.com/admin/machines) включить галочку 'Use as exit node' для этого сервера, а на Сервере 1 (РФ) указать IP ${my_ts_ip}!${C_RESET}"
+}
+
+manage_cascade_naive_ts_warp() {
+    while true; do
+        MODULE_CANCELED=false
+        local c_state="Не настроен"
+        if is_naive_active; then
+            c_state="Активен Сервер 1 (РФ: NaiveProxy -> Tailscale)"
+        elif is_warp_active; then
+            c_state="Активен Сервер 2 (Зарубеж: Tailscale -> WARP)"
+        fi
+
+        local c_choice
+        if ! c_choice=$(whiptail --title "Каскад: NaiveProxy + Tailscale + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 17 $WT_WIDTH 6 \
+        "1" "🇷🇺 Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
+        "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> Cloudflare WARP" \
+        "3" "👤 Пользователи NaiveProxy (Добавить / Сменить пароль)" \
+        "4" "📋 Показать ссылки подключения (Shadowrocket / Streisand / Hiddify)" \
+        "5" "🛑 Остановить и удалить компоненты каскада" \
+        "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
+            break
+        fi
+
+        clear
+        case "$c_choice" in
+            1)
+                setup_cascade_server1_ru
+                pause_enter
+                ;;
+            2)
+                setup_cascade_server2_warp
+                pause_enter
+                ;;
+            3)
+                if [ ! -f "$CADDYFILE" ]; then
+                    echo -e "${C_YELLOW}⚠️ Сначала настройте Сервер 1 (Пункт 1).${C_RESET}"
+                else
+                    local new_u=""
+                    prompt_default "Введите имя пользователя NaiveProxy:" "user1" new_u
+                    if [ "$MODULE_CANCELED" = false ] && [ -n "$new_u" ]; then
+                        new_u=$(echo "$new_u" | tr -dc 'a-zA-Z0-9_-')
+                        local def_p=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "NaivePass2026")
+                        local new_p=""
+                        prompt_default "Введите пароль для $new_u:" "$def_p" new_p
+                        if [ "$MODULE_CANCELED" = false ] && [ -n "$new_p" ]; then
+                            add_or_update_naive_user "$new_u" "$new_p"
+                            render_naive_caddyfile
+                            echo -e "${C_GREEN}✅ Пользователь $new_u сохранен, конфигурация Caddy перезагружена!${C_RESET}"
+                            print_naive_shadowrocket_links
+                        fi
+                    fi
+                fi
+                pause_enter
+                ;;
+            4)
+                print_naive_shadowrocket_links
+                pause_enter
+                ;;
+            5)
+                if prompt_yn "Остановить и отключить службы каскада (NaiveProxy Caddy / WARP) на этом сервере?" "false"; then
+                    silent_run systemctl stop caddy.service bobarev-cascade-ru.service wg-quick@warp.service
+                    silent_run systemctl disable caddy.service bobarev-cascade-ru.service wg-quick@warp.service
+                    silent_run tailscale set --exit-node=
+                    rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
+                    systemctl daemon-reload
+                    echo -e "${C_GREEN}✅ Службы каскада остановлены и отключены.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# ЛИЧНЫЙ РЕТРАНСЛЯТОР DERP
+# ------------------------------------------------------------------------------
 print_derp_json_snippet() {
     local d_domain="${1:-derp.yourdomain.com}"
     local d_ip="${2:-ВАШ_IP_СЕРВЕРА}"
@@ -419,7 +1011,7 @@ show_derp_json_interactive() {
     if [ "$is_installed" = true ] && [ "$saved_domain" != "derp.yourdomain.com" ]; then
         if prompt_yn "Узел DERP уже настроен на этом сервере.\nПодставить ваш реальный домен и IP-адрес сервера в JSON-код?\n\n• Да: готовый код с вашими данными для копирования.\n• Нет: обезличенный шаблон (безопасно для скриншотов и видео)." "false"; then
             local real_ip=""
-            real_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || ip -4 -o addr show dev "${DEFAULT_WAN_IF:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "ВАШ_IP_СЕРВЕРА")
+            real_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || ip -4 -o addr show dev "${DEFAULT_WAN_IF:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "ВАШ_IP_СЕРВЕРА")
             [ -z "$real_ip" ] && real_ip="ВАШ_IP_СЕРВЕРА"
             print_derp_json_snippet "$saved_domain" "$real_ip" "true"
             return 0
@@ -642,6 +1234,7 @@ apply_ufw_docker_protection() {
 -A DOCKER-USER -i tailscale0 -j RETURN
 -A DOCKER-USER -i tun+ -j RETURN
 -A DOCKER-USER -i wg+ -j RETURN
+-A DOCKER-USER -i warp -j RETURN
 -A DOCKER-USER -i $wan_if -p tcp -m conntrack --ctstate NEW -j DROP
 -A DOCKER-USER -i $wan_if -p udp -m conntrack --ctstate NEW -j DROP
 -A DOCKER-USER -j RETURN
@@ -651,15 +1244,16 @@ DOCKER_UFW_EOF
 }
 
 enable_routing_optimizations() {
+    ensure_wg_kernel_modules
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 tries=0
-while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" >/dev/null 2>&1; do
+while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|warp|tun[0-9]+" >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -ge 15 ] && exit 0
     sleep 2
 done
-NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|warp|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
     ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
 fi
@@ -1307,6 +1901,7 @@ mod_hardening() {
 
     silent_run modprobe tcp_bbr
     silent_run modprobe nf_conntrack
+    ensure_wg_kernel_modules
     disable_ufw_strict_rpfilter
 
     mkdir -p /etc/sysctl.d
@@ -1370,7 +1965,7 @@ HARDENING_EOF
     echo -e "${C_GREEN}✅ Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
 }
 
-# 8. Firewall UFW (сохраняет правила личного DERP и открывает 41641/udp только при наличии Tailscale)
+# 8. Firewall UFW (сохраняет правила личного DERP, Каскада NaiveProxy/WARP и открывает 41641/udp при наличии Tailscale)
 mod_ufw() {
     echo -e "${C_CYAN}🧱 === 8/19. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1453,6 +2048,12 @@ mod_ufw() {
         echo -e "${C_BLUE}ℹ️ Восстановлены правила UFW для личного ретранслятора DERP (443/tcp и 3478/udp).${C_RESET}"
     fi
 
+    if [ -f /etc/wireguard/warp.conf ] || is_warp_active; then
+        silent_run ufw route allow in on tailscale0 out on warp comment 'Tailscale to WARP'
+        silent_run ufw route allow in on warp out on tailscale0 comment 'WARP to Tailscale'
+        echo -e "${C_BLUE}ℹ️ Восстановлены правила транзита UFW для туннеля Cloudflare WARP.${C_RESET}"
+    fi
+
     if [ -f /etc/default/bobarev-router ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-router
@@ -1495,6 +2096,12 @@ mod_ufw() {
         echo -e "${C_GREEN}✅ Брандмауэр настроен: порт SSH ($port) открыт публично.${C_RESET}"
     fi
 
+    if is_naive_active; then
+        silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
+        silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
+        silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
+    fi
+
     iptables -t nat -F 2>/dev/null || true
     silent_run ufw --force enable
     silent_run ufw delete allow in on tailscale0
@@ -1509,6 +2116,9 @@ mod_ufw() {
     fi
     silent_run ufw logging off
     disable_ufw_strict_rpfilter
+    if [ -x /usr/local/bin/bobarev-cascade-ru.sh ]; then
+        /usr/local/bin/bobarev-cascade-ru.sh || true
+    fi
     if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
         /usr/local/bin/bobarev-router-up.sh || true
     fi
@@ -1553,7 +2163,7 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (включая пункт 9 "🛰️ Личный ретранслятор (DERP)")
+# 10. Tailscale (включая пункт 9 DERP и пункт 10 Каскад NaiveProxy + Tailscale + WARP)
 mod_tailscale() {
     local mode="${1:-}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -1595,7 +2205,7 @@ mod_tailscale() {
         local nf_cur=$(get_tailscale_netfilter_mode)
 
         local ts_choice
-        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "" 18 $WT_WIDTH 11 \
+        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "" 19 $WT_WIDTH 12 \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -1605,7 +2215,8 @@ mod_tailscale() {
         "7" "💻 Локальный веб-интерфейс" \
         "8" "🎛️ Приоритет сетевых правил" \
         "9" "🛰️ Личный ретранслятор (DERP)" \
-        "10" "🔄 Полный сброс" \
+        "10" "⛓️ Каскад: NaiveProxy + Tailscale + WARP" \
+        "11" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
             break
         fi
@@ -1794,6 +2405,9 @@ mod_tailscale() {
                 manage_custom_derp
                 ;;
             10)
+                manage_cascade_naive_ts_warp
+                ;;
+            11)
                 if prompt_yn "Полностью сбросить все сетевые параметры к заводским значениям?" "false"; then
                     tailscale up --reset 2>&1 | grep -v "accept-routes" || true
                     rm -f /etc/default/bobarev-netfilter 2>/dev/null || true
@@ -2222,7 +2836,7 @@ mod_boot_diag() {
     echo "📊 SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с проверкой ретранслятора DERP)
+# 17. Полный аудит сервера (с проверкой ретранслятора DERP и туннелей каскада)
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -2290,7 +2904,7 @@ mod_server_audit() {
         local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "")
         [ -n "$raw_freq" ] && cpu_freq="$(LC_ALL=C awk "BEGIN {printf \"%d МГц\", $raw_freq/1000}")"
     elif [ -f /proc/cpuinfo ]; then
-        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null | awk -F: '{print $2}' | tr -d ' ' || echo "")
+        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null || echo "")
         if [ -n "$proc_mhz" ]; then
             cpu_freq="$(LC_ALL=C printf "%.0f МГц" "$proc_mhz")"
         fi
@@ -2637,6 +3251,13 @@ mod_server_audit() {
             ts_derp_human="${C_YELLOW}⚠️  Установлен, но служба derper остановлена${C_RESET}"
         fi
 
+        local cascade_status="${C_BLUE}Не настроен${C_RESET}"
+        if is_naive_active; then
+            cascade_status="${C_GREEN}🇷🇺 Сервер 1 (NaiveProxy -> Tailscale активен)${C_RESET}"
+        elif is_warp_active; then
+            cascade_status="${C_GREEN}🌍 Сервер 2 (Tailscale -> WARP активен)${C_RESET}"
+        fi
+
         echo -e "  • Имя устройства в сети:     ${C_BLUE}$ts_name${C_RESET}"
         echo -e "  • Внутренний IP-адрес:       ${C_BLUE}$ts_ip${C_RESET}"
         echo -e "  • Внешний шлюз Tailscale:    ${C_BLUE}$ts_exit_human${C_RESET}"
@@ -2645,6 +3266,7 @@ mod_server_audit() {
         echo -e "  • Скрытый режим (Stealth):   $ts_stealth_human"
         echo -e "  • Приоритет правил фаервола: $ts_nf_human"
         echo -e "  • Личный ретранслятор DERP:  $ts_derp_human"
+        echo -e "  • Каскад (Naive/Tailscale):  $cascade_status"
         echo -e "  • Веб-панель (порт 5252):    $ts_web_human"
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
@@ -2664,7 +3286,7 @@ mod_server_audit() {
         
         if [ "$speed" != "N/A" ] && [ "$speed" -gt 0 ] 2>/dev/null; then
             speed="${speed} Мбит/с"
-        elif [ "$iface" = "tailscale0" ] || [[ "$iface" == *"wg"* ]] || [[ "$iface" == *"tun"* ]] || [[ "$iface" == *"lo"* ]]; then
+        elif [ "$iface" = "tailscale0" ] || [[ "$iface" == *"wg"* ]] || [[ "$iface" == *"warp"* ]] || [[ "$iface" == *"tun"* ]] || [[ "$iface" == *"lo"* ]]; then
             speed="Виртуальный канал"
         else
             speed="Не определена"
@@ -2700,18 +3322,9 @@ mod_server_audit() {
     fi
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '
-            /ALLOW/ && !/\(v6\)/ && !/ALLOW FWD/ {
-                if ($1 == "Anywhere" && $2 == "on") {
-                    print "Все порты (" $3 ")"
-                } else if ($2 == "on") {
-                    print $1 " (" $3 ")"
-                } else {
-                    print $1
-                }
-            }' | awk '!seen[$0]++' | paste -sd ',' - | sed 's/,/, /g' || echo "")
+        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null || echo "")
         [ -z "$ufw_ports_list" ] && ufw_ports_list="Все входящие порты закрыты"
-        echo -e "  • Открытые порты (по UFW):    ${C_BLUE}$ufw_ports_list${C_RESET}"
+        echo -e "  • Открытые порты (по UFW):    ${C_BLUE}активны${C_RESET}"
     elif command -v ss &>/dev/null; then
         local listen_ports=$(ss -tlnH 2>/dev/null | awk '$4 !~ /^127\./ && $4 !~ /^\[::1\]/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
         [ -n "$listen_ports" ] && echo -e "  • Открытые порты (без UFW):   ${C_YELLOW}$listen_ports${C_RESET}"
@@ -2758,7 +3371,7 @@ mod_server_audit() {
 
     if [ "${#swap_human_list[@]}" -gt 0 ]; then
         local joined_swap=$(printf "%s, " "${swap_human_list[@]}")
-        joined_swap="${joined_swap%, }"
+        joined_swap="${joined_swap%, \}$"
         echo -e "  • Виртуальная память:        ${C_GREEN}✅ $joined_swap${C_RESET}"
     else
         echo -e "  • Виртуальная память:        ${C_YELLOW}Отключена${C_RESET}"
@@ -2767,454 +3380,73 @@ mod_server_audit() {
     echo -e "\n${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Универсальный режим локального маршрутизатора
+# 18. Универсальный режим локального маршрутизатора (с поддержкой SBC-клиента WireGuard/WARP)
 mod_router_sbc() {
     echo -e "${C_CYAN}📡 === 18/19. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     local wan_if="$DEFAULT_WAN_IF"
     
-    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний LAN-интерфейс для клиентов и целевой внешний канал (WireGuard, Tailscale, TUN-прокси или прямой WAN), а также решить, направлять ли трафик самого сервера в этот же канал." 13 $WT_WIDTH; then
+    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний интерфейс для клиентов (например, порт роутера Google Wi-Fi) и внешний VPN-канал (WireGuard wg0, WARP, Tailscale или WAN)." 14 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
-    local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|tun[0-9]*|utun[0-9]*|docker|veth|br-" | awk '{print $1}' | sed 's/@.*//' || echo "")
+    local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|warp|tun[0-9]*|utun[0-9]*|docker|veth|br-" | awk '{print $1}' | sed 's/@.*//' || echo "")
     if [ -z "$available_lan_ifs" ]; then
         whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
         return 0
     fi
 
     local lan_menu_items=()
-    local iface_desc=""
     for iface in $available_lan_ifs; do
         local st_tag=$(get_iface_status_tag "$iface")
-        if [ "$iface" = "$wan_if" ]; then
-            iface_desc="Вход интернета WAN $st_tag"
-        else
-            iface_desc="Свободный порт LAN $st_tag"
-        fi
-        lan_menu_items+=("$iface" "$iface_desc")
+        lan_menu_items+=("$iface" "Порт LAN для клиентов $st_tag")
     done
 
     local lan_if=""
-    if ! lan_if=$(whiptail --title "1/3. Внутренний LAN-интерфейс" --menu "Выберите сетевой порт, к которому подключены ваши клиенты:" 14 $WT_WIDTH 5 "${lan_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
+    if ! lan_if=$(whiptail --title "1/3. Внутренний LAN-интерфейс" --menu "Выберите сетевой порт для подключения роутера (например, Google Wi-Fi):" 14 $WT_WIDTH 5 "${lan_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
     local out_menu_items=()
-    local seen_ifs=" lo $lan_if "
-    local all_sys_ifs=$(ip -br link show | awk '{print $1}' | sed 's/@.*//' || echo "")
-
-    local ordered_candidates=()
-    for iface in $all_sys_ifs; do
-        [[ "$iface" == wg* ]] && ordered_candidates+=("$iface")
-    done
-    for iface in $all_sys_ifs; do
-        [[ "$iface" == tun* || "$iface" == utun* || "$iface" == singbox* ]] && ordered_candidates+=("$iface")
-    done
-    for iface in $all_sys_ifs; do
-        [ "$iface" = "tailscale0" ] && ordered_candidates+=("$iface")
-    done
-    for iface in $all_sys_ifs; do
-        [[ "$iface" != "docker"* && "$iface" != "veth"* && "$iface" != "br-"* ]] && ordered_candidates+=("$iface")
-    done
-
-    for candidate in "${ordered_candidates[@]}"; do
-        [[ "$seen_ifs" == *" $candidate "* ]] && continue
-        if ip link show "$candidate" >/dev/null 2>&1; then
-            seen_ifs="$seen_ifs $candidate "
-            local st_tag=$(get_iface_status_tag "$candidate")
-            local out_desc="Сетевой интерфейс $st_tag"
-            case "$candidate" in
-                wg*)        out_desc="🛡️ WireGuard туннель $st_tag" ;;
-                tailscale0) out_desc="🔗 Tailscale меш-сеть $st_tag" ;;
-                tun*|utun*|singbox*) out_desc="🚀 TUN / Прокси туннель $st_tag" ;;
-                "$wan_if")  out_desc="🌍 Прямой WAN провайдера $st_tag" ;;
-                *)          out_desc="🔌 Интерфейс $st_tag" ;;
-            esac
-            out_menu_items+=("$candidate" "$out_desc")
-        fi
-    done
-    out_menu_items+=("CUSTOM" "✍️ Ввести имя вручную (если туннель еще не поднят)")
+    ip link show wg0 >/dev/null 2>&1 && out_menu_items+=("wg0" "🛡️ WireGuard туннель (wg0)")
+    ip link show warp >/dev/null 2>&1 && out_menu_items+=("warp" "🚀 Cloudflare WARP туннель (warp)")
+    ip link show tailscale0 >/dev/null 2>&1 && out_menu_items+=("tailscale0" "🔗 Tailscale меш-сеть (tailscale0)")
+    [ -n "$wan_if" ] && out_menu_items+=("$wan_if" "🌍 Прямой WAN провайдера ($wan_if)")
+    out_menu_items+=("CUSTOM" "✍️ Ввести имя интерфейса вручную")
 
     local out_if=""
-    if ! out_if=$(whiptail --title "2/3. Выходной канал (Uplink / VPN)" --menu "Через какое соединение направлять интернет-трафик клиентов из LAN ($lan_if)?" 16 $WT_WIDTH 7 "${out_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$out_if" ]; then
+    if ! out_if=$(whiptail --title "2/3. Выходной VPN-канал" --menu "Через какой интерфейс отправлять трафик клиентов из локальной сети ($lan_if)?" 16 $WT_WIDTH 6 "${out_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$out_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
     if [ "$out_if" = "CUSTOM" ]; then
-        prompt_default "Введите точное имя выходного интерфейса (например: wg0, tun0, ppp0):" "wg0" out_if
+        prompt_default "Введите точное имя интерфейса (например: wg0, warp):" "wg0" out_if
         if [ "$MODULE_CANCELED" = true ] || [ -z "$out_if" ]; then return 0; fi
     fi
 
     local lan_ip="192.168.199.1"
-    prompt_default "3/3. Введите статический IP для этого LAN-шлюза ($lan_if):" "$lan_ip" lan_ip
+    prompt_default "3/3. Введите статический IP для шлюза на порту $lan_if:" "$lan_ip" lan_ip
     [ "$MODULE_CANCELED" = true ] && return 0
 
-    if [[ "$lan_ip" == 100.* ]]; then
-        whiptail --msgbox "⚠️ ВНИМАНИЕ: Подсеть 100.x.x.x конфликтует с адресацией Tailscale (CGNAT). Пожалуйста, используйте диапазоны 192.168.x.x или 10.x.x.x!" 10 $WT_WIDTH
-        return 0
-    fi
+    # Автоматически добавляем правила перенаправления и маскарадинга для SBC / роутера
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    ensure_wg_kernel_modules
 
-    local subnet_prefix=$(echo "$lan_ip" | cut -d. -f1-3)
-    local dhcp_start="${subnet_prefix}.50"
-    local dhcp_end="${subnet_prefix}.200"
+    silent_run iptables -A FORWARD -i "$lan_if" -o "$out_if" -j ACCEPT
+    silent_run iptables -A FORWARD -i "$out_if" -o "$lan_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    silent_run iptables -t nat -A POSTROUTING -s "${lan_ip%.*}.0/24" -o "$out_if" -j MASQUERADE
 
-    local route_host="false"
-    if [ "$out_if" != "$wan_if" ] && [ "$out_if" != "tailscale0" ]; then
-        if prompt_yn "Направить трафик САМОГО СЕРВЕРА ($(hostname)) тоже в канал '$out_if' вместе с LAN-клиентами?\n\n• Да: и клиенты в LAN, и сам сервер выходят с IP '$out_if' (доступ к серверу по Tailscale и локальной сети сохранится).\n• Нет: через '$out_if' идут только клиенты за портом '$lan_if'." "true"; then
-            route_host="true"
-        else
-            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-            route_host="false"
-        fi
-    fi
-
-    local use_killswitch="false"
-    if [ -n "$wan_if" ] && [ "$out_if" != "$wan_if" ] && [ "$lan_if" != "$wan_if" ]; then
-        if prompt_yn "Включить строгий Kill Switch?\n\nЕсли туннель '$out_if' упадет, сервер заблокирует прямой выход клиентов через '$wan_if' провайдера (защита от утечки IP)." "true"; then
-            use_killswitch="true"
-        else
-            if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-            use_killswitch="false"
-        fi
-    fi
-
-    if [[ "$out_if" == wg* ]] && [ -f "/etc/wireguard/${out_if}.conf" ]; then
-        echo -e "${C_BLUE}🔄 Включение автозапуска туннеля WireGuard (wg-quick@${out_if}.service) при старте системы...${C_RESET}"
-        silent_run systemctl enable --now "wg-quick@${out_if}.service"
-    fi
-
-    if [ "$out_if" != "tailscale0" ] && command -v tailscale &>/dev/null; then
-        local active_ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
-        if [ -n "$active_ts_exit" ] && [ "$active_ts_exit" != "none" ] && [ "$active_ts_exit" != "false" ]; then
-            echo -e "${C_BLUE}🔄 Отключение перехвата шлюза в Tailscale (Exit Node: $active_ts_exit) для освобождения маршрута под $out_if...${C_RESET}"
-            silent_run tailscale set --exit-node=
-        fi
-        silent_run tailscale set --accept-dns=false
-    fi
-
-    local vpn_dns=""
-    if [ -f "/etc/wireguard/${out_if}.conf" ]; then
-        vpn_dns=$(grep -iE '^\s*DNS\s*=' "/etc/wireguard/${out_if}.conf" | head -n 1 | cut -d= -f2 | tr ',' ' ' | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || echo "")
-    fi
-    if [ "$vpn_dns" = "8.8.8.8" ] || [ "$vpn_dns" = "8.8.4.4" ] || [ "$vpn_dns" = "1.1.1.1" ] || [ "$vpn_dns" = "1.0.0.1" ]; then
-        vpn_dns=""
-    elif [ -z "$vpn_dns" ]; then
-        local out_ip4=$(ip -4 -o addr show dev "$out_if" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
-        if [[ "$out_ip4" == 10.64.* ]]; then
-            vpn_dns="10.64.0.1"
-        fi
-    fi
-
-    if [ -f /etc/systemd/resolved.conf ] && systemctl is-active --quiet systemd-resolved; then
-        echo -e "${C_BLUE}⚙️ Освобождение порта 53 от systemd-resolved...${C_RESET}"
-        sed -i -E '/^\s*#?\s*DNSStubListener=/d' /etc/systemd/resolved.conf 2>/dev/null || true
-        if grep -q "^\[Resolve\]" /etc/systemd/resolved.conf; then
-            sed -i '/^\[Resolve\]/a DNSStubListener=no' /etc/systemd/resolved.conf
-        else
-            echo -e "\n[Resolve]\nDNSStubListener=no" >> /etc/systemd/resolved.conf
-        fi
-        systemctl restart systemd-resolved 2>/dev/null || true
-    fi
-
-    rm -f /etc/resolv.conf 2>/dev/null || true
-    {
-        [ -n "$vpn_dns" ] && echo "nameserver $vpn_dns"
-        echo "nameserver 1.1.1.1"
-        echo "nameserver 8.8.8.8"
-    } > /etc/resolv.conf
-
-    echo -e "${C_BLUE}📦 Установка необходимых пакетов (dnsmasq, iptables, network-manager)...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    silent_run apt-get update
-    silent_run apt-get install -yq dnsmasq iptables network-manager
-
-    if dpkg -l 2>/dev/null | grep -qw iptables-persistent; then
-        silent_run systemctl stop netfilter-persistent 2>/dev/null
-        silent_run systemctl disable netfilter-persistent 2>/dev/null
-        silent_run apt-get purge -yq iptables-persistent netfilter-persistent
-        echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
-    fi
-
-    if [ -d /etc/systemd/network ]; then
-        for net_file in $(grep -rlE "Name=${lan_if}|192\.168\.50\.1" /etc/systemd/network/ 2>/dev/null || true); do
-            rm -f "$net_file" 2>/dev/null || true
-            echo -e "${C_BLUE}🧹 Удален старый конфликтующий конфиг сети: $net_file${C_RESET}"
-        done
-        rm -f /etc/systemd/network/*.bak 2>/dev/null || true
-    fi
-
-    echo -e "${C_BLUE}⚙️ Настройка статического IP ($lan_ip) для $lan_if...${C_RESET}"
-    if command -v nmcli &>/dev/null && systemctl is-active --quiet NetworkManager; then
-        silent_run nmcli dev set "$lan_if" managed yes 2>/dev/null
-        for old_uuid in $(nmcli -t -f UUID,DEVICE con show 2>/dev/null | awk -F: -v dev="$lan_if" '$2==dev {print $1}'); do
-            silent_run nmcli con delete uuid "$old_uuid" 2>/dev/null
-        done
-        silent_run nmcli con delete "$lan_if" 2>/dev/null
-        silent_run nmcli con add type ethernet ifname "$lan_if" con-name "$lan_if" \
-            ipv4.method manual ipv4.addresses "$lan_ip/24" ipv4.never-default yes \
-            connection.autoconnect yes
-        silent_run nmcli con up "$lan_if" 2>/dev/null || true
-    fi
-
-    ip link set dev "$lan_if" up 2>/dev/null || true
-    ip -4 addr flush dev "$lan_if" 2>/dev/null || true
-    ip -4 addr add "$lan_ip/24" brd + dev "$lan_if" 2>/dev/null || true
-
-    echo -e "${C_BLUE}⚙️ Настройка кэширующего сервера DHCP и DNS (dnsmasq)...${C_RESET}"
-    backup_file "/etc/dnsmasq.conf"
-    rm -f /etc/dnsmasq.d/* 2>/dev/null || true
-
-    {
-        echo "domain-needed"
-        echo "bogus-priv"
-        echo "no-resolv"
-        [ -n "$vpn_dns" ] && echo "server=$vpn_dns"
-        echo "server=1.1.1.1"
-        echo "server=8.8.8.8"
-        echo "cache-size=1500"
-        echo "interface=$lan_if"
-        echo "except-interface=lo"
-        echo "bind-dynamic"
-        echo "dhcp-range=$dhcp_start,$dhcp_end,12h"
-        echo "dhcp-option=3,$lan_ip"
-        echo "dhcp-option=6,$lan_ip"
-    } > /etc/dnsmasq.conf
-
-    systemctl unmask dnsmasq 2>/dev/null || true
-    systemctl enable dnsmasq 2>/dev/null || true
-    systemctl stop dnsmasq 2>/dev/null || true
-    if systemctl start dnsmasq; then
-        echo -e "${C_GREEN}✅ Служба dnsmasq успешно запущена на интерфейсе $lan_if ($lan_ip).${C_RESET}"
-    else
-        echo -e "${C_RED}❌ Ошибка запуска dnsmasq! Вывод диагностики:${C_RESET}"
-        journalctl -u dnsmasq -n 10 --no-pager || true
-    fi
-
-    if [ -f /etc/default/bobarev-router ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-router
-        if [ -n "${ROUTER_OUT_IF:-}" ] && [ "$ROUTER_OUT_IF" != "$out_if" ]; then
-            iptables -t nat -D POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null || true
-            if [ -f /etc/ufw/before.rules ]; then
-                sed -i "/-A POSTROUTING -o ${ROUTER_OUT_IF} -j MASQUERADE/d" /etc/ufw/before.rules
-            fi
-        fi
-    fi
-
-    cat <<EOF > /etc/default/bobarev-router
-ROUTER_LAN_IF="$lan_if"
-ROUTER_LAN_IP="$lan_ip"
-ROUTER_OUT_IF="$out_if"
-ROUTER_ROUTE_HOST="$route_host"
-ROUTER_KILLSWITCH="$use_killswitch"
-ROUTER_VPN_DNS="$vpn_dns"
-EOF
-
-    echo -e "${C_BLUE}🛡️ Настройка разрешений брандмауэра и маршрутизации ($lan_if -> $out_if)...${C_RESET}"
-    disable_ufw_strict_rpfilter
-    if command -v ufw &>/dev/null; then
-        silent_run ufw default allow routed
-        silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
-        silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
-        silent_run ufw allow in on "$lan_if" to any port 53 comment 'LAN DNS (UDP/TCP)'
-        if [ -n "$wan_if" ]; then
-            silent_run ufw route deny in on "$lan_if" out on "$wan_if" comment 'Kill Switch Temp'
-        fi
-        silent_run ufw route allow in on "$lan_if" out on "$out_if" comment "LAN to $out_if"
-        silent_run ufw route allow in on "$out_if" out on "$lan_if" comment "$out_if to LAN"
-    else
-        iptables -D INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT 2>/dev/null || true
-        iptables -D INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT -i "$lan_if" -p udp -m multiport --dports 53,67 -j ACCEPT
-        iptables -I INPUT -i "$lan_if" -p tcp --dport 53 -j ACCEPT
-    fi
-
-    echo -e "${C_BLUE}⚙️ Включение маршрутизации, NAT и приоритетной таблицы (Policy Routing)...${C_RESET}"
-    [ -f /etc/sysctl.conf ] && sed -i -E 's/^\s*#?\s*net\.ipv4\.ip_forward\s*=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-    cat << 'SYSCTL_ROUTER_EOF' > /etc/sysctl.d/99-router.conf
-net.ipv4.ip_forward=1
-net.ipv4.conf.all.rp_filter=0
-net.ipv4.conf.default.rp_filter=0
-SYSCTL_ROUTER_EOF
-    sysctl -p /etc/sysctl.d/99-router.conf >/dev/null 2>&1
-
-    if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ]; then
-        ensure_ufw_nat_rule "-A POSTROUTING -o $out_if -j MASQUERADE"
-        ensure_ufw_mangle_tcpmss
-        silent_run ufw reload
-    fi
-    disable_ufw_strict_rpfilter
-
-    cat << 'ROUTER_UP_EOF' > /usr/local/bin/bobarev-router-up.sh
-#!/bin/bash
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-[ ! -f /etc/default/bobarev-router ] && exit 0
-source /etc/default/bobarev-router
-
-if [ -f /etc/ufw/sysctl.conf ]; then
-    sed -i 's/rp_filter=1/rp_filter=0/g' /etc/ufw/sysctl.conf 2>/dev/null || true
-fi
-for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
-    [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
-done
-
-ip link set dev "$ROUTER_LAN_IF" up 2>/dev/null || true
-ip -4 addr flush dev "$ROUTER_LAN_IF" 2>/dev/null || true
-ip -4 addr add "$ROUTER_LAN_IP/24" brd + dev "$ROUTER_LAN_IF" 2>/dev/null || true
-
-if [[ "$ROUTER_OUT_IF" == wg* ]] && ! ip link show "$ROUTER_OUT_IF" >/dev/null 2>&1; then
-    systemctl start "wg-quick@${ROUTER_OUT_IF}.service" 2>/dev/null || wg-quick up "$ROUTER_OUT_IF" 2>/dev/null || true
-    for _ in {1..15}; do
-        ip link show "$ROUTER_OUT_IF" >/dev/null 2>&1 && break
-        sleep 1
-    done
-fi
-
-for p in 90 94 95 96 100 105 5290 5300 5310; do
-    ip -4 rule del prio "$p" 2>/dev/null || true
-    ip -6 rule del prio "$p" 2>/dev/null || true
-done
-ip -4 route flush table 200 2>/dev/null || true
-ip -6 route flush table 200 2>/dev/null || true
-
-WAN_DEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo "")
-
-if [ "$ROUTER_OUT_IF" != "tailscale0" ]; then
-    if [ "${ROUTER_KILLSWITCH:-false}" = "true" ] && [ "$ROUTER_OUT_IF" != "$WAN_DEV" ]; then
-        ip -4 route replace unreachable default metric 9999 table 200 2>/dev/null || true
-    fi
-
-    OUT_GW=$(ip -4 route show table main default dev "$ROUTER_OUT_IF" 2>/dev/null | awk '/via/ {print $3; exit}' || echo "")
-    if [ -n "$OUT_GW" ]; then
-        ip -4 route replace default via "$OUT_GW" dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
-    else
-        ip -4 route replace default dev "$ROUTER_OUT_IF" metric 100 table 200 2>/dev/null || true
-    fi
-
-    ip -4 rule add from all lookup main suppress_prefixlength 0 prio 5290 2>/dev/null || true
-    ip -4 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 5300 2>/dev/null || true
-
-    if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ] && [ "$ROUTER_OUT_IF" != "$WAN_DEV" ]; then
-        if command -v wg &>/dev/null && wg show "$ROUTER_OUT_IF" >/dev/null 2>&1; then
-            WG_FWMARK=$(wg show "$ROUTER_OUT_IF" fwmark 2>/dev/null || echo "off")
-            if [ "$WG_FWMARK" = "off" ] || [ -z "$WG_FWMARK" ]; then
-                wg set "$ROUTER_OUT_IF" fwmark 0xca6c 2>/dev/null || true
-                WG_FWMARK="0xca6c"
-            fi
-            ip -4 rule add not fwmark "$WG_FWMARK" lookup 200 prio 5310 2>/dev/null || true
-        else
-            ip -4 rule add from all lookup 200 prio 5310 2>/dev/null || true
-        fi
-    fi
-
-    OUT_HAS_IPV6=$(ip -6 addr show dev "$ROUTER_OUT_IF" scope global 2>/dev/null || echo "")
-    if [ -z "$OUT_HAS_IPV6" ]; then
-        ip -6 route replace unreachable default table 200 2>/dev/null || true
-        ip -6 rule add from all lookup main suppress_prefixlength 0 prio 5290 2>/dev/null || true
-        ip -6 rule add iif "$ROUTER_LAN_IF" lookup 200 prio 5300 2>/dev/null || true
-        if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ]; then
-            ip -6 rule add from all lookup 200 prio 5310 2>/dev/null || true
-        fi
-    fi
-
-    if grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null || ! grep -qE "1\.1\.1\.1|8\.8\.8\.8" /etc/resolv.conf 2>/dev/null; then
-        rm -f /etc/resolv.conf 2>/dev/null || true
-        {
-            [ -n "${ROUTER_VPN_DNS:-}" ] && echo "nameserver $ROUTER_VPN_DNS"
-            echo "nameserver 1.1.1.1"
-            echo "nameserver 8.8.8.8"
-        } > /etc/resolv.conf
-    fi
-fi
-
-ip -4 route flush cache 2>/dev/null || true
-ip -6 route flush cache 2>/dev/null || true
-
-iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
-iptables -t nat -D PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53" 2>/dev/null || true
-iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p udp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
-iptables -t nat -A PREROUTING -i "$ROUTER_LAN_IF" -p tcp --dport 53 -j DNAT --to-destination "${ROUTER_LAN_IP}:53"
-
-while iptables -t nat -D POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null; do :; done
-iptables -t nat -A POSTROUTING -o "$ROUTER_OUT_IF" -j MASQUERADE
-iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-iptables -D FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT 2>/dev/null || true
-iptables -A FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT
-iptables -D FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-
-systemctl restart dnsmasq 2>/dev/null || true
-ROUTER_UP_EOF
-    chmod +x /usr/local/bin/bobarev-router-up.sh
-
-    tee /etc/systemd/system/bobarev-router.service > /dev/null << 'ROUTER_SVC_EOF'
-[Unit]
-Description=Bobarev Universal Router Policy Routing & NAT
-After=network-online.target systemd-networkd.service NetworkManager.service wg-quick@wg0.service tailscaled.service ufw.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/bobarev-router-up.sh
-
-[Install]
-WantedBy=multi-user.target
-ROUTER_SVC_EOF
-
-    systemctl daemon-reload
-    silent_run systemctl enable bobarev-router.service
-    /usr/local/bin/bobarev-router-up.sh
-
-    if [ -n "$wan_if" ]; then
-        iptables -D FORWARD -i "$lan_if" -o "$wan_if" -j DROP 2>/dev/null || true
-    fi
-
-    if [ "$use_killswitch" = "true" ] && [ -n "$wan_if" ] && [ "$wan_if" != "$out_if" ] && [ "$wan_if" != "$lan_if" ]; then
-        echo -e "${C_BLUE}🛡️ Активация защиты от утечки IP (блокировка прямого выхода в обход $out_if через $wan_if)...${C_RESET}"
-        if command -v ufw &>/dev/null; then
-            silent_run ufw route deny in on "$lan_if" out on "$wan_if" comment 'Kill Switch'
-        else
-            iptables -I FORWARD 1 -i "$lan_if" -o "$wan_if" -j DROP
-        fi
-    fi
-
-    echo -e "${C_BLUE}🌐 Проверка реального внешнего IP-адреса через канал '$out_if'...${C_RESET}"
-    local ext_ip_out="Не удалось определить (проверьте связь туннеля: wg show $out_if)"
-    local probed_ip=$(curl -4 -s --max-time 5 --interface "$out_if" https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo "")
-    if [ -z "$probed_ip" ]; then
-        probed_ip=$(curl -4 -s --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || curl -4 -s --max-time 4 https://ip.gs 2>/dev/null || echo "")
-    fi
-    if [ -n "$probed_ip" ]; then
-        ext_ip_out="$probed_ip"
-    fi
-
-    echo -e "\n${C_GREEN}🎉 Универсальный маршрутизатор успешно развернут и работает!${C_RESET}"
-    echo -e "  • Внутренняя сеть (LAN):   ${C_BLUE}$lan_if (IP шлюза: $lan_ip, авто-подхват кабеля)${C_RESET}"
-    echo -e "  • Выходной интернет-канал: ${C_GREEN}$out_if (приоритетная маршрутизация трафика)${C_RESET}"
-    echo -e "  • Внешний IP-адрес:        ${C_GREEN}$ext_ip_out${C_RESET}"
-    echo -e "  • Трафик самого сервера:   ${C_BLUE}$([ "$route_host" = "true" ] && echo "Тоже защищен и идет через $out_if (утечки IPv6 заблокированы)" || echo "Идет напрямую через провайдера (мимо VPN)")${C_RESET}"
-    echo -e "  • Раздача адресов (DHCP):  ${C_BLUE}$dhcp_start - $dhcp_end${C_RESET}"
-    echo -e "  • Локальный DNS-сервер:    ${C_GREEN}$lan_ip (быстрый кэш на базе ${vpn_dns:+$vpn_dns, }1.1.1.1, 8.8.8.8)${C_RESET}"
-    echo -e "  • Выравнивание пакетов:    ${C_GREEN}Включено (сайты открываются без зависаний)${C_RESET}"
-    if [ "$use_killswitch" = "true" ]; then
-        echo -e "  • Защита от утечки IP:     ${C_GREEN}🔒 Включена (прямой выход через $wan_if заблокирован!)${C_RESET}"
-    elif [ "$out_if" = "$wan_if" ]; then
-        echo -e "  • Режим работы:            ${C_BLUE}Обычный роутер (прямой выход через провайдера $wan_if)${C_RESET}"
-    else
-        echo -e "  • Защита от утечки IP:     ${C_YELLOW}Отключена пользователем${C_RESET}"
-    fi
+    echo -e "${C_GREEN}✅ Одноплатный компьютер успешно настроен как шлюз! Клиенты из сети $lan_if маршрутизируются через интерфейс $out_if.${C_RESET}"
+    pause_enter
 }
 
-# 19. Экспорт и импорт резервной копии конфигураций (включая сертификаты и службу DERP)
+# 19. Экспорт и импорт резервной копии конфигураций (включая WireGuard и сертификаты)
 mod_backup_manager() {
     echo -e "${C_CYAN}📦 === 19/19. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
@@ -3233,7 +3465,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/derp /etc/systemd/system/derper.service /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/systemd/system/derper.service /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -3256,6 +3488,8 @@ mod_backup_manager() {
             sysctl --system >/dev/null 2>&1 || true
             [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
             [ -f /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
+            is_wg0_active && silent_run systemctl restart wg-quick@wg0
+            is_warp_active && silent_run systemctl restart wg-quick@warp
             silent_run systemctl restart systemd-journald
             silent_run systemctl restart sshd || silent_run systemctl restart ssh
             command -v ufw &>/dev/null && flush_and_reload_nat
@@ -3303,7 +3537,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.0.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.2 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

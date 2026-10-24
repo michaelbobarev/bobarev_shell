@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.0 (Gold Master - High Performance + udp2raw Anti-DPI + Fixed Balanced)
+# Версия: 3.8.1 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -814,35 +814,6 @@ TUNE_EOF
         sed -i '/^TCP_TUNE_PROFILE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
         echo "TCP_TUNE_PROFILE="$profile"" >> /etc/default/bobarev-cascade
     fi
-}
-manage_naive_tcp_tuning_menu() {
-    local cur_prof="balanced"
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        cur_prof="${TCP_TUNE_PROFILE:-balanced}"
-    fi
-    local cur_lowat=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo "default")
-
-    local t_choice
-    if ! t_choice=$(whiptail --title "Тюнинг TCP-сокетов (Anti-HoL Blocking)" --menu "\nТекущий профиль: $cur_prof (tcp_notsent_lowat = $cur_lowat байт)\nВыберите режим работы сокетов NaiveProxy:" 16 $WT_WIDTH 3 \
-    "1" "⚡ Сбалансированный (16 КБ — оптимум для 300-500 Мбит/с)" \
-    "2" "🛡️ Агрессивный Анти-Лаг (8 КБ — при высоких потерях пакетов)" \
-    "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$t_choice" = "0" ]; then
-        return 0
-    fi
-
-    clear
-    case "$t_choice" in
-        1)
-            apply_naive_tcp_tuning_profile "balanced"
-            echo -e "${C_GREEN}✅ Включен Сбалансированный профиль TCP-сокетов (tcp_notsent_lowat = 16384 байт).${C_RESET}"
-            ;;
-        2)
-            apply_naive_tcp_tuning_profile "aggressive"
-            echo -e "${C_GREEN}✅ Включен Агрессивный профиль Anti-HoL Blocking (tcp_notsent_lowat = 8192 байт).${C_RESET}"
-            ;;
-    esac
 }
 print_naive_shadowrocket_links() {
     if [ ! -f /etc/default/bobarev-cascade ] || [ ! -s "$NAIVE_PASS_FILE" ]; then

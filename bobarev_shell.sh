@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.2.3 (Gold Master - Cascade NaiveProxy -> Tailscale -> WARP Edition)
+# Версия: 3.2.4 (Gold Master - Cascade NaiveProxy -> Tailscale -> WARP Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -459,6 +459,10 @@ ensure_go_and_build_caddy_naive() {
         fi
     fi
 
+    # Используем физический диск вместо маленького tmpfs (/tmp), чтобы сборка не падала с "no space left on device"
+    local build_tmp_dir="/root/.caddy-build-tmp"
+    mkdir -p "$build_tmp_dir"
+
     if [ "$need_go" = true ]; then
         echo -e "${C_BLUE}📦 Установка компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
         local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
@@ -469,11 +473,11 @@ ensure_go_and_build_caddy_naive() {
         else
             arch="amd64"
         fi
-        local go_tmp=$(mktemp /tmp/go_XXXXXX.tar.gz)
+        local go_tmp="${build_tmp_dir}/go_${GO_VERSION_PIN}.tar.gz"
         wget -q --tries=3 --timeout=30 "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" -O "$go_tmp"
         local act_sha=$(sha256sum "$go_tmp" | awk '{print $1}')
         if [ "$act_sha" != "$exp_sha" ]; then
-            rm -f "$go_tmp"
+            rm -rf "$build_tmp_dir"
             echo -e "${C_RED}❌ Ошибка: контрольная сумма SHA256 архива Go не совпала!${C_RESET}"
             return 1
         fi
@@ -486,6 +490,7 @@ ensure_go_and_build_caddy_naive() {
     fi
 
     if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy"; then
+        rm -rf "$build_tmp_dir"
         echo -e "${C_GREEN}✅ Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
         return 0
     fi
@@ -493,11 +498,22 @@ ensure_go_and_build_caddy_naive() {
     echo -e "${C_BLUE}🔨 Сборка Caddy ${CADDY_VERSION_PIN} с модулем klzgrad/forwardproxy@naive (занимает 3-10 минут)...${C_RESET}"
     export GOPATH="/root/go"
     export GOCACHE="/root/.cache/go-build"
+    export GOTMPDIR="$build_tmp_dir"
+    export TMPDIR="$build_tmp_dir"
+
     go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}"
 
     "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
         --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
-        --output "$CADDY_BIN"
+        --output "$CADDY_BIN" || true
+
+    rm -rf "$build_tmp_dir"
+    unset GOTMPDIR TMPDIR
+
+    if [ ! -f "$CADDY_BIN" ]; then
+        echo -e "${C_RED}❌ Ошибка сборки: бинарный файл $CADDY_BIN не был создан (проверьте наличие свободного места на диске df -h).${C_RESET}"
+        return 1
+    fi
 
     chmod +x "$CADDY_BIN"
     if ! "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy"; then
@@ -646,14 +662,14 @@ print_naive_shadowrocket_links() {
     fi
     # shellcheck disable=SC1091
     source /etc/default/bobarev-cascade
-    local dom="${NAIVE_DOMAIN:-yourdomain.com}"
+    local dom="${NAIVE_DOMAIN:-$(hostname)}"
 
     local show_real=false
     if prompt_yn "Показать реальные пароли в ссылках для копирования в Shadowrocket?\n\n• Да: готовые рабочие ссылки.\n• Нет: скрыть пароли звездочками (безопасно для скриншотов)." "true"; then
         show_real=true
     fi
 
-    echo -e "\n${C_CYAN}📋 === ГОТОВЫЕ ССЫЛКИ ДЛЯ SHADOWROCKET / STREISAND / HIDDIFY ===${C_RESET}"
+    echo -e "\n${C_CYAN}📋 === ГОТОВЫЕ ССЫЛКИ ДЛЯ SHADOWROCKET ===${C_RESET}"
     while IFS=: read -r u p; do
         [ -z "$u" ] || [ -z "$p" ] && continue
         local disp_p="********"
@@ -662,17 +678,18 @@ print_naive_shadowrocket_links() {
             disp_p="$p"
             b64_str=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64)
         fi
-        echo -e "\n👤 Пользователь: ${C_BOLD}${u}${C_RESET} (Домен: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
-        echo -e "  • ${C_BLUE}Универсальная ссылка (Shadowrocket / Streisand / Hiddify / NekoBox):${C_RESET}"
-        echo -e "    ${C_GREEN}naive+https://${u}:${disp_p}@${dom}:443?padding=true#RU-Cascade-${u}${C_RESET}"
+        echo -e "\n👤 Пользователь: ${C_BOLD}${u}${C_RESET} (Сервер: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
+        echo -e "  • ${C_BLUE}Универсальная ссылка HTTPS (вставляется напрямую в Shadowrocket):${C_RESET}"
+        echo -e "    ${C_GREEN}https://${u}:${disp_p}@${dom}:443?padding=true#${dom}-${u}${C_RESET}"
         echo -e "  • ${C_BLUE}Прямая ссылка HTTP/2 (альтернативный формат Shadowrocket):${C_RESET}"
-        echo -e "    ${C_GREEN}http2://${b64_str}?obfs=none#RU-HTTP2-${u}${C_RESET}"
+        echo -e "    ${C_GREEN}http2://${b64_str}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
     done < "$NAIVE_PASS_FILE"
 
     echo -e "\n${C_BLUE}💡 Ручная настройка в Shadowrocket (если добавляете вручную):${C_RESET}"
     echo -e "  • Тип (Type): ${C_BOLD}HTTPS${C_RESET} или ${C_BOLD}HTTP2${C_RESET}"
     echo -e "  • Адрес (Address): ${C_BOLD}${dom}${C_RESET} | Порт (Port): ${C_BOLD}443${C_RESET}"
     echo -e "  • Пользователь и Пароль: ваши данные выше | TLS: ${C_BOLD}Включен (ON)${C_RESET}"
+    echo -e "  • Название (Remarks): ${C_BOLD}${dom}${C_RESET}"
 }
 
 setup_cascade_server1_ru() {
@@ -739,7 +756,7 @@ EOF
     add_or_update_naive_user "$n_user" "$n_pass"
     render_naive_caddyfile
 
-    # Создание службы маршрутизации для российского сервера (защита обратного маршрута + NAT в tailscale0)
+    # Создание службы маршрутизации и TCP-тюнинга для российского сервера
     cat << 'RU_SH_EOF' > /usr/local/bin/bobarev-cascade-ru.sh
 #!/bin/bash
 [ ! -f /etc/default/bobarev-cascade ] && exit 0
@@ -747,6 +764,9 @@ source /etc/default/bobarev-cascade
 [ "${CASCADE_ROLE:-}" != "ru_entry" ] && exit 0
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
 
 WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|warp|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 PUB_IP="${SERVER_PUB_IP:-}"
@@ -759,8 +779,10 @@ if [ -n "$PUB_IP" ]; then
     ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
 fi
 
+ip link set dev tailscale0 txqueuelen 10000 2>/dev/null || true
 iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
 iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+iptables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
     tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true 2>/dev/null || true
@@ -1062,8 +1084,13 @@ manage_custom_derp() {
                 apt-get update -qq
                 apt-get install -yq golang git nano
 
+                local derp_tmp_dir="/root/.derp-build-tmp"
+                mkdir -p "$derp_tmp_dir"
                 export GOTOOLCHAIN=auto
                 export GOPATH="/root/go"
+                export GOTMPDIR="$derp_tmp_dir"
+                export TMPDIR="$derp_tmp_dir"
+
                 GOBIN=/usr/local/bin go install tailscale.com/cmd/derper@latest || {
                     go install tailscale.com/cmd/derper@latest
                     if [ -f "/root/go/bin/derper" ]; then
@@ -1072,6 +1099,8 @@ manage_custom_derp() {
                         cp "$HOME/go/bin/derper" /usr/local/bin/derper
                     fi
                 }
+                rm -rf "$derp_tmp_dir"
+                unset GOTMPDIR TMPDIR
 
                 if [ ! -x /usr/local/bin/derper ]; then
                     echo -e "${C_RED}❌ Ошибка: не удалось собрать бинарник /usr/local/bin/derper.${C_RESET}"
@@ -3538,7 +3567,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.2.3 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.2.4 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

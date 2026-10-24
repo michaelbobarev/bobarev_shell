@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.4.0 (Gold Master - Dual Cascade + udp2raw Anti-DPI Obfuscation)
+# Версия: 3.5.0 (Gold Master - Dual Cascade + udp2raw Anti-DPI Obfuscation)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -763,7 +763,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell: Aggressive Anti-HoL Blocking Profile for NaiveProxy Cascade
+# Bobarev Shell: Aggressive Anti-HoL Blocking Profile (Low-Latency / High-Loss)
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -772,7 +772,30 @@ net.ipv4.tcp_early_retrans = 3
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_rmem = 4096 131072 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+TUNE_EOF
+    elif [ "$profile" = "turbo" ]; then
+        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
+# Bobarev Shell: Turbo High-BDP Profile for 500-1000 Mbps Cascades
+net.ipv4.tcp_notsent_lowat = 65536
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_thin_linear_timeouts = 0
+net.ipv4.tcp_early_retrans = 3
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_wmem = 4096 131072 67108864
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
@@ -782,19 +805,32 @@ TUNE_EOF
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_thin_linear_timeouts = 0
+net.ipv4.tcp_early_retrans = 3
 net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     fi
 
     sysctl -p /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
+    ip tcp_metrics flush all >/dev/null 2>&1 || true
+
+    if systemctl is-active --quiet caddy.service 2>/dev/null; then
+        systemctl restart caddy.service 2>/dev/null || true
+    fi
 
     if [ -f /etc/default/bobarev-cascade ]; then
         sed -i '/^TCP_TUNE_PROFILE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-        echo "TCP_TUNE_PROFILE=\"$profile\"" >> /etc/default/bobarev-cascade
+        echo "TCP_TUNE_PROFILE="$profile"" >> /etc/default/bobarev-cascade
     fi
 }
 
@@ -808,9 +844,10 @@ manage_naive_tcp_tuning_menu() {
     local cur_lowat=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo "default")
 
     local t_choice
-    if ! t_choice=$(whiptail --title "Тюнинг TCP-сокетов (Anti-HoL Blocking)" --menu "\nТекущий профиль: $cur_prof (tcp_notsent_lowat = $cur_lowat байт)\nВыберите режим работы сокетов NaiveProxy:" 16 $WT_WIDTH 3 \
+    if ! t_choice=$(whiptail --title "Тюнинг TCP-сокетов (Anti-HoL Blocking)" --menu "\nТекущий профиль: $cur_prof (tcp_notsent_lowat = $cur_lowat байт)\nВыберите режим работы сокетов NaiveProxy:" 17 $WT_WIDTH 4 \
     "1" "⚡ Сбалансированный (16 КБ — оптимум для 300-500 Мбит/с)" \
-    "2" "🚀 Агрессивный Анти-Лаг (8 КБ + Early Retrans — против потерь)" \
+    "2" "🔥 Турбо-Поток (64 КБ — для скоростей 500-1000 Мбит/с)" \
+    "3" "🛡️ Агрессивный Анти-Лаг (8 КБ — при высоких потерях пакетов)" \
     "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$t_choice" = "0" ]; then
         return 0
     fi
@@ -822,12 +859,15 @@ manage_naive_tcp_tuning_menu() {
             echo -e "${C_GREEN}✅ Включен Сбалансированный профиль TCP-сокетов (tcp_notsent_lowat = 16384 байт).${C_RESET}"
             ;;
         2)
+            apply_naive_tcp_tuning_profile "turbo"
+            echo -e "${C_GREEN}✅ Включен Турбо-профиль (tcp_notsent_lowat = 65536 байт + авто-буферы 64 МБ).${C_RESET}"
+            ;;
+        3)
             apply_naive_tcp_tuning_profile "aggressive"
-            echo -e "${C_GREEN}✅ Включен Агрессивный профиль Anti-HoL Blocking (tcp_notsent_lowat = 8192 байт + Thin Linear Timeouts).${C_RESET}"
+            echo -e "${C_GREEN}✅ Включен Агрессивный профиль Anti-HoL Blocking (tcp_notsent_lowat = 8192 байт).${C_RESET}"
             ;;
     esac
 }
-
 print_naive_shadowrocket_links() {
     if [ ! -f /etc/default/bobarev-cascade ] || [ ! -s "$NAIVE_PASS_FILE" ]; then
         echo -e "${C_YELLOW}⚠️ Пользователи NaiveProxy еще не созданы или Сервер 1 не настроен.${C_RESET}"
@@ -1051,7 +1091,7 @@ ensure_warp_installed_and_configured() {
         sed -i '/^DNS/d' /etc/wireguard/warp.conf
         sed -i 's/, [0-9a-fA-F:\/]*//g' /etc/wireguard/warp.conf
 
-        sed -i '/^\[Interface\]/a Table = 51820\nPostUp = ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true\nPostUp = iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE\nPostUp = iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostUp = iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200\nPostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nPostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 || true\nPostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE\nPostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT\nPostDown = iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT\nPostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostDown = iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200\nPostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' /etc/wireguard/warp.conf
+        sed -i '/^\[Interface\]/a Table = 51820\nPostUp = ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true\nPostUp = iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE\nPostUp = iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostUp = iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200\nPostUp = ip link set dev warp txqueuelen 10000 || true\nPostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nPostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 || true\nPostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE\nPostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT\nPostDown = iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT\nPostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostDown = iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200\nPostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' /etc/wireguard/warp.conf
         chmod 600 /etc/wireguard/warp.conf
     else
         if ! grep -q "10.200.200.0/30" /etc/wireguard/warp.conf 2>/dev/null; then
@@ -1147,7 +1187,7 @@ manage_cascade_naive_ts_warp() {
                     silent_run systemctl stop caddy.service bobarev-cascade-ru.service wg-quick@warp.service wg-quick@wg-cascade.service bobarev-udp2raw.service
                     silent_run systemctl disable caddy.service bobarev-cascade-ru.service wg-quick@warp.service wg-quick@wg-cascade.service bobarev-udp2raw.service
                     silent_run tailscale set --exit-node=
-                    rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
+                    rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
                     systemctl daemon-reload
                     echo -e "${C_GREEN}✅ Службы каскада остановлены и отключены.${C_RESET}"
                 fi
@@ -1230,7 +1270,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode xor --auth-mode simple -a --fix-gro
+ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode xor --auth-mode none --sock-buf 10485760 -a --fix-gro
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -1887,7 +1927,19 @@ COMMIT
 DOCKER_UFW_EOF
 }
 
+
+# Включение RPS (Receive Packet Steering) для многопоточной обработки трафика туннелей по всем ядрам CPU
+configure_rps_for_interfaces() {
+    for iface in wg-cascade warp $(get_wan_if); do
+        [ -z "$iface" ] && continue
+        for qdir in /sys/class/net/"$iface"/queues/rx-*; do
+            [ -d "$qdir" ] && echo "ff" > "$qdir/rps_cpus" 2>/dev/null || true
+        done
+    done
+}
+
 enable_routing_optimizations() {
+    configure_rps_for_interfaces || true
     ensure_wg_kernel_modules
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
@@ -4157,6 +4209,7 @@ mod_backup_manager() {
             [ -f /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
             is_naive_active && silent_run systemctl restart caddy.service
             is_warp_active && silent_run systemctl restart wg-quick@warp
+            [ -f /etc/systemd/system/bobarev-udp2raw.service ] && [ -x /usr/local/bin/udp2raw ] && silent_run systemctl restart bobarev-udp2raw.service
             [ -f /etc/systemd/system/bobarev-udp2raw.service ] && [ -x /usr/local/bin/udp2raw ] && silent_run systemctl restart bobarev-udp2raw.service
             [ -f /etc/wireguard/wg-cascade.conf ] && silent_run systemctl restart wg-quick@wg-cascade
             silent_run systemctl restart systemd-journald

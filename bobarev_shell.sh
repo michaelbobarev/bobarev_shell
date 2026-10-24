@@ -1315,9 +1315,9 @@ EOF
     local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "IP_СЕРВЕРА_2")
 
     local raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}"
-    local bridge_token=""
+    bridge_token=$(printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
     if command -v base64 &>/dev/null; then
-        bridge_token=$(printf '%s' "$raw_str" | base64 -w0 2>/dev/null || printf '%s' "$raw_str" | base64 | tr -d '\r\n' || true)
+    bridge_token=$(printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
     fi
 
     cat << EOF > /etc/default/bobarev-cascade
@@ -1361,7 +1361,7 @@ setup_direct_wg_server1_ru() {
     token_in=$(echo "$token_in" | tr -d '[:space:]')
 
     local decoded=""
-    decoded=$(printf '%s' "$token_in" | base64 -d 2>/dev/null || echo "")
+    decoded=$(printf '%s' "$token_in" | tr -d '\n\r ' | base64 -d 2>/dev/null || echo "")
     local s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key
     IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key <<< "$decoded"
     obfs_mode="${obfs_mode:-none}"

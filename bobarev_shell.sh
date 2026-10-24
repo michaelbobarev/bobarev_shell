@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.6.0 (Gold Master - High Performance + udp2raw Anti-DPI + Auto-Clean)
+# Версия: 3.7.0 (Gold Master - High Performance + udp2raw Anti-DPI + Token Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -815,7 +815,7 @@ net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_wmem = 4096 65536 33554432
 net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
 net.core.default_qdisc = fq
@@ -840,7 +840,7 @@ manage_naive_tcp_tuning_menu() {
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
-        cur_prof="${TCP_TS_PROFILE:-balanced}"
+        cur_prof="${TCP_TUNE_PROFILE:-balanced}"
     fi
     local cur_lowat=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo "default")
 
@@ -1374,10 +1374,11 @@ EOF
     local wan_dev=$(get_wan_if)
     local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "IP_СЕРВЕРА_2")
 
-    local bridge_token
-    bridge_token=$(printf '%s' "${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}" | base64 -w0 2>/dev/null || printf '%s' "${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}" | tr -d '
-' | base64 | tr -d '
-')
+    local raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}"
+    local bridge_token=""
+    if command -v base64 &>/dev/null; then
+        bridge_token=$(printf '%s' "$raw_str" | base64 -w0 2>/dev/null || printf '%s' "$raw_str" | base64 | tr -d '\r\n' || true)
+    fi
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_wg_warp_exit"
@@ -4247,7 +4248,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.6.0 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.7.0 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

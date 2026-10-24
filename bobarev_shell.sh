@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.2.2 (Gold Master - Cascade NaiveProxy -> Tailscale -> WARP Edition)
+# Версия: 3.2.3 (Gold Master - Cascade NaiveProxy -> Tailscale -> WARP Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -676,7 +676,7 @@ print_naive_shadowrocket_links() {
 }
 
 setup_cascade_server1_ru() {
-    echo -e "${C_CYAN}🛡️ === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
+    echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
@@ -881,12 +881,12 @@ manage_cascade_naive_ts_warp() {
 
         local c_choice
         if ! c_choice=$(whiptail --title "Каскад: NaiveProxy + Tailscale + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 17 $WT_WIDTH 6 \
-        "1" "🛡️ Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
+        "1" "🔒 Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
         "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> Cloudflare WARP" \
         "3" "👤 Пользователи NaiveProxy (Добавить / Сменить пароль)" \
         "4" "📋 Показать ссылки (Shadowrocket / Streisand / Hiddify)" \
         "5" "🛑 Остановить и удалить компоненты каскада" \
-        "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
+        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -1043,14 +1043,14 @@ manage_custom_derp() {
         "2" "📋 Показать JSON-код (derpMap) для консоли" \
         "3" "🔑 Редактировать сертификаты Cloudflare (.crt / .key)" \
         "4" "🛑 Остановить и удалить службу DERP" \
-        "0" "↩ Вернуться назад" 3>&1 1>&2 2>&3) || [ "$d_choice" = "0" ]; then
+        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$d_choice" = "0" ]; then
             break
         fi
 
         clear
         case "$d_choice" in
             1)
-                echo -e "${C_CYAN}🛰️ === УСТАНОВКА ЛИЧНОГО РЕТРАНСЛЯТОРА DERP (CLOUDFLARE + STUN) ===${C_RESET}"
+                echo -e "${C_CYAN}📡 === УСТАНОВКА ЛИЧНОГО РЕТРАНСЛЯТОРА DERP (CLOUDFLARE + STUN) ===${C_RESET}"
                 ensure_tailscale_installed || true
 
                 local d_dom=""
@@ -1473,7 +1473,7 @@ mod_timezone() {
 
 # 2. Имя хоста
 mod_hostname() {
-    echo -e "${C_CYAN}🏷️ === 2/19. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
+    echo -e "${C_CYAN}📌 === 2/19. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
     echo "Текущее имя хоста: $(hostname)"
     
     local default_brand_host="Server-VPS"
@@ -1883,7 +1883,7 @@ SSH_HARDENING_EOF
 
 # 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6 форвардингом)
 mod_hardening() {
-    echo -e "${C_CYAN}🛡️ === 7/19. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
+    echo -e "${C_CYAN}🔒 === 7/19. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
     sed -i -E '/^\s*(net\.core\.(rmem|wmem)_(max|default)|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc)\s*=/d' /etc/sysctl.conf 2>/dev/null || true
     backup_file "/etc/sysctl.d/99-zzz-server-hardening.conf"
@@ -2209,15 +2209,15 @@ mod_tailscale() {
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
-        "4" "🛡 Прием маршрутов" \
+        "4" "📥 Прием маршрутов" \
         "5" "🔒 Стелс-режим" \
         "6" "⚡ Ускорение и MSS Clamping" \
         "7" "💻 Локальный веб-интерфейс" \
-        "8" "🎛 Приоритет сетевых правил" \
+        "8" "🔧 Приоритет сетевых правил" \
         "9" "📡 Личный ретранслятор (DERP)" \
         "10" "🔗 Каскад: NaiveProxy + Tailscale + WARP" \
         "11" "🔄 Полный сброс" \
-        "0" "↩ Вернуться назад" 3>&1 1>&2 2>&3); then
+        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3); then
             break
         fi
 
@@ -2376,7 +2376,7 @@ mod_tailscale() {
             8)
                 local nf_choice
                 if nf_choice=$(whiptail --title "Приоритет сетевых правил" --menu "Действие:" 13 $WT_WIDTH 4 \
-                "1" "🛡 Приоритет брандмауэра UFW (системный режим)" \
+                "1" "🔒 Приоритет брандмауэра UFW (системный режим)" \
                 "2" "🔗 Приоритет Tailscale (встроенный авто-режим)" \
                 "3" "🔀 Выбрать интерфейсы для сквозного транзита" \
                 "4" "🧹 Очистить дубликаты NAT и перезагрузить UFW" 3>&1 1>&2 2>&3); then
@@ -2675,14 +2675,14 @@ mod_swap_manager() {
 
 # 14. Системные утилиты и режим процессора
 mod_desktop_apps() {
-    echo -e "${C_CYAN}🖥️ === 14/19. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
+    echo -e "${C_CYAN}💻 === 14/19. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
     local gov_choice
     if gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
     "1" "⚡ Performance (Максимальный)" \
-    "2" "⚖ Ondemand / Schedutil (Сбалансированный)" \
+    "2" "🔄 Ondemand / Schedutil (Сбалансированный)" \
     "3" "🍃 Powersave (Эко-режим)" \
-    "0" "⏭ Без изменений" 3>&1 1>&2 2>&3) && [ "$gov_choice" != "0" ]; then
+    "0" "🔙 Без изменений" 3>&1 1>&2 2>&3) && [ "$gov_choice" != "0" ]; then
         local selected_gov="ondemand"
         local gov_name="Сбалансированный"
         local avail_govs=""
@@ -2799,7 +2799,7 @@ HDMI_EOF
 
 # 16. Диагностика времени загрузки
 mod_boot_diag() {
-    echo -e "${C_CYAN}⏱️ === 16/19. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
+    echo -e "${C_CYAN}⏳ === 16/19. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
         echo -e "${C_RED}❌ Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
@@ -3163,7 +3163,7 @@ mod_server_audit() {
 
             local r_out_human="${C_GREEN}Через сетевой канал $r_out${C_RESET}"
             case "$r_out" in
-                wg*)        r_out_human="${C_GREEN}🛡️  Через защищенный туннель WireGuard ($r_out)${C_RESET}" ;;
+                wg*)        r_out_human="${C_GREEN}🔒 Через защищенный туннель WireGuard ($r_out)${C_RESET}" ;;
                 tailscale0) r_out_human="${C_GREEN}🔗 Через закрытую сеть Tailscale${C_RESET}" ;;
                 tun*|utun*) r_out_human="${C_GREEN}🚀 Через прокси-туннель ($r_out)${C_RESET}" ;;
                 "$wan_if")  r_out_human="${C_BLUE}🌍 Напрямую через провайдера ($r_out, без VPN)${C_RESET}" ;;
@@ -3253,7 +3253,7 @@ mod_server_audit() {
 
         local cascade_status="${C_BLUE}Не настроен${C_RESET}"
         if is_naive_active; then
-            cascade_status="${C_GREEN}🛡️ Сервер 1 (NaiveProxy -> Tailscale активен)${C_RESET}"
+            cascade_status="${C_GREEN}🔒 Сервер 1 (NaiveProxy -> Tailscale активен)${C_RESET}"
         elif is_warp_active; then
             cascade_status="${C_GREEN}🌍 Сервер 2 (Tailscale -> WARP активен)${C_RESET}"
         fi
@@ -3412,11 +3412,11 @@ mod_router_sbc() {
     fi
 
     local out_menu_items=()
-    ip link show wg0 >/dev/null 2>&1 && out_menu_items+=("wg0" "🛡 WireGuard туннель (wg0)")
+    ip link show wg0 >/dev/null 2>&1 && out_menu_items+=("wg0" "🔒 WireGuard туннель (wg0)")
     ip link show warp >/dev/null 2>&1 && out_menu_items+=("warp" "🚀 Cloudflare WARP туннель (warp)")
     ip link show tailscale0 >/dev/null 2>&1 && out_menu_items+=("tailscale0" "🔗 Tailscale меш-сеть (tailscale0)")
     [ -n "$wan_if" ] && out_menu_items+=("$wan_if" "🌍 Прямой WAN провайдера ($wan_if)")
-    out_menu_items+=("CUSTOM" "✏ Ввести имя интерфейса вручную")
+    out_menu_items+=("CUSTOM" "📝 Ввести имя интерфейса вручную")
 
     local out_if=""
     if ! out_if=$(whiptail --title "2/3. Выходной VPN-канал" --menu "Через какой интерфейс отправлять трафик клиентов из локальной сети ($lan_if)?" 16 $WT_WIDTH 6 "${out_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$out_if" ]; then
@@ -3457,7 +3457,7 @@ mod_backup_manager() {
     if ! b_choice=$(whiptail --title "Экспорт и импорт настроек" --menu "Выберите действие:" 13 $WT_WIDTH 3 \
     "1" "📤 Сохранить настройки в архив (Экспорт)" \
     "2" "📥 Восстановить настройки из архива (Импорт)" \
-    "0" "↩ Отмена" 3>&1 1>&2 2>&3) || [ "$b_choice" = "0" ]; then
+    "0" "🔙 Отмена" 3>&1 1>&2 2>&3) || [ "$b_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0
     fi
@@ -3538,7 +3538,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.2.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.2.3 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -3587,7 +3587,7 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🛠 ГЛАВНОЕ МЕНЮ" \
+    if ! choice=$(whiptail --title "🔧 ГЛАВНОЕ МЕНЮ" \
     --menu "\n  💻 Системные данные:
   • Хост: $(hostname) ($(get_system_type_short))
   • Часовой пояс: $tz
@@ -3596,21 +3596,21 @@ while true; do
 
   📌 Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU \
     "1" "🌐 Часовой пояс" \
-    "2" "🏷 Имя сервера" \
+    "2" "📌 Имя сервера" \
     "3" "📦 Обновление компонентов" \
     "4" "👤 Создание и настройка пользователя" \
     "5" "🔑 Привязка ключа безопасности" \
     "6" "🔒 Конфигурация удаленного доступа" \
-    "7" "🛡 Настройка системной защиты" \
+    "7" "🔒 Настройка системной защиты" \
     "8" "🔥 Управление брандмауэром" \
     "9" "🔐 Блокировка доступа суперпользователя" \
     "10" "🔗 Настройка закрытой сети Tailscale" \
     "11" "📝 Управление системными журналами" \
     "12" "⚡ Оптимизация памяти" \
     "13" "💾 Управление файлом подкачки" \
-    "14" "🖥 Утилиты ПК и режим процессора" \
+    "14" "💻 Утилиты ПК и режим процессора" \
     "15" "📺 Сброс видеовыхода HDMI" \
-    "16" "⏱ Анализ времени загрузки" \
+    "16" "⏳ Анализ времени загрузки" \
     "17" "🔍 Интеллектуальный аудит системы" \
     "18" "📡 Режим локального маршрутизатора" \
     "19" "📦 Экспорт / Импорт настроек" \

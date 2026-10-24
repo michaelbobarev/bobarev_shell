@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.7.0 (Gold Master - High Performance + udp2raw Anti-DPI + Token Fix)
+# Версия: 3.8.0 (Gold Master - High Performance + udp2raw Anti-DPI + Fixed Balanced)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -781,26 +781,6 @@ net.ipv4.tcp_wmem = 4096 65536 33554432
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
-    elif [ "$profile" = "turbo" ]; then
-        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell: Turbo High-BDP Profile for 500-1000 Mbps Cascades
-net.ipv4.tcp_notsent_lowat = 65536
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_thin_linear_timeouts = 0
-net.ipv4.tcp_early_retrans = 3
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_dsack = 1
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = 1
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 131072 67108864
-net.core.netdev_budget = 600
-net.core.netdev_budget_usecs = 8000
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
 # Bobarev Shell: Balanced High-Throughput Profile for NaiveProxy Cascade
@@ -845,10 +825,9 @@ manage_naive_tcp_tuning_menu() {
     local cur_lowat=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo "default")
 
     local t_choice
-    if ! t_choice=$(whiptail --title "Тюнинг TCP-сокетов (Anti-HoL Blocking)" --menu "\nТекущий профиль: $cur_prof (tcp_notsent_lowat = $cur_lowat байт)\nВыберите режим работы сокетов NaiveProxy:" 17 $WT_WIDTH 4 \
+    if ! t_choice=$(whiptail --title "Тюнинг TCP-сокетов (Anti-HoL Blocking)" --menu "\nТекущий профиль: $cur_prof (tcp_notsent_lowat = $cur_lowat байт)\nВыберите режим работы сокетов NaiveProxy:" 16 $WT_WIDTH 3 \
     "1" "⚡ Сбалансированный (16 КБ — оптимум для 300-500 Мбит/с)" \
-    "2" "🔥 Турбо-Поток (64 КБ — для скоростей 500-1000 Мбит/с)" \
-    "3" "🛡️ Агрессивный Анти-Лаг (8 КБ — при высоких потерях пакетов)" \
+    "2" "🛡️ Агрессивный Анти-Лаг (8 КБ — при высоких потерях пакетов)" \
     "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$t_choice" = "0" ]; then
         return 0
     fi
@@ -860,10 +839,6 @@ manage_naive_tcp_tuning_menu() {
             echo -e "${C_GREEN}✅ Включен Сбалансированный профиль TCP-сокетов (tcp_notsent_lowat = 16384 байт).${C_RESET}"
             ;;
         2)
-            apply_naive_tcp_tuning_profile "turbo"
-            echo -e "${C_GREEN}✅ Включен Турбо-профиль (tcp_notsent_lowat = 65536 байт + авто-буферы 64 МБ).${C_RESET}"
-            ;;
-        3)
             apply_naive_tcp_tuning_profile "aggressive"
             echo -e "${C_GREEN}✅ Включен Агрессивный профиль Anti-HoL Blocking (tcp_notsent_lowat = 8192 байт).${C_RESET}"
             ;;

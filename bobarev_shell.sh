@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.1 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.2 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1097,13 +1097,12 @@ manage_cascade_naive_ts_warp() {
         fi
 
         local c_choice
-        if ! c_choice=$(whiptail --title "Каскад: NaiveProxy + Tailscale + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 7 \
+        if ! c_choice=$(whiptail --title "Каскад: NaiveProxy + Tailscale + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 17 $WT_WIDTH 5 \
         "1" "🔒 Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
         "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> Cloudflare WARP" \
         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
-        "4" "⚡ Тюнинг TCP-сокетов NaiveProxy (Anti-HoL Blocking)" \
-        "5" "📋 Показать ссылки для Shadowrocket" \
-        "6" "🛑 Остановить и удалить компоненты каскада" \
+        "4" "📋 Показать ссылки для Shadowrocket" \
+        "5" "🛑 Остановить и удалить компоненты каскада" \
         "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -1122,17 +1121,12 @@ manage_cascade_naive_ts_warp() {
                 manage_naive_users_menu
                 ;;
             4)
-                manage_naive_tcp_tuning_menu
-                pause_enter
-                ;;
-            5)
                 print_naive_shadowrocket_links
                 pause_enter
                 ;;
-            6)
+            5)
                 if prompt_yn "Остановить и отключить службы каскада (NaiveProxy Caddy / WARP) на этом сервере?" "false"; then
                     silent_run systemctl stop caddy.service bobarev-cascade-ru.service wg-quick@warp.service wg-quick@wg-cascade.service
-                    silent_run systemctl disable caddy.service bobarev-cascade-ru.service wg-quick@warp.service wg-quick@wg-cascade.service
                     silent_run tailscale set --exit-node=
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /etc/wireguard/wg-cascade.conf
                     systemctl daemon-reload
@@ -1142,6 +1136,7 @@ manage_cascade_naive_ts_warp() {
                 ;;
         esac
     done
+}
 }
 
 # ==============================================================================
@@ -1507,7 +1502,14 @@ mod_direct_wg_cascade() {
         fi
 
         local dc_choice
-        if ! dc_choice=$(whiptail --title "🚀 Прямой скоростной каскад (Без Tailscale)" --menu "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> WARP (Зарубеж):" 19 $WT_WIDTH 8         "1" "🌍 Шаг 1 (На Зарубежном Сервере 2): Поднять WG-Мост + Anti-DPI -> WARP"         "2" "🚀 Шаг 2 (На Российском Сервере 1): Подключить NaiveProxy -> WG-Мост"         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)"         "4" "⚡ Тюнинг TCP-сокетов NaiveProxy (Anti-HoL Blocking)"         "5" "📋 Показать ссылки для Shadowrocket"         "6" "🔑 Показать Токен соединения (на Сервере 2)"         "7" "🛑 Остановить прямой мост wg-cascade и udp2raw"         "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$dc_choice" = "0" ]; then
+        if ! dc_choice=$(whiptail --title "🚀 Прямой скоростной каскад (Без Tailscale)" --menu "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> WARP (Зарубеж):" 18 $WT_WIDTH 6 \
+        "1" "🌍 Шаг 1 (На Зарубежном Сервере 2): Поднять WG-Мост + Anti-DPI -> WARP" \
+        "2" "🚀 Шаг 2 (На Российском Сервере 1): Подключить NaiveProxy -> WG-Мост" \
+        "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
+        "4" "📋 Показать ссылки для Shadowrocket" \
+        "5" "🔑 Показать Токен соединения (на Сервере 2)" \
+        "6" "🛑 Остановить прямой мост wg-cascade и udp2raw" \
+        "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$dc_choice" = "0" ]; then
             break
         fi
 
@@ -1525,14 +1527,10 @@ mod_direct_wg_cascade() {
                 manage_naive_users_menu
                 ;;
             4)
-                manage_naive_tcp_tuning_menu
-                pause_enter
-                ;;
-            5)
                 print_naive_shadowrocket_links
                 pause_enter
                 ;;
-            6)
+            5)
                 if [ -f /etc/default/bobarev-cascade ]; then
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
@@ -1547,7 +1545,7 @@ mod_direct_wg_cascade() {
                 fi
                 pause_enter
                 ;;
-            7)
+            6)
                 if prompt_yn "Остановить и отключить прямой ядерный мост wg-cascade и службу маскировки udp2raw?" "false"; then
                     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
                     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service
@@ -1559,6 +1557,7 @@ mod_direct_wg_cascade() {
                 ;;
         esac
     done
+}
 }
 # ЛИЧНЫЙ РЕТРАНСЛЯТОР DERP
 # ------------------------------------------------------------------------------

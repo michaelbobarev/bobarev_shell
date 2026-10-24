@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.11 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.12 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1342,7 +1342,7 @@ setup_direct_wg_server1_ru() {
     echo -e "${C_BLUE}📦 Установка пакетов wireguard-tools и iptables...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -yq wireguard-tools iptables curl
+    apt-get install -yq wireguard-tools iptables curl python3
 
     local saved_dom=""
     local saved_email=""
@@ -1353,13 +1353,37 @@ setup_direct_wg_server1_ru() {
         saved_email="${NAIVE_EMAIL:-}"
     fi
 
+    echo -e "${C_CYAN}1/4. Вставьте Токен соединения, полученный на Зарубежном Сервере 2:${C_RESET}"
+    echo -e "${C_YELLOW}(Вставьте весь скопированный токен в терминал и нажмите Enter)${C_RESET}"
+    
     local token_in=""
-    prompt_clean "1/4. Вставьте Токен соединения, полученный на Зарубежном Сервере 2:" token_in
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ]; then return 0; fi
-    token_in=$(echo "$token_in" | tr -d '[:space:]')
+    read -r token_in < /dev/tty || true
+    if [ -z "$token_in" ]; then
+        echo -e "${C_YELLOW}↩️ Токен не введен. Возврат в меню...${C_RESET}"
+        return 0
+    fi
 
+    # Безопасная передача токена в Python через аргумент командной строки
     local decoded=""
-    decoded=$(printf '%s' "$token_in" | tr -d '\n\r ' | base64 -d 2>/dev/null || echo "")
+    decoded=$(python3 -c '
+import sys, base64
+try:
+    raw = sys.argv[1]
+    clean = "".join(raw.split())
+    padding = len(clean) % 4
+    if padding:
+        clean += "=" * (4 - padding)
+    dec = base64.b64decode(clean.encode("utf-8"))
+    print(dec.decode("utf-8", errors="ignore"))
+except Exception as e:
+    print("ERROR")
+' "$token_in" 2>/dev/null || echo "ERROR")
+
+    if [ "$decoded" = "ERROR" ] || [ -z "$decoded" ]; then
+        local clean_b64=$(echo "$token_in" | tr -d '[:space:]')
+        decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null || echo "")
+    fi
+
     local s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key
     IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key <<< "$decoded"
     obfs_mode="${obfs_mode:-none}"
@@ -1368,9 +1392,7 @@ setup_direct_wg_server1_ru() {
     if [ -z "${s2_ip:-}" ] || [ -z "${s2_port:-}" ] || [ -z "${s2_pub:-}" ] || [ -z "${s1_priv:-}" ] || [ -z "${psk:-}" ]; then
         echo -e "${C_RED}❌ Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
         return 1
-    fi
-
-    local n_dom=""
+    filocal n_dom=""
     prompt_default "2/4. Введите ваш домен на этом РФ-сервере (A-запись DNS):" "${saved_dom:-ru.yourdomain.com}" n_dom
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
 

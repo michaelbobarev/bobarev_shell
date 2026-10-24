@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.4.0 (Gold Master - Dual Cascade + udp2raw Anti-DPI Obfuscation)
+# Версия: 3.5.1 (Gold Master - Auto-Clean WG & Streamlined)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -757,76 +757,9 @@ manage_naive_users_menu() {
     done
 }
 
-apply_naive_tcp_tuning_profile() {
-    local profile="${1:-balanced}"
-    mkdir -p /etc/sysctl.d
 
-    if [ "$profile" = "aggressive" ]; then
-        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell: Aggressive Anti-HoL Blocking Profile for NaiveProxy Cascade
-net.ipv4.tcp_notsent_lowat = 8192
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_thin_linear_timeouts = 1
-net.ipv4.tcp_early_retrans = 3
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_dsack = 1
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_fastopen = 3
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-TUNE_EOF
-    else
-        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell: Balanced High-Throughput Profile for NaiveProxy Cascade
-net.ipv4.tcp_notsent_lowat = 16384
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_fastopen = 3
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-TUNE_EOF
-    fi
 
-    sysctl -p /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
 
-    if [ -f /etc/default/bobarev-cascade ]; then
-        sed -i '/^TCP_TUNE_PROFILE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-        echo "TCP_TUNE_PROFILE=\"$profile\"" >> /etc/default/bobarev-cascade
-    fi
-}
-
-manage_naive_tcp_tuning_menu() {
-    local cur_prof="balanced"
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        cur_prof="${TCP_TUNE_PROFILE:-balanced}"
-    fi
-    local cur_lowat=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo "default")
-
-    local t_choice
-    if ! t_choice=$(whiptail --title "Тюнинг TCP-сокетов (Anti-HoL Blocking)" --menu "\nТекущий профиль: $cur_prof (tcp_notsent_lowat = $cur_lowat байт)\nВыберите режим работы сокетов NaiveProxy:" 16 $WT_WIDTH 3 \
-    "1" "⚡ Сбалансированный (16 КБ — оптимум для 300-500 Мбит/с)" \
-    "2" "🚀 Агрессивный Анти-Лаг (8 КБ + Early Retrans — против потерь)" \
-    "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$t_choice" = "0" ]; then
-        return 0
-    fi
-
-    clear
-    case "$t_choice" in
-        1)
-            apply_naive_tcp_tuning_profile "balanced"
-            echo -e "${C_GREEN}✅ Включен Сбалансированный профиль TCP-сокетов (tcp_notsent_lowat = 16384 байт).${C_RESET}"
-            ;;
-        2)
-            apply_naive_tcp_tuning_profile "aggressive"
-            echo -e "${C_GREEN}✅ Включен Агрессивный профиль Anti-HoL Blocking (tcp_notsent_lowat = 8192 байт + Thin Linear Timeouts).${C_RESET}"
-            ;;
-    esac
-}
 
 print_naive_shadowrocket_links() {
     if [ ! -f /etc/default/bobarev-cascade ] || [ ! -s "$NAIVE_PASS_FILE" ]; then
@@ -904,7 +837,8 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     if command -v tailscale &>/dev/null; then
         tailscale set --exit-node= 2>/dev/null || true
     fi
-    ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
+    ip link del wg-cascade 2>/dev/null || true
+ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
     iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
     iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
     iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
@@ -994,11 +928,11 @@ NAIVE_DOMAIN="$n_dom"
 NAIVE_EMAIL="$n_email"
 EXIT_TS_IP="$exit_ts_ip"
 SERVER_PUB_IP="$pub_ip"
-TCP_TUNE_PROFILE="balanced"
+
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    apply_naive_tcp_tuning_profile "balanced"
+    
     add_or_update_naive_user "$n_user" "$n_pass"
     render_naive_caddyfile
     write_bobarev_cascade_ru_script
@@ -1114,8 +1048,7 @@ manage_cascade_naive_ts_warp() {
         "1" "🔒 Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
         "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> Cloudflare WARP" \
         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
-        "4" "⚡ Тюнинг TCP-сокетов NaiveProxy (Anti-HoL Blocking)" \
-        "5" "📋 Показать ссылки для Shadowrocket" \
+                "5" "📋 Показать ссылки для Shadowrocket" \
         "6" "🛑 Остановить и удалить компоненты каскада" \
         "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
             break
@@ -1289,6 +1222,7 @@ ListenPort = $wg_listen_port
 PrivateKey = $s2_priv
 MTU = 1280
 Table = off
+PostUp = ip link del wg-cascade 2>/dev/null || true
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
 PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true
 PostUp = iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
@@ -1434,6 +1368,7 @@ Address = 10.200.200.2/30
 PrivateKey = $s1_priv
 MTU = 1280
 Table = 51888
+PostUp = ip link del wg-cascade 2>/dev/null || true
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
 PostUp = ip rule del from $pub_ip lookup main priority 100 2>/dev/null || true
 PostUp = ip rule add from $pub_ip lookup main priority 100 || true
@@ -1473,11 +1408,11 @@ SERVER_PUB_IP="$pub_ip"
 FOREIGN_WG_ENDPOINT="${s2_ip}:${s2_port}"
 WG_OBFS_MODE="$obfs_mode"
 WG_OBFS_KEY="$obfs_key"
-TCP_TUNE_PROFILE="balanced"
+
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    apply_naive_tcp_tuning_profile "balanced"
+    
     render_naive_caddyfile
     write_bobarev_cascade_ru_script
     /usr/local/bin/bobarev-cascade-ru.sh
@@ -1519,8 +1454,7 @@ mod_direct_wg_cascade() {
         "1" "🌍 Шаг 1 (На Зарубежном Сервере 2): Поднять WG-Мост + Anti-DPI -> WARP" \
         "2" "🚀 Шаг 2 (На Российском Сервере 1): Подключить NaiveProxy -> WG-Мост" \
         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
-        "4" "⚡ Тюнинг TCP-сокетов NaiveProxy (Anti-HoL Blocking)" \
-        "5" "📋 Показать ссылки для Shadowrocket" \
+                "5" "📋 Показать ссылки для Shadowrocket" \
         "6" "🔑 Показать Токен соединения (на Сервере 2)" \
         "7" "🛑 Остановить прямой мост wg-cascade и udp2raw" \
         "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$dc_choice" = "0" ]; then

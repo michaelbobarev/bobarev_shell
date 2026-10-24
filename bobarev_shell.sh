@@ -3371,7 +3371,7 @@ mod_server_audit() {
 
     if [ "${#swap_human_list[@]}" -gt 0 ]; then
         local joined_swap=$(printf "%s, " "${swap_human_list[@]}")
-        joined_swap="${joined_swap%, \}$"
+        joined_swap="${joined_swap%, }"
         echo -e "  • Виртуальная память:        ${C_GREEN}✅ $joined_swap${C_RESET}"
     else
         echo -e "  • Виртуальная память:        ${C_YELLOW}Отключена${C_RESET}"
@@ -3446,7 +3446,7 @@ mod_router_sbc() {
     pause_enter
 }
 
-# 19. Экспорт и импорт резервной копии конфигураций (включая WireGuard и сертификаты)
+# 19. Экспорт и импорт резервной копии конфигураций (включая NaiveProxy, WARP и сертификаты)
 mod_backup_manager() {
     echo -e "${C_CYAN}📦 === 19/19. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
@@ -3465,7 +3465,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/systemd/system/derper.service /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -3487,8 +3487,9 @@ mod_backup_manager() {
             systemctl daemon-reload 2>/dev/null || true
             sysctl --system >/dev/null 2>&1 || true
             [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
+            [ -x /usr/local/bin/bobarev-cascade-ru.sh ] && /usr/local/bin/bobarev-cascade-ru.sh
             [ -f /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
-            is_wg0_active && silent_run systemctl restart wg-quick@wg0
+            is_naive_active && silent_run systemctl restart caddy.service
             is_warp_active && silent_run systemctl restart wg-quick@warp
             silent_run systemctl restart systemd-journald
             silent_run systemctl restart sshd || silent_run systemctl restart ssh

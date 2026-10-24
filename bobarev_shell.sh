@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.2 (Gold Master - Cascade NaiveProxy -> Tailscale -> WARP Edition)
+# Версия: 3.2.1 (Gold Master - Cascade NaiveProxy -> Tailscale -> WARP Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -2214,8 +2214,8 @@ mod_tailscale() {
         "6" "⚡ Ускорение и MSS Clamping" \
         "7" "💻 Локальный веб-интерфейс" \
         "8" "🎛️ Приоритет сетевых правил" \
-        "9" "🛰️ Личный ретранслятор (DERP)" \
-        "10" "⛓️ Каскад: NaiveProxy + Tailscale + WARP" \
+        "9" "📡 Личный ретранслятор (DERP)" \
+        "10" "🔗 Каскад: NaiveProxy + Tailscale + WARP" \
         "11" "🔄 Полный сброс" \
         "0" "↩️ Вернуться назад" 3>&1 1>&2 2>&3); then
             break
@@ -2904,9 +2904,9 @@ mod_server_audit() {
         local raw_freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "")
         [ -n "$raw_freq" ] && cpu_freq="$(LC_ALL=C awk "BEGIN {printf \"%d МГц\", $raw_freq/1000}")"
     elif [ -f /proc/cpuinfo ]; then
-        local proc_mhz=$(grep -m 1 "cpu MHz" /proc/cpuinfo 2>/dev/null || echo "")
+        local proc_mhz=$(LC_ALL=C awk -F: '/cpu MHz/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); printf "%.0f", $2; exit}' /proc/cpuinfo 2>/dev/null || echo "")
         if [ -n "$proc_mhz" ]; then
-            cpu_freq="$(LC_ALL=C printf "%.0f МГц" "$proc_mhz")"
+            cpu_freq="${proc_mhz} МГц"
         fi
     fi
     if [ "$cpu_freq" = "Неизвестно" ] && [ "$SYSTEM_TYPE" = "Cloud_VPS" ]; then
@@ -3538,7 +3538,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.2 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.2.1 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

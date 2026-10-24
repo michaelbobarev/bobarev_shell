@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.4 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.5 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1315,10 +1315,8 @@ EOF
     local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "IP_СЕРВЕРА_2")
 
     local raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}"
-    bridge_token=$(printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
-    if command -v base64 &>/dev/null; then
-    bridge_token=$(printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
-    fi
+    # Используем Python для генерации единого слитного токена без переносов строк на любых ОС
+    bridge_token=$(python3 -c "import base64; print(base64.b64encode('$raw_str'.encode()).decode())" 2>/dev/null || printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_wg_warp_exit"

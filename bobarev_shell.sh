@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.16 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.17 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1250,6 +1250,13 @@ setup_direct_wg_server2_foreign() {
         3) obfs_mode="none" ;;
     esac
 
+    # Полная предварительная зачистка старых хвостов и зависших интерфейсов wg-cascade
+    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade (если были)...${C_RESET}"
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
+    silent_run wg-quick down wg-cascade
+    ip link del dev wg-cascade 2>/dev/null || true
+    while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
+
     mkdir -p /etc/wireguard
     local s2_priv=$(wg genkey)
     local s2_pub=$(echo "$s2_priv" | wg pubkey)
@@ -1271,16 +1278,18 @@ PrivateKey = $s2_priv
 MTU = 1280
 Table = off
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
+PostUp = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
 PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true
-PostUp = iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
-PostUp = iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
-PostUp = iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
-PostUp = iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 || true
-PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT
-PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT || true
+PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT || true
+PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE || true
+PostUp = iptables -t mangle -C FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
+PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
+PostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
 
 [Peer]
 # Server 1 (RU Entry)
@@ -1290,9 +1299,16 @@ AllowedIPs = 10.200.200.2/32
 EOF
     chmod 600 /etc/wireguard/wg-cascade.conf
 
+    ensure_wg_kernel_modules
     systemctl daemon-reload
-    systemctl enable --now wg-quick@wg-cascade
-    systemctl restart wg-quick@wg-cascade
+    systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
+    systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
+    if ! systemctl restart wg-quick@wg-cascade.service; then
+        echo -e "${C_YELLOW}⚠️ Повторная инициализация интерфейса wg-cascade после принудительной зачистки...${C_RESET}"
+        ip link del dev wg-cascade 2>/dev/null || true
+        systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
+        systemctl start wg-quick@wg-cascade.service
+    fi
 
     if [ "$obfs_mode" != "none" ]; then
         configure_udp2raw_service "server" "127.0.0.1:${wg_listen_port}" "0.0.0.0:${ext_port}" "$obfs_mode" "$obfs_key"
@@ -1392,8 +1408,13 @@ except Exception:
 
     local s2_ip="" s2_port="" s2_pub="" s1_priv="" psk="" obfs_mode="none" obfs_key="bobarev2026key"
     IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key <<< "$decoded"
-    obfs_mode="${obfs_mode:-none}"
-    obfs_key="${obfs_key:-bobarev2026key}"
+    s2_ip=$(printf '%s' "$s2_ip" | tr -d '[:space:]')
+    s2_port=$(printf '%s' "$s2_port" | tr -dc '0-9')
+    s2_pub=$(printf '%s' "$s2_pub" | tr -d '[:space:]')
+    s1_priv=$(printf '%s' "$s1_priv" | tr -d '[:space:]')
+    psk=$(printf '%s' "$psk" | tr -d '[:space:]')
+    obfs_mode=$(printf '%s' "${obfs_mode:-none}" | tr -d '[:space:]')
+    obfs_key=$(printf '%s' "${obfs_key:-bobarev2026key}" | tr -d '[:space:]')
 
     if [ -z "${s2_ip:-}" ] || [ -z "${s2_port:-}" ] || [ -z "${s2_pub:-}" ] || [ -z "${s1_priv:-}" ] || [ -z "${psk:-}" ]; then
         echo -e "${C_RED}❌ Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
@@ -1443,8 +1464,28 @@ except Exception:
 
     ensure_go_and_build_caddy_naive || return 1
 
+    # Полная предварительная зачистка старых хвостов, правил и зависшего интерфейса wg-cascade
+    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade и старых маршрутов...${C_RESET}"
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
+    silent_run wg-quick down wg-cascade
+    ip link del dev wg-cascade 2>/dev/null || true
+    ip route flush table 51888 2>/dev/null || true
+    while ip rule del priority 100 2>/dev/null; do :; done
+    while ip rule del priority 101 2>/dev/null; do :; done
+    while ip rule del priority 30000 2>/dev/null; do :; done
+    while ip rule del lookup 51888 2>/dev/null; do :; done
+
     local wan_dev=$(get_wan_if)
-    local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+    local pub_ip=""
+    if [ -n "$wan_dev" ]; then
+        pub_ip=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || echo "")
+    fi
+    if [ -z "$pub_ip" ]; then
+        pub_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n 1 | tr -d '[:space:]' || echo "")
+    fi
+    if [ -z "$pub_ip" ]; then
+        pub_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
+    fi
 
     if command -v tailscale &>/dev/null; then
         silent_run tailscale set --exit-node=
@@ -1458,6 +1499,12 @@ except Exception:
         configure_udp2raw_service "client" "" "" "none" ""
     fi
 
+    local post_up_pub_ip=""
+    if [ -n "$pub_ip" ]; then
+        post_up_pub_ip="PostUp = ip rule del from $pub_ip lookup main priority 100 2>/dev/null || true
+PostUp = ip rule add from $pub_ip lookup main priority 100 || true"
+    fi
+
     mkdir -p /etc/wireguard
     cat << EOF > /etc/wireguard/wg-cascade.conf
 [Interface]
@@ -1466,15 +1513,14 @@ PrivateKey = $s1_priv
 MTU = 1280
 Table = 51888
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
-PostUp = ip rule del from $pub_ip lookup main priority 100 2>/dev/null || true
-PostUp = ip rule add from $pub_ip lookup main priority 100 || true
+${post_up_pub_ip}
 PostUp = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
 PostUp = ip rule add to $s2_ip lookup main priority 101 || true
 PostUp = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostUp = ip rule add lookup 51888 priority 30000 || true
-PostUp = iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE
-PostUp = iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
-PostUp = iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
+PostUp = iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE || true
+PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
+PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
 PostDown = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostDown = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
@@ -1493,8 +1539,14 @@ EOF
 
     ensure_wg_kernel_modules
     systemctl daemon-reload
-    systemctl enable --now wg-quick@wg-cascade
-    systemctl restart wg-quick@wg-cascade
+    systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
+    systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
+    if ! systemctl restart wg-quick@wg-cascade.service; then
+        echo -e "${C_YELLOW}⚠️ Повторная инициализация интерфейса wg-cascade после глубокой зачистки...${C_RESET}"
+        ip link del dev wg-cascade 2>/dev/null || true
+        systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
+        systemctl start wg-quick@wg-cascade.service
+    fi
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_wg_entry"
@@ -1594,9 +1646,15 @@ mod_direct_wg_cascade() {
                 if prompt_yn "Остановить и отключить прямой ядерный мост wg-cascade и службу маскировки udp2raw?" "false"; then
                     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
                     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service
+                    silent_run wg-quick down wg-cascade
+                    ip link del dev wg-cascade 2>/dev/null || true
+                    ip route flush table 51888 2>/dev/null || true
+                    while ip rule del priority 101 2>/dev/null; do :; done
+                    while ip rule del priority 30000 2>/dev/null; do :; done
+                    while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
                     rm -f /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
                     systemctl daemon-reload
-                    echo -e "${C_GREEN}✅ Прямой мост wg-cascade и служба udp2raw остановлены.${C_RESET}"
+                    echo -e "${C_GREEN}✅ Прямой мост wg-cascade, хвосты интерфейса и служба udp2raw полностью зачищены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -4237,7 +4295,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.16 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.17 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

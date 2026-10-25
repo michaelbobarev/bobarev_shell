@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.27 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.28 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -972,7 +972,7 @@ RU_SVC_EOF
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
     if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
-        return 1
+        return 0
     fi
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
@@ -1214,11 +1214,11 @@ manage_cascade_naive_ts_warp() {
         clear
         case "$c_choice" in
             1)
-                setup_cascade_server1_ru
+                setup_cascade_server1_ru || true
                 pause_enter
                 ;;
             2)
-                setup_cascade_server2_warp
+                setup_cascade_server2_warp || true
                 pause_enter
                 ;;
             3)
@@ -1250,20 +1250,35 @@ manage_cascade_naive_ts_warp() {
 # МОДУЛЬ 20: ПРЯМОЙ СКОРОСТНОЙ КАСКАД (NAIVEPROXY -> WG + UDP2RAW -> WARP)
 # ==============================================================================
 check_required_ports_free() {
-    # Проверяет, не заняты ли целевые порты сторонними процессами (кроме наших собственных caddy / udp2raw)
+    # Проверяет, не заняты ли целевые порты СТОРОННИМИ процессами (игнорируя наши собственные caddy, udp2raw и ядерный интерфейс wg-cascade)
     local role="$1" # ru | foreign
     shift
     local ports=("$@")
     local conflict_found=false
 
+    # Определяем текущий порт нашего собственного интерфейса wg-cascade (если он уже запущен в ядре),
+    # так как ядерный модуль WireGuard в ss -tulpn не имеет поля users:(...)
+    local own_wg_port=""
+    if ip link show wg-cascade >/dev/null 2>&1; then
+        own_wg_port=$(wg show wg-cascade listen-port 2>/dev/null | tr -d '[:space:]' || echo "")
+    fi
+
     for p in "${ports[@]}"; do
         [ -z "$p" ] && continue
+        # Если этот порт занят нашим же ядерным интерфейсом wg-cascade — пропускаем (он будет штатно перезапущен)
+        if [ -n "$own_wg_port" ] && [ "$p" = "$own_wg_port" ]; then
+            continue
+        fi
         local line=""
         line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|udp2raw)"' | head -n 1 || echo "")
         if [ -n "$line" ]; then
+            # Если на порту 51889 или порту из /etc/wireguard/wg-cascade.conf висит ядерный сокет без users:(...), это наш wg-cascade
+            if ! echo "$line" | grep -q "users:(" && { [ "$p" = "51889" ] || grep -qE "^ListenPort[[:space:]]*=[[:space:]]*${p}\b" /etc/wireguard/wg-cascade.conf 2>/dev/null; }; then
+                continue
+            fi
             local proto=$(echo "$line" | awk '{print $1}')
-            local proc_info=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "неизвестный процесс")
-            local pid_info=$(echo "$line" | grep -oP 'pid=\K[0-9]+' || echo "?")
+            local proc_info=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "ядерный модуль / неизвестный процесс")
+            local pid_info=$(echo "$line" | grep -oP 'pid=\K[0-9]+' || echo "-")
             echo -e "${C_RED}❌ Внимание: Порт ${p}/${proto} уже занят сторонним процессом '${proc_info}' (PID: ${pid_info})!${C_RESET}"
             conflict_found=true
         fi
@@ -1543,7 +1558,7 @@ setup_direct_wg_server2_foreign() {
     if [ "$MODULE_CANCELED" = true ] || [ -z "$ext_port" ]; then return 0; fi
     ext_port="${ext_port//[^0-9]/}"
     if ! check_required_ports_free "foreign" "$ext_port" "51889"; then
-        return 1
+        return 0
     fi
 
     local obfs_choice=""
@@ -1710,7 +1725,7 @@ EOF
 setup_direct_wg_server1_ru() {
     echo -e "${C_CYAN}🚀 === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY -> WG + ANTI-DPI) ===${C_RESET}"
     if ! check_required_ports_free "ru" "80" "443" "51889"; then
-        return 1
+        return 0
     fi
     enable_routing_optimizations || true
 
@@ -1992,11 +2007,11 @@ mod_direct_wg_cascade() {
         clear
         case "$dc_choice" in
             1)
-                setup_direct_wg_server2_foreign
+                setup_direct_wg_server2_foreign || true
                 pause_enter
                 ;;
             2)
-                setup_direct_wg_server1_ru
+                setup_direct_wg_server1_ru || true
                 pause_enter
                 ;;
             3)
@@ -4689,7 +4704,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.27 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.28 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

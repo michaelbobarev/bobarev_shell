@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.21 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.22 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1413,7 +1413,7 @@ WG_BRIDGE_TOKEN="$bridge_token"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1240, MSS 1120, обфускация: $obfs_mode] -> WARP) успешно запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1200, MSS 1080, обфускация: $obfs_mode] -> WARP) успешно запущен!${C_RESET}"
     echo -e "\n${C_CYAN}🔑 === СКОПИРУЙТЕ ЭТОТ ТОКЕН СОЕДИНЕНИЯ ДЛЯ РОССИЙСКОГО СЕРВЕРА 1 ===${C_RESET}"
     echo -e "${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}\n"
     echo -e "${C_BLUE}📌 Как подключить Сервер 1 (РФ):${C_RESET}"
@@ -1659,7 +1659,7 @@ EOF
     fi
     disable_ufw_strict_rpfilter
 
-    echo -e "\n${C_GREEN}✅ Прямой скоростной каскад (NaiveProxy -> WG [MTU 1240, MSS 1120 + Anti-DPI: $obfs_mode] -> WARP) запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Прямой скоростной каскад (NaiveProxy -> WG [MTU 1200, MSS 1080 + Anti-DPI: $obfs_mode] -> WARP) запущен!${C_RESET}"
     echo -e "${C_BLUE}⚡ Проверка рукопожатия и внешнего IP через замаскированный мост:${C_RESET}"
     ping -c 1 -W 2 10.200.200.1 >/dev/null 2>&1 || true
     sleep 1
@@ -4392,7 +4392,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.21 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.22 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

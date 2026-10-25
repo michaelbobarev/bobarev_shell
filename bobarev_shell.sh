@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.15 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.16 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -812,7 +812,7 @@ TUNE_EOF
 
     if [ -f /etc/default/bobarev-cascade ]; then
         sed -i '/^TCP_TUNE_PROFILE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-        echo "TCP_TUNE_PROFILE="$profile"" >> /etc/default/bobarev-cascade
+        echo "TCP_TUNE_PROFILE=\"$profile\"" >> /etc/default/bobarev-cascade
     fi
 }
 print_naive_shadowrocket_links() {
@@ -1236,7 +1236,7 @@ setup_direct_wg_server2_foreign() {
     ext_port="${ext_port//[^0-9]/}"
 
     local obfs_choice=""
-    if ! obfs_choice=$(whiptail --title "2/2. Защита заголовков WireGuard от ТСПУ" --menu "\nВыберите режим обхода шейпинга ТСПУ между серверами:" 15 $WT_WIDTH 3 \
+    if ! obfs_choice=$(whiptail --title "2/2. Защита заголовков WireGuard от ТСПУ" --menu "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 \
     "1" "🛡️ UDP-XOR Маскировка (Рекомендуется — обходит DPI без потери скорости)" \
     "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
     "3" "⚡ Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)" 3>&1 1>&2 2>&3); then
@@ -1270,7 +1270,6 @@ ListenPort = $wg_listen_port
 PrivateKey = $s2_priv
 MTU = 1280
 Table = off
-PostUp = ip link del wg-cascade 2>/dev/null || true
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
 PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true
 PostUp = iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
@@ -1312,11 +1311,20 @@ EOF
     fi
 
     local wan_dev=$(get_wan_if)
-    local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "IP_СЕРВЕРА_2")
+    local ext_ip=""
+    ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
+    if [ -z "$ext_ip" ]; then
+        ext_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
+    fi
 
-    local raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}"
-    # Используем Python для генерации единого слитного токена без переносов строк на любых ОС
-    bridge_token=$(python3 -c "import base64; print(base64.b64encode('$raw_str'.encode()).decode())" 2>/dev/null || printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
+    local raw_str=""
+    if [ "$obfs_mode" = "none" ]; then
+        raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}"
+    else
+        raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}"
+    fi
+    local bridge_token=""
+    bridge_token=$(printf '%s' "$raw_str" | base64 -w0 2>/dev/null || printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_wg_warp_exit"
@@ -1332,7 +1340,7 @@ EOF
     echo -e "${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}\n"
     echo -e "${C_BLUE}📌 Как подключить Сервер 1 (РФ):${C_RESET}"
     echo -e "  1. Запустите скрипт на Российском Сервере 1 -> Пункт 20 -> Пункт 2."
-    echo -e "  2. Вставьте скопированный выше токен — обфускатор и скоростной мост поднимутся автоматически!"
+    echo -e "  2. Вставьте скопированный выше токен в графическое окно — режим ($obfs_mode) и скоростной мост поднимутся автоматически!"
 }
 
 setup_direct_wg_server1_ru() {
@@ -1353,38 +1361,36 @@ setup_direct_wg_server1_ru() {
         saved_email="${NAIVE_EMAIL:-}"
     fi
 
-    echo -e "${C_CYAN}1/4. Вставьте Токен соединения, полученный на Зарубежном Сервере 2:${C_RESET}"
-    echo -e "${C_YELLOW}(Вставьте весь скопированный токен в терминал и нажмите Enter)${C_RESET}"
-    
     local token_in=""
-    read -r token_in < /dev/tty || true
-    if [ -z "$token_in" ]; then
-        echo -e "${C_YELLOW}↩️ Токен не введен. Возврат в меню...${C_RESET}"
-        return 0
-    fi
+    prompt_clean "1/4. Вставьте Токен соединения, полученный на Зарубежном Сервере 2:" token_in
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ]; then return 0; fi
 
-    # Безопасная передача токена в Python через аргумент командной строки
     local decoded=""
     decoded=$(python3 -c '
-import sys, base64
+import sys, base64, re
 try:
-    raw = sys.argv[1]
-    clean = "".join(raw.split())
-    padding = len(clean) % 4
-    if padding:
-        clean += "=" * (4 - padding)
-    dec = base64.b64decode(clean.encode("utf-8"))
-    print(dec.decode("utf-8", errors="ignore"))
-except Exception as e:
-    print("ERROR")
-' "$token_in" 2>/dev/null || echo "ERROR")
+    raw = "".join(sys.argv[1].split())
+    pad = len(raw) % 4
+    if pad:
+        raw += "=" * (4 - pad)
+    txt = base64.b64decode(raw.encode("utf-8")).decode("utf-8", errors="ignore")
+    if "ip=" in txt and "\n" in txt:
+        m = re.search(r"ip=([0-9.]+)", txt)
+        ip = m.group(1) if m else ""
+        parts = txt.splitlines()[-1].split("|")
+        parts[0] = ip
+        txt = "|".join(parts)
+    print(txt.strip())
+except Exception:
+    print("")
+' "$token_in" 2>/dev/null || echo "")
 
-    if [ "$decoded" = "ERROR" ] || [ -z "$decoded" ]; then
-        local clean_b64=$(echo "$token_in" | tr -d '[:space:]')
-        decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null || echo "")
+    if [ -z "$decoded" ]; then
+        local clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
+        decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\n\r' || echo "")
     fi
 
-    local s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key
+    local s2_ip="" s2_port="" s2_pub="" s1_priv="" psk="" obfs_mode="none" obfs_key="bobarev2026key"
     IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key <<< "$decoded"
     obfs_mode="${obfs_mode:-none}"
     obfs_key="${obfs_key:-bobarev2026key}"
@@ -1393,6 +1399,25 @@ except Exception as e:
         echo -e "${C_RED}❌ Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
         return 1
     fi
+
+    local obfs_choice_ru=""
+    local def_obfs_item="1"
+    [ "$obfs_mode" = "faketcp" ] && def_obfs_item="2"
+    [ "$obfs_mode" = "none" ] && def_obfs_item="3"
+
+    if obfs_choice_ru=$(whiptail --title "Режим транспорта WireGuard (Синхронизация с Сервером 2)" --default-item "$def_obfs_item" --menu "\nИз токена Сервера 2 определен режим: ${obfs_mode}\nПодтвердите его или выберите нужный (должен совпадать с Сервером 2):" 16 $WT_WIDTH 3 \
+    "1" "🛡️ UDP-XOR Маскировка (Обходит DPI без потери скорости)" \
+    "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
+    "3" "⚡ Чистый WireGuard без маскировки (Без udp2raw)" 3>&1 1>&2 2>&3); then
+        case "$obfs_choice_ru" in
+            1) obfs_mode="udp" ;;
+            2) obfs_mode="faketcp" ;;
+            3) obfs_mode="none" ;;
+        esac
+    else
+        return 0
+    fi
+
     local n_dom=""
     prompt_default "2/4. Введите ваш домен на этом РФ-сервере (A-запись DNS):" "${saved_dom:-ru.yourdomain.com}" n_dom
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
@@ -1419,7 +1444,7 @@ except Exception as e:
     ensure_go_and_build_caddy_naive || return 1
 
     local wan_dev=$(get_wan_if)
-    local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null || awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+    local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
 
     if command -v tailscale &>/dev/null; then
         silent_run tailscale set --exit-node=
@@ -1440,7 +1465,6 @@ Address = 10.200.200.2/30
 PrivateKey = $s1_priv
 MTU = 1280
 Table = 51888
-PostUp = ip link del wg-cascade 2>/dev/null || true
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
 PostUp = ip rule del from $pub_ip lookup main priority 100 2>/dev/null || true
 PostUp = ip rule add from $pub_ip lookup main priority 100 || true
@@ -1498,7 +1522,8 @@ EOF
     echo -e "\n${C_GREEN}✅ Прямой скоростной каскад (NaiveProxy -> WG [MTU 1280 + Anti-DPI: $obfs_mode] -> WARP) запущен!${C_RESET}"
     echo -e "${C_BLUE}⚡ Проверка внешнего IP через замаскированный мост:${C_RESET}"
     sleep 2
-    local test_ip=$(curl -4 -s --interface wg-cascade --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || awk -F= '/^ip=/{print $2}' || echo "Установка рукопожатия...")
+    local test_ip=$(curl -4 -s --interface wg-cascade --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || echo "Установка рукопожатия...")
+    [ -z "$test_ip" ] && test_ip="Установка рукопожатия..."
     echo -e "  • Выходной IP (Cloudflare WARP): ${C_GREEN}${test_ip}${C_RESET}"
     print_naive_shadowrocket_links
 }
@@ -4212,7 +4237,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.7.0 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.16 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

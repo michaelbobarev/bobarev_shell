@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.24 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.25 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -463,8 +463,11 @@ CAMO_EOF
 
 ensure_go_and_build_caddy_naive() {
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -yq curl wget git tar unzip openssl ca-certificates apache2-utils
+    if ! command -v curl &>/dev/null || ! command -v wget &>/dev/null || ! command -v git &>/dev/null || ! command -v htpasswd &>/dev/null; then
+        echo -e "${C_BLUE}📦 Доустановка утилит сборки Caddy (git, openssl, apache2-utils)...${C_RESET}"
+        apt-get update -qq
+        apt-get install -yq curl wget git tar unzip openssl ca-certificates apache2-utils >/dev/null 2>&1
+    fi
 
     export PATH="/usr/local/go/bin:$PATH"
     local need_go=true
@@ -1051,10 +1054,12 @@ EOF
 }
 
 ensure_warp_installed_and_configured() {
-    echo -e "${C_BLUE}📦 Проверка пакетов wireguard-tools, iptables и curl...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -yq wireguard-tools iptables curl
+    if ! command -v wg &>/dev/null || ! command -v iptables &>/dev/null || ! command -v curl &>/dev/null; then
+        echo -e "${C_BLUE}📦 Установка пакетов wireguard-tools, iptables и curl...${C_RESET}"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -yq wireguard-tools iptables curl >/dev/null 2>&1
+    fi
 
     local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     local wgcf_arch="amd64"
@@ -1313,11 +1318,19 @@ apply_foreign_exit_mode() {
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     disable_ufw_strict_rpfilter
 
-    # Очищаем старые правила маршрутизации в таблицу 51820 (WARP) и старые правила TCPMSS
+    # Очищаем старые правила маршрутизации в таблицу 51820 (WARP), дубликаты FORWARD и старые правила TCPMSS
     while ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null; do :; done
     while ip rule del from 100.64.0.0/10 lookup 51820 2>/dev/null; do :; done
     while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
     while ip rule del from 10.200.200.0/30 lookup 51820 2>/dev/null; do :; done
+    while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i "$wan_dev" -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     for mss_val in 1300 1220 1200 1160 1140 1120 1080; do
         while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
@@ -1524,7 +1537,6 @@ setup_direct_wg_server2_foreign() {
     local exit_mode="direct"
     if [ "$exit_choice" = "2" ]; then
         exit_mode="warp"
-        ensure_warp_installed_and_configured
     else
         silent_run systemctl stop wg-quick@warp.service
         silent_run systemctl disable wg-quick@warp.service
@@ -1665,10 +1677,12 @@ setup_direct_wg_server1_ru() {
     echo -e "${C_CYAN}🚀 === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY -> WG + ANTI-DPI) ===${C_RESET}"
     enable_routing_optimizations || true
 
-    echo -e "${C_BLUE}📦 Установка пакетов wireguard-tools и iptables...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -yq wireguard-tools iptables curl python3
+    if ! command -v wg &>/dev/null || ! command -v iptables &>/dev/null || ! command -v curl &>/dev/null || ! command -v python3 &>/dev/null; then
+        echo -e "${C_BLUE}📦 Установка пакетов wireguard-tools, iptables, curl и python3...${C_RESET}"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -yq wireguard-tools iptables curl python3 >/dev/null 2>&1
+    fi
 
     local saved_dom=""
     local saved_email=""
@@ -1767,8 +1781,9 @@ except Exception:
     ensure_go_and_build_caddy_naive || return 1
 
     echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade, конфликтов TProxy и старых маршрутов...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service wg-quick@wgcf.service sing-box.service
-    silent_run systemctl disable wg-quick@wgcf.service sing-box.service
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service wg-quick@wgcf.service sing-box.service xray.service
+    silent_run systemctl disable wg-quick@wgcf.service sing-box.service xray.service
+    killall -q sing-box 2>/dev/null || true
     silent_run wg-quick down wg-cascade
     silent_run wg-quick down wgcf
     ip link del dev wg-cascade 2>/dev/null || true
@@ -2318,10 +2333,15 @@ DOCKER_UFW_EOF
 
 
 configure_rps_for_interfaces() {
-    for iface in wg-cascade warp $(get_wan_if); do
+    local wan_if=$(get_wan_if)
+    [ -n "$wan_if" ] && ip link set dev "$wan_if" txqueuelen 10000 2>/dev/null || true
+    for iface in wg-cascade warp tailscale0 $wan_if; do
         [ -z "$iface" ] && continue
         for qdir in /sys/class/net/"$iface"/queues/rx-*; do
             [ -d "$qdir" ] && echo "ff" > "$qdir/rps_cpus" 2>/dev/null || true
+        done
+        for tdir in /sys/class/net/"$iface"/queues/tx-*; do
+            [ -d "$tdir" ] && echo "ff" > "$tdir/xps_cpus" 2>/dev/null || true
         done
     done
 }
@@ -4641,7 +4661,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.24 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.25 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

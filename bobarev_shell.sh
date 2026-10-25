@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.25 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.26 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1781,9 +1781,16 @@ except Exception:
     ensure_go_and_build_caddy_naive || return 1
 
     echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade, конфликтов TProxy и старых маршрутов...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service wg-quick@wgcf.service sing-box.service xray.service
-    silent_run systemctl disable wg-quick@wgcf.service sing-box.service xray.service
-    killall -q sing-box 2>/dev/null || true
+    # Универсальная очистка любых конфликтующих туннелей/прокси (sing-box, xray, v2ray, trojan, wgcf)
+    for conflict_svc in wg-quick@wgcf.service sing-box.service xray.service v2ray.service trojan.service; do
+        if systemctl list-unit-files 2>/dev/null | grep -q "^${conflict_svc}"; then
+            silent_run systemctl stop "$conflict_svc"
+            silent_run systemctl disable "$conflict_svc"
+        fi
+    done
+    for pname in sing-box xray v2ray trojan; do
+        killall -q "$pname" 2>/dev/null || true
+    done
     silent_run wg-quick down wg-cascade
     silent_run wg-quick down wgcf
     ip link del dev wg-cascade 2>/dev/null || true
@@ -4661,7 +4668,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.25 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.26 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.18 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.19 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -839,17 +839,16 @@ print_naive_shadowrocket_links() {
             b64_str=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64)
         fi
         echo -e "\n👤 Пользователь: ${C_BOLD}${u}${C_RESET} (Сервер: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
-        echo -e "  • ${C_BLUE}Универсальная ссылка HTTPS (вставляется напрямую в Shadowrocket):${C_RESET}"
-        echo -e "    ${C_GREEN}https://${u}:${disp_p}@${dom}:443?padding=true#${dom}-${u}${C_RESET}"
+        echo -e "  • ${C_BLUE}Универсальная ссылка HTTPS с мультиплексированием HTTP/2 (Рекомендуется для Shadowrocket):${C_RESET}"
+        echo -e "    ${C_GREEN}https://${u}:${disp_p}@${dom}:443?http2=1&alpn=h2,http/1.1&padding=true#${dom}-${u}${C_RESET}"
         echo -e "  • ${C_BLUE}Прямая ссылка HTTP/2 (альтернативный формат Shadowrocket):${C_RESET}"
         echo -e "    ${C_GREEN}http2://${b64_str}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
     done < "$NAIVE_PASS_FILE"
 
-    echo -e "\n${C_BLUE}💡 Ручная настройка в Shadowrocket (если добавляете вручную):${C_RESET}"
+    echo -e "\n${C_BLUE}💡 ВАЖНО при ручной проверке в Shadowrocket (Edit Server -> TLS):${C_RESET}"
     echo -e "  • Тип (Type): ${C_BOLD}HTTPS${C_RESET} или ${C_BOLD}HTTP2${C_RESET}"
-    echo -e "  • Адрес (Address): ${C_BOLD}${dom}${C_RESET} | Порт (Port): ${C_BOLD}443${C_RESET}"
-    echo -e "  • Пользователь и Пароль: ваши данные выше | TLS: ${C_BOLD}Включен (ON)${C_RESET}"
-    echo -e "  • Название (Remarks): ${C_BOLD}${dom}${C_RESET}"
+    echo -e "  • В меню ${C_BOLD}TLS${C_RESET} тумблер ${C_BOLD}HTTP2${C_RESET} обязательно должен быть ${C_GREEN}ВКЛЮЧЕН (ON)${C_RESET}!"
+    echo -e "  • Поля ${C_BOLD}SNI${C_RESET}, ${C_BOLD}Public Key${C_RESET} и ${C_BOLD}Short ID${C_RESET} оставьте пустыми (SNI должен совпадать с сертификатом ${dom})."
 }
 
 write_bobarev_cascade_ru_script() {
@@ -876,17 +875,16 @@ if [ -z "$PUB_IP" ] && [ -n "$WAN_IF" ]; then
     PUB_IP=$(ip -4 -o addr show dev "$WAN_IF" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
 fi
 
-if [ -n "$PUB_IP" ]; then
-    while ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null; do :; done
-    ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
-fi
-
 while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
 iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 while iptables -t mangle -D OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
 iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
+    if [ -n "$PUB_IP" ]; then
+        while ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null; do :; done
+        ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
+    fi
     ip link set dev tailscale0 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
@@ -897,13 +895,24 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     if command -v tailscale &>/dev/null; then
         tailscale set --exit-node= 2>/dev/null || true
     fi
-    # Отключаем перехват портов 80/443 сторонним TProxy (table inet warp / wgcf), чтобы трафик шел в wg-cascade
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: удаляем правило priority 100 (from $PUB_IP lookup main),
+    # чтобы локальный трафик Caddy (NaiveProxy) и самого сервера не уходил в ens3 мимо туннеля wg-cascade!
+    while ip rule del priority 100 2>/dev/null; do :; done
+    [ -n "$PUB_IP" ] && while ip rule del from "$PUB_IP" lookup main 2>/dev/null; do :; done
+    # Отключаем перехват портов 80/443 сторонним TProxy (table inet warp / wgcf / sing-box)
+    systemctl stop wg-quick@wgcf.service sing-box.service 2>/dev/null || true
+    systemctl disable wg-quick@wgcf.service sing-box.service 2>/dev/null || true
     nft delete table inet warp 2>/dev/null || true
     while ip rule del fwmark 0xcab2 lookup 51890 2>/dev/null; do :; done
     ip route del default dev wgcf table 51888 2>/dev/null || true
-    ip link set dev wg-cascade txqueuelen 10000 2>/dev/null || true
+    ip route replace default dev wg-cascade table 51888 2>/dev/null || true
+    ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
-    iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -I POSTROUTING 1 -o wg-cascade -j MASQUERADE 2>/dev/null || true
+    while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null; do :; done
+    iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+    while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null; do :; done
+    iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
 fi
 RU_SH_EOF
     chmod +x /usr/local/bin/bobarev-cascade-ru.sh
@@ -1193,10 +1202,14 @@ clean_duplicate_cascade_iptables() {
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
-    while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
-    while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
-    while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
-    while iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+    for mss_val in 1200 1160; do
+        while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -i warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+    done
     while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
 }
 
@@ -1315,13 +1328,14 @@ PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true
 PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT || true
 PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT || true
 PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE || true
-PostUp = iptables -t mangle -C FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
-PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
+PostUp = iptables -t mangle -C FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
+PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
+PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
 PostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
 
 [Peer]
 # Server 1 (RU Entry)
@@ -1575,16 +1589,16 @@ PostUp = ip rule add sport $ssh_p lookup main priority 104 || true
 PostUp = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostUp = ip rule add lookup 51888 priority 30000 || true
 PostUp = iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE || true
-PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
-PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
+PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
+PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
 PostDown = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostDown = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
 PostDown = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
 PostDown = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
 PostDown = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-PostDown = iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+PostDown = iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
 
 [Peer]
 # Foreign Server 2 (WG -> WARP)
@@ -4364,7 +4378,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.18 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.19 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

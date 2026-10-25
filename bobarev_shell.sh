@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.23 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.24 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -776,6 +776,16 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 2097152
+net.core.wmem_default = 2097152
+net.core.optmem_max = 262144
+net.core.netdev_max_backlog = 30000
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.udp_rmem_min = 65536
+net.ipv4.udp_wmem_min = 65536
 net.ipv4.tcp_rmem = 4096 131072 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
 net.core.default_qdisc = fq
@@ -783,7 +793,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell: Balanced High-Throughput Profile for NaiveProxy Cascade
+# Bobarev Shell: Balanced High-Throughput Profile for NaiveProxy + WG + udp2raw Cascade
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -794,6 +804,16 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 2097152
+net.core.wmem_default = 2097152
+net.core.optmem_max = 262144
+net.core.netdev_max_backlog = 30000
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.udp_rmem_min = 65536
+net.ipv4.udp_wmem_min = 65536
 net.ipv4.tcp_rmem = 4096 131072 67108864
 net.ipv4.tcp_wmem = 4096 65536 33554432
 net.core.netdev_budget = 600
@@ -815,6 +835,7 @@ TUNE_EOF
         echo "TCP_TUNE_PROFILE=\"$profile\"" >> /etc/default/bobarev-cascade
     fi
 }
+
 print_naive_shadowrocket_links() {
     if [ ! -f /etc/default/bobarev-cascade ] || [ ! -s "$NAIVE_PASS_FILE" ]; then
         echo -e "${C_YELLOW}⚠️ Пользователи NaiveProxy еще не созданы или Сервер 1 не настроен.${C_RESET}"
@@ -839,15 +860,15 @@ print_naive_shadowrocket_links() {
             b64_str=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64)
         fi
         echo -e "\n👤 Пользователь: ${C_BOLD}${u}${C_RESET} (Сервер: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
-        echo -e "  • ${C_GREEN}🚀 ОСНОВНАЯ ССЫЛКА HTTP/2 (Включает мультиплексирование в 1 клик, для YouTube и стриминга):${C_RESET}"
+        echo -e "  • ${C_GREEN}🚀 ОСНОВНАЯ ССЫЛКА HTTP/2 (Мультиплексирование в 1 клик, рекомендуется для YouTube и стриминга):${C_RESET}"
         echo -e "    ${C_BOLD}${C_GREEN}http2://${b64_str}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
-        echo -e "  • ${C_BLUE}Резервная ссылка HTTPS + Padding (без авто-фиксации HTTP/2):${C_RESET}"
+        echo -e "  • ${C_BLUE}Резервная ссылка HTTPS + Padding (классический формат, требует ручного включения HTTP2 в TLS):${C_RESET}"
         echo -e "    ${C_BLUE}https://${u}:${disp_p}@${dom}:443?padding=true#${dom}-${u}${C_RESET}"
     done < "$NAIVE_PASS_FILE"
 
-    echo -e "\n${C_BLUE}💡 Почему основная ссылка http2:// работает быстрее и стабильнее:${C_RESET}"
+    echo -e "\n${C_BLUE}💡 Почему основная ссылка http2:// работает быстрее и стабильнее чем https://:${C_RESET}"
     echo -e "  • Схема ${C_BOLD}http2://${C_RESET} жестко фиксирует протокол ${C_GREEN}HTTP/2${C_RESET} в самой ссылке — тумблер в Shadowrocket никогда не выключается сам!"
-    echo -e "  • Все видеопотоки YouTube и Apple Music идут внутри одного защищенного мультиплексированного TLS-соединения без пауз."
+    echo -e "  • Все видеопотоки YouTube и Apple Music идут внутри одного постоянного мультиплексированного TLS-соединения без пауз."
 }
 
 write_bobarev_cascade_ru_script() {
@@ -879,14 +900,28 @@ iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-m
 while iptables -t mangle -D OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
 iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
+for m_val in 1300 1220 1200 1160 1140 1120 1080; do
+    while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    while iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    while iptables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    while iptables -t mangle -D OUTPUT -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+done
+
 if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     if [ -n "$PUB_IP" ]; then
         while ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null; do :; done
         ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
     fi
-    ip link set dev tailscale0 txqueuelen 10000 2>/dev/null || true
+    ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
+    # Для связки NaiveProxy -> Tailscale (MTU 1280 + Disco) -> WARP (MTU 1280) фиксируем MSS 1140
+    iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+    iptables -t mangle -I OUTPUT 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+    iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
         tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true 2>/dev/null || true
     fi
@@ -894,10 +929,8 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     if command -v tailscale &>/dev/null; then
         tailscale set --exit-node= 2>/dev/null || true
     fi
-    # Удаляем правило priority 100 (from $PUB_IP lookup main), чтобы трафик Caddy и сервера шел в wg-cascade
     while ip rule del priority 100 2>/dev/null; do :; done
     [ -n "$PUB_IP" ] && while ip rule del from "$PUB_IP" lookup main 2>/dev/null; do :; done
-    # Отключаем перехват портов 80/443 сторонним TProxy (table inet warp / wgcf / sing-box)
     systemctl stop wg-quick@wgcf.service sing-box.service 2>/dev/null || true
     systemctl disable wg-quick@wgcf.service sing-box.service 2>/dev/null || true
     nft delete table inet warp 2>/dev/null || true
@@ -907,12 +940,6 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -I POSTROUTING 1 -o wg-cascade -j MASQUERADE 2>/dev/null || true
-    for m_val in 1220 1200 1160 1120 1080; do
-        while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
-    done
     iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
     iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
     iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
@@ -1019,7 +1046,7 @@ EOF
         echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN}✅ Сервер 1 (Вход в РФ на базе NaiveProxy + Tailscale) успешно настроен и запущен!${C_RESET}"
+    echo -e "${C_GREEN}✅ Сервер 1 (Вход в РФ на базе NaiveProxy + Tailscale [MTU 1280, MSS 1140]) успешно настроен и запущен!${C_RESET}"
     print_naive_shadowrocket_links
 }
 
@@ -1045,6 +1072,7 @@ ensure_warp_installed_and_configured() {
     fi
 
     mkdir -p /etc/wireguard
+    local need_patch=false
     if [ ! -f /etc/wireguard/warp.conf ] || prompt_yn "Профиль /etc/wireguard/warp.conf уже существует. Сгенерировать новый профиль WARP?" "false"; then
         echo -e "${C_BLUE}🔑 Регистрация аккаунта Cloudflare WARP и создание конфигурации...${C_RESET}"
         (
@@ -1054,19 +1082,52 @@ ensure_warp_installed_and_configured() {
             /usr/local/bin/wgcf generate --keepalive
             cp /root/wgcf-profile.conf /etc/wireguard/warp.conf
         )
+        need_patch=true
+    elif ! grep -q "10.200.200.0/30" /etc/wireguard/warp.conf 2>/dev/null; then
+        need_patch=true
+    fi
 
-        # Удаляем DNS и IPv6, добавляем изолированную таблицу 51820 для трафика из Tailscale (100.64.0.0/10) и прямого моста WG (10.200.200.0/30)
-        sed -i '/^DNS/d' /etc/wireguard/warp.conf
-        sed -i 's/, [0-9a-fA-F:\/]*//g' /etc/wireguard/warp.conf
+    if [ "$need_patch" = true ]; then
+        # Безопасная генерация /etc/wireguard/warp.conf без многострочных sed
+        local w_priv=$(awk -F'= ' '/^PrivateKey/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | tr -d '[:space:]')
+        local w_addr=$(awk -F'= ' '/^Address/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | cut -d',' -f1 | tr -d '[:space:]')
+        local w_pub=$(awk -F'= ' '/^PublicKey/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | tr -d '[:space:]')
+        local w_end=$(awk -F'= ' '/^Endpoint/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | tr -d '[:space:]')
+        [ -z "$w_addr" ] && w_addr="172.16.0.2/32"
+        [ -z "$w_end" ] && w_end="engage.cloudflareclient.com:2408"
 
-        sed -i '/^\[Interface\]/a Table = 51820\nPostUp = ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true\nPostUp = ip link set dev warp txqueuelen 10000 || true
-PostUp = iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE\nPostUp = iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nPostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 || true\nPostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 || true\nPostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE\nPostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT\nPostDown = iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT\nPostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT\nPostDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' /etc/wireguard/warp.conf
+        cat << EOF > /etc/wireguard/warp.conf
+[Interface]
+PrivateKey = $w_priv
+Address = $w_addr
+MTU = 1280
+Table = 51820
+PostUp = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
+PostUp = ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 || true
+PostUp = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
+PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true
+PostUp = ip link set dev warp mtu 1280 txqueuelen 10000 || true
+PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
+PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT
+PostUp = iptables -C FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
+PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
+PostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+
+[Peer]
+PublicKey = $w_pub
+AllowedIPs = 0.0.0.0/0
+Endpoint = $w_end
+PersistentKeepalive = 25
+EOF
         chmod 600 /etc/wireguard/warp.conf
-    else
-        # Гарантируем, что в существующем warp.conf есть правило для 10.200.200.0/30 (wg-cascade)
-        if ! grep -q "10.200.200.0/30" /etc/wireguard/warp.conf 2>/dev/null; then
-            sed -i '/lookup 51820 priority 6000/a PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true\nPostUp = iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT\nPostUp = iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT' /etc/wireguard/warp.conf
-        fi
     fi
 
     ensure_wg_kernel_modules
@@ -1076,29 +1137,33 @@ PostUp = iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE\nPostUp = iptabl
 }
 
 setup_cascade_server2_warp() {
-    echo -e "${C_CYAN}🌍 === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> WARP ===${C_RESET}"
+    echo -e "${C_CYAN}🌍 === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
-    ensure_warp_installed_and_configured
 
-    silent_run tailscale set --advertise-exit-node=true
-    if command -v ufw &>/dev/null; then
-        silent_run ufw default allow routed
-        silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
-        silent_run ufw route allow in on tailscale0 out on warp comment 'Tailscale to WARP'
-        silent_run ufw route allow in on warp out on tailscale0 comment 'WARP to Tailscale'
-        ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
-        ensure_ufw_mangle_tcpmss
-        silent_run ufw reload
+    local exit_choice=""
+    if ! exit_choice=$(whiptail --title "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" --menu "\nКак выпускать трафик из Tailscale в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 $WT_WIDTH 2 \
+    "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
+    "2" "☁️ Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)" 3>&1 1>&2 2>&3); then
+        return 0
     fi
 
+    local exit_mode="direct"
+    if [ "$exit_choice" = "2" ]; then
+        exit_mode="warp"
+    fi
+
+    silent_run tailscale set --advertise-exit-node=true
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_warp_exit"
+FOREIGN_EXIT_MODE="$exit_mode"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
+    apply_foreign_exit_mode "$exit_mode"
+
     local my_ts_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "100.x.y.z")
-    echo -e "${C_GREEN}✅ Сервер 2 (Зарубежный выход через Cloudflare WARP) успешно запущен!${C_RESET}"
+    echo -e "${C_GREEN}✅ Сервер 2 (Зарубежный выход Tailscale, режим: $exit_mode) успешно запущен!${C_RESET}"
     echo -e "${C_BLUE}📌 Ваш Tailscale IP этого сервера: ${C_BOLD}${my_ts_ip}${C_RESET}"
     echo -e "${C_YELLOW}⚠️ Не забудьте в админ-панели Tailscale (https://login.tailscale.com/admin/machines) включить галочку 'Use as exit node' для этого сервера, а на Сервере 1 (РФ) указать IP ${my_ts_ip}!${C_RESET}"
 }
@@ -1115,17 +1180,24 @@ manage_cascade_naive_ts_warp() {
             else
                 c_state="Сервер 1 (РФ: NaiveProxy -> Tailscale)"
             fi
-        elif is_warp_active; then
-            c_state="Сервер 2 (Зарубеж: Tailscale -> WARP)"
+        elif [ -f /etc/default/bobarev-cascade ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            if is_warp_active; then
+                c_state="Сервер 2 (Зарубеж: Tailscale -> Cloudflare WARP)"
+            else
+                c_state="Сервер 2 (Зарубеж: Tailscale -> Чистый IP сервера)"
+            fi
         fi
 
         local c_choice
-        if ! c_choice=$(whiptail --title "Каскад: NaiveProxy + Tailscale + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 17 $WT_WIDTH 5 \
+        if ! c_choice=$(whiptail --title "Каскад: NaiveProxy + Tailscale + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 \
         "1" "🔒 Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
-        "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> Cloudflare WARP" \
+        "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> WARP / Чистый IP" \
         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
         "4" "📋 Показать ссылки для Shadowrocket" \
-        "5" "🛑 Остановить и удалить компоненты каскада" \
+        "5" "🔄 Переключить выход на Сервере 2: Чистый IP <-> Cloudflare WARP" \
+        "6" "🛑 Остановить и удалить компоненты каскада" \
         "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -1148,6 +1220,10 @@ manage_cascade_naive_ts_warp() {
                 pause_enter
                 ;;
             5)
+                toggle_foreign_warp_menu
+                pause_enter
+                ;;
+            6)
                 if prompt_yn "Остановить и отключить службы каскада (NaiveProxy Caddy / WARP) на этом сервере?" "false"; then
                     silent_run systemctl stop caddy.service bobarev-cascade-ru.service wg-quick@warp.service wg-quick@wg-cascade.service
                     silent_run tailscale set --exit-node=
@@ -1211,7 +1287,7 @@ clean_duplicate_cascade_iptables() {
         while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
         while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     fi
-    for mss_val in 1300 1220 1200 1160 1120 1080; do
+    for mss_val in 1300 1220 1200 1160 1140 1120 1080; do
         while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
@@ -1220,6 +1296,9 @@ clean_duplicate_cascade_iptables() {
         while iptables -t mangle -D POSTROUTING -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -i warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
     done
     while iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
@@ -1234,15 +1313,20 @@ apply_foreign_exit_mode() {
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     disable_ufw_strict_rpfilter
 
-    # Очищаем старые правила маршрутизации и дубликаты TCPMSS
+    # Очищаем старые правила маршрутизации в таблицу 51820 (WARP) и старые правила TCPMSS
+    while ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null; do :; done
+    while ip rule del from 100.64.0.0/10 lookup 51820 2>/dev/null; do :; done
     while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
     while ip rule del from 10.200.200.0/30 lookup 51820 2>/dev/null; do :; done
-    for mss_val in 1300 1220 1200 1160 1120 1080; do
+    for mss_val in 1300 1220 1200 1160 1140 1120 1080; do
         while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D POSTROUTING -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
+        while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
     done
 
     if [ "$exit_mode" = "direct" ]; then
@@ -1250,53 +1334,65 @@ apply_foreign_exit_mode() {
         silent_run systemctl stop wg-quick@warp.service
         silent_run systemctl disable wg-quick@warp.service
         ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
+        ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
 
         iptables -C FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o "$wan_dev" -j ACCEPT
         iptables -C FORWARD -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o "$wan_dev" -j ACCEPT
+        iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
         apply_wan_exit_nat "$wan_dev" "true"
 
+        # Для прямого WG-моста: MSS 1200; для Tailscale (с учетом заголовка Disco): MSS 1140
         iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
 
         if command -v ufw &>/dev/null; then
             silent_run ufw route allow in on wg-cascade out on "$wan_dev" comment 'WG Cascade to WAN Direct'
             silent_run ufw route allow in on "$wan_dev" out on wg-cascade comment 'WAN Direct to WG Cascade'
+            silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'Tailscale to WAN Direct'
+            silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'WAN Direct to Tailscale'
         fi
     else
         echo -e "${C_BLUE}☁️ Включение режима CLOUDFLARE WARP на выходе Зарубежного сервера...${C_RESET}"
         ensure_warp_installed_and_configured
         ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
+        ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
+        ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
         ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
 
         iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
         iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT
+        iptables -C FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
         iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
 
         iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
 
         if command -v ufw &>/dev/null; then
             silent_run ufw route allow in on wg-cascade out on warp comment 'WG Cascade to WARP'
             silent_run ufw route allow in on warp out on wg-cascade comment 'WARP to WG Cascade'
+            silent_run ufw route allow in on tailscale0 out on warp comment 'Tailscale to WARP'
+            silent_run ufw route allow in on warp out on tailscale0 comment 'WARP to Tailscale'
             ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
         fi
     fi
 
     if [ -f /etc/default/bobarev-cascade ]; then
         sed -i '/^FOREIGN_EXIT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-        echo "FOREIGN_EXIT_MODE="$exit_mode"" >> /etc/default/bobarev-cascade
+        echo "FOREIGN_EXIT_MODE=\"$exit_mode\"" >> /etc/default/bobarev-cascade
     fi
 }
 
 toggle_foreign_warp_menu() {
-    if [ ! -f /etc/wireguard/wg-cascade.conf ]; then
-        echo -e "${C_YELLOW}⚠️ Сначала выполните Шаг 1 (Настройка Зарубежного Сервера 2).${C_RESET}"
-        return 0
-    fi
     local cur_mode="warp"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
@@ -1314,7 +1410,7 @@ toggle_foreign_warp_menu() {
     local def_item="1"
     [ "$cur_mode" = "warp" ] && def_item="2"
 
-    if ! m_choice=$(whiptail --title "Переключение режима выхода на Сервере 2 (WARP / Чистый IP)" --default-item "$def_item" --menu "\nТекущий режим выхода: $cur_human\n\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение происходит мгновенно, менять настройки на РФ-сервере НЕ нужно!):" 17 $WT_WIDTH 2 \
+    if ! m_choice=$(whiptail --title "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" --default-item "$def_item" --menu "\nТекущий режим выхода: $cur_human\n\nРаботает для обоих каскадов (и для Прямого WG-моста, и для Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 \
     "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
     "2" "☁️ Cloudflare WARP (Маскировка выходного IP под Cloudflare)" 3>&1 1>&2 2>&3); then
         return 0
@@ -1325,20 +1421,12 @@ toggle_foreign_warp_menu() {
 
     apply_foreign_exit_mode "$target_mode"
 
-    # Обновляем PostUp в /etc/wireguard/wg-cascade.conf, чтобы режим сохранялся после перезагрузки
-    sed -i "s/apply_foreign_exit_mode .*/apply_foreign_exit_mode $target_mode/g" /usr/local/bin/bobarev-foreign-exit.sh 2>/dev/null || true
-    cat << EOF > /usr/local/bin/bobarev-foreign-exit.sh
-#!/bin/bash
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-EOF
-    chmod +x /usr/local/bin/bobarev-foreign-exit.sh
-
     local wan_dev=$(get_wan_if)
     [ -z "$wan_dev" ] && wan_dev="ens3"
     if [ "$target_mode" = "direct" ]; then
         local my_ip=$(curl -4 -s --interface "$wan_dev" --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-        echo -e "\n${C_GREEN}✅ WARP отключен! Теперь весь трафик каскада выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-77.105.129.198}${C_RESET}"
-        echo -e "${C_BLUE}💡 Подсказка: Без двойного шифрования WARP сайт speed.cloudflare.com и Speedtest работают без ограничений Cloudflare!${C_RESET}"
+        echo -e "\n${C_GREEN}✅ WARP отключен! Теперь трафик (и из WG-моста, и из Tailscale) выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-77.105.129.198}${C_RESET}"
+        echo -e "${C_BLUE}💡 Подсказка: Без двойного шифрования WARP сайт speed.cloudflare.com и Speedtest работают на полной скорости канала!${C_RESET}"
     else
         local w_ip=$(curl -4 -s --interface warp --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
         echo -e "\n${C_GREEN}✅ Cloudflare WARP включен! Выходной IP каскада: ${C_BOLD}${w_ip:-Cloudflare WARP}${C_RESET}"
@@ -1382,11 +1470,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-Nice=-10
+Nice=-15
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=50
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
 ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode xor --auth-mode none ${extra_flags}
 Restart=always
 RestartSec=3
-LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
@@ -1401,6 +1492,7 @@ EOF
 setup_direct_wg_server2_foreign() {
     echo -e "${C_CYAN}🌍 === ШАГ 1: НАСТРОЙКА ЗАРУБЕЖНОГО СЕРВЕРА 2 (WG-BRIDGE + ANTI-DPI) ===${C_RESET}"
     enable_routing_optimizations || true
+    apply_naive_tcp_tuning_profile "balanced"
 
     local ext_port="51888"
     prompt_default "1/3. Введите внешний порт на этом сервере для приема каскадного моста:" "51888" ext_port
@@ -1462,6 +1554,12 @@ setup_direct_wg_server2_foreign() {
     local wan_dev=$(get_wan_if)
     [ -z "$wan_dev" ] && wan_dev="ens3"
 
+    local warp_rule_postup=""
+    if [ "$exit_mode" = "warp" ]; then
+        warp_rule_postup="PostUp = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
+PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true"
+    fi
+
     cat << EOF > /etc/wireguard/wg-cascade.conf
 [Interface]
 Address = 10.200.200.1/30
@@ -1471,6 +1569,7 @@ MTU = 1280
 Table = off
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
 PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+${warp_rule_postup}
 PostUp = iptables -C FORWARD -i wg-cascade -o $wan_dev -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o $wan_dev -j ACCEPT || true
 PostUp = iptables -C FORWARD -i $wan_dev -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i $wan_dev -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT || true
 PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT || true
@@ -1496,11 +1595,6 @@ PresharedKey = $psk
 AllowedIPs = 10.200.200.2/32
 EOF
     chmod 600 /etc/wireguard/wg-cascade.conf
-
-    if [ "$exit_mode" = "warp" ]; then
-        sed -i '/PostUp = sysctl/a PostUp = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
-PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true' /etc/wireguard/wg-cascade.conf
-    fi
 
     ensure_wg_kernel_modules
     systemctl daemon-reload
@@ -4547,7 +4641,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.23 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.24 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

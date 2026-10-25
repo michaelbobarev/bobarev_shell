@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.17 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.18 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -71,7 +71,7 @@ get_system_type_short() {
 }
 
 get_wan_if() {
-    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|wg-cascade|warp|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
 }
 
 DEFAULT_WAN_IF=$(get_wan_if)
@@ -859,6 +859,9 @@ write_bobarev_cascade_ru_script() {
 source /etc/default/bobarev-cascade
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
+    [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
+done
 if [ -f /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf ]; then
     sysctl -p /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
 else
@@ -867,23 +870,26 @@ else
     sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
 fi
 
-WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|wg-cascade|warp|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 PUB_IP="${SERVER_PUB_IP:-}"
 if [ -z "$PUB_IP" ] && [ -n "$WAN_IF" ]; then
     PUB_IP=$(ip -4 -o addr show dev "$WAN_IF" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
 fi
 
 if [ -n "$PUB_IP" ]; then
-    ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null || true
+    while ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null; do :; done
     ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
 fi
 
-iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-iptables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+while iptables -t mangle -D OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     ip link set dev tailscale0 txqueuelen 10000 2>/dev/null || true
-    iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
+    while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
+    iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
     if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
         tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true 2>/dev/null || true
     fi
@@ -891,8 +897,13 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     if command -v tailscale &>/dev/null; then
         tailscale set --exit-node= 2>/dev/null || true
     fi
+    # Отключаем перехват портов 80/443 сторонним TProxy (table inet warp / wgcf), чтобы трафик шел в wg-cascade
+    nft delete table inet warp 2>/dev/null || true
+    while ip rule del fwmark 0xcab2 lookup 51890 2>/dev/null; do :; done
+    ip route del default dev wgcf table 51888 2>/dev/null || true
     ip link set dev wg-cascade txqueuelen 10000 2>/dev/null || true
-    iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
+    while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
+    iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
 fi
 RU_SH_EOF
     chmod +x /usr/local/bin/bobarev-cascade-ru.sh
@@ -1178,11 +1189,22 @@ ensure_udp2raw_installed() {
     return 0
 }
 
+clean_duplicate_cascade_iptables() {
+    while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+    while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+    while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+    while iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null; do :; done
+    while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
+}
+
 configure_udp2raw_service() {
     local role="$1"       # server | client
-    local r_addr="$2"     # listen or remote addr:port
-    local l_addr="$3"     # local target or listen addr:port
-    local obfs_mode="$4"  # udp | faketcp
+    local r_addr="$2"     # remote/target addr:port (-r)
+    local l_addr="$3"     # local listen addr:port (-l)
+    local obfs_mode="$4"  # udp | faketcp | none
     local obfs_key="$5"
 
     if [ "$obfs_mode" = "none" ]; then
@@ -1196,10 +1218,16 @@ configure_udp2raw_service() {
     ensure_udp2raw_installed || return 1
 
     local mode_flag="-s"
-    local addr_flags="-l ${l_addr} -r ${r_addr}"
     if [ "$role" = "client" ]; then
         mode_flag="-c"
-        addr_flags="-l ${l_addr} -r ${r_addr}"
+    fi
+    local addr_flags="-l ${l_addr} -r ${r_addr}"
+
+    # Внимание: убрана опция -a, так как при пороговой политике UFW INPUT DROP авто-правило udp2raw (-I INPUT -j DROP)
+    # блокирует прием пакетов своим raw-сокетом на ядрах Debian 12/13 с nftables!
+    local extra_flags="--sock-buf 10240 --fix-gro"
+    if [ "$obfs_mode" = "faketcp" ]; then
+        extra_flags="-a --sock-buf 10240 --fix-gro"
     fi
 
     cat << EOF > "$UDP2RAW_SERVICE"
@@ -1211,7 +1239,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode xor --auth-mode none --sock-buf 10485760 -a --fix-gro
+ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode xor --auth-mode simple ${extra_flags}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -1221,7 +1249,8 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now bobarev-udp2raw.service
+    systemctl reset-failed bobarev-udp2raw.service 2>/dev/null || true
+    systemctl enable --now bobarev-udp2raw.service >/dev/null 2>&1 || true
     systemctl restart bobarev-udp2raw.service
 }
 
@@ -1250,12 +1279,14 @@ setup_direct_wg_server2_foreign() {
         3) obfs_mode="none" ;;
     esac
 
-    # Полная предварительная зачистка старых хвостов и зависших интерфейсов wg-cascade
-    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade (если были)...${C_RESET}"
+    # Полная предварительная зачистка старых хвостов, дубликатов iptables и зависших интерфейсов wg-cascade
+    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade и старых правил...${C_RESET}"
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
     silent_run wg-quick down wg-cascade
     ip link del dev wg-cascade 2>/dev/null || true
     while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
+    clean_duplicate_cascade_iptables
+    disable_ufw_strict_rpfilter
 
     mkdir -p /etc/wireguard
     local s2_priv=$(wg genkey)
@@ -1278,6 +1309,7 @@ PrivateKey = $s2_priv
 MTU = 1280
 Table = off
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 PostUp = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
 PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true
 PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT || true
@@ -1325,6 +1357,7 @@ EOF
         ensure_ufw_mangle_tcpmss
         silent_run ufw reload
     fi
+    disable_ufw_strict_rpfilter
 
     local wan_dev=$(get_wan_if)
     local ext_ip=""
@@ -1464,16 +1497,26 @@ except Exception:
 
     ensure_go_and_build_caddy_naive || return 1
 
-    # Полная предварительная зачистка старых хвостов, правил и зависшего интерфейса wg-cascade
-    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade и старых маршрутов...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
+    # Полная предварительная зачистка старых хвостов, конфликтующих служб (wgcf/sing-box) и таблицы 51888
+    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade, конфликтов TProxy и старых маршрутов...${C_RESET}"
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service wg-quick@wgcf.service sing-box.service
+    silent_run systemctl disable wg-quick@wgcf.service sing-box.service
     silent_run wg-quick down wg-cascade
+    silent_run wg-quick down wgcf
     ip link del dev wg-cascade 2>/dev/null || true
+    ip link del dev wgcf 2>/dev/null || true
+    nft delete table inet warp 2>/dev/null || true
+    while ip rule del fwmark 0xcab2 lookup 51890 2>/dev/null; do :; done
+    while ip rule del fwmark 0xcab0 lookup 51888 2>/dev/null; do :; done
+    while ip rule del from 172.16.0.2 lookup 51888 2>/dev/null; do :; done
     ip route flush table 51888 2>/dev/null || true
+    ip route flush table 51890 2>/dev/null || true
     while ip rule del priority 100 2>/dev/null; do :; done
     while ip rule del priority 101 2>/dev/null; do :; done
     while ip rule del priority 30000 2>/dev/null; do :; done
     while ip rule del lookup 51888 2>/dev/null; do :; done
+    clean_duplicate_cascade_iptables
+    disable_ufw_strict_rpfilter
 
     local wan_dev=$(get_wan_if)
     local pub_ip=""
@@ -1499,11 +1542,16 @@ except Exception:
         configure_udp2raw_service "client" "" "" "none" ""
     fi
 
-    local post_up_pub_ip=""
-    if [ -n "$pub_ip" ]; then
-        post_up_pub_ip="PostUp = ip rule del from $pub_ip lookup main priority 100 2>/dev/null || true
-PostUp = ip rule add from $pub_ip lookup main priority 100 || true"
+    # ВАЖНО: Не добавляем глобальное правило `from $pub_ip lookup main priority 100`, так как локальные процессы (включая Caddy NaiveProxy)
+    # выбирают адрес источника $pub_ip до маршрутизации и при наличии такого правила уходят напрямую в ens3 МИМО туннеля wg-cascade!
+    # Для защиты входящего HTTPS/SSH-трафика Сервера 1 используем точечные правила по входным портам (sport 443, 80, SSH).
+    local ssh_p="22"
+    local sshd_c=$(get_sshd_cmd)
+    if [ -n "$sshd_c" ]; then
+        ssh_p=$($sshd_c -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
     fi
+    ssh_p="${ssh_p//[^0-9]/}"
+    [ -z "$ssh_p" ] && ssh_p="22"
 
     mkdir -p /etc/wireguard
     cat << EOF > /etc/wireguard/wg-cascade.conf
@@ -1513,9 +1561,17 @@ PrivateKey = $s1_priv
 MTU = 1280
 Table = 51888
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
-${post_up_pub_ip}
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+PostUp = ip route flush table 51888 2>/dev/null || true
+PostUp = ip route replace default dev wg-cascade table 51888 || true
 PostUp = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
 PostUp = ip rule add to $s2_ip lookup main priority 101 || true
+PostUp = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
+PostUp = ip rule add sport 443 lookup main priority 102 || true
+PostUp = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
+PostUp = ip rule add sport 80 lookup main priority 103 || true
+PostUp = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
+PostUp = ip rule add sport $ssh_p lookup main priority 104 || true
 PostUp = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostUp = ip rule add lookup 51888 priority 30000 || true
 PostUp = iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE || true
@@ -1523,6 +1579,9 @@ PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST 
 PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
 PostDown = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostDown = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
+PostDown = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
+PostDown = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
+PostDown = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
 PostDown = iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
@@ -1570,11 +1629,16 @@ EOF
         silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
         silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
     fi
+    disable_ufw_strict_rpfilter
 
     echo -e "\n${C_GREEN}✅ Прямой скоростной каскад (NaiveProxy -> WG [MTU 1280 + Anti-DPI: $obfs_mode] -> WARP) запущен!${C_RESET}"
-    echo -e "${C_BLUE}⚡ Проверка внешнего IP через замаскированный мост:${C_RESET}"
-    sleep 2
-    local test_ip=$(curl -4 -s --interface wg-cascade --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || echo "Установка рукопожатия...")
+    echo -e "${C_BLUE}⚡ Проверка рукопожатия и внешнего IP через замаскированный мост:${C_RESET}"
+    ping -c 1 -W 2 10.200.200.1 >/dev/null 2>&1 || true
+    sleep 1
+    local test_ip=$(curl -4 -s --interface wg-cascade --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
+    if [ -z "$test_ip" ]; then
+        test_ip=$(curl -4 -s --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Установка рукопожатия...")
+    fi
     [ -z "$test_ip" ] && test_ip="Установка рукопожатия..."
     echo -e "  • Выходной IP (Cloudflare WARP): ${C_GREEN}${test_ip}${C_RESET}"
     print_naive_shadowrocket_links
@@ -1649,9 +1713,14 @@ mod_direct_wg_cascade() {
                     silent_run wg-quick down wg-cascade
                     ip link del dev wg-cascade 2>/dev/null || true
                     ip route flush table 51888 2>/dev/null || true
+                    while ip rule del priority 100 2>/dev/null; do :; done
                     while ip rule del priority 101 2>/dev/null; do :; done
+                    while ip rule del priority 102 2>/dev/null; do :; done
+                    while ip rule del priority 103 2>/dev/null; do :; done
+                    while ip rule del priority 104 2>/dev/null; do :; done
                     while ip rule del priority 30000 2>/dev/null; do :; done
                     while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
+                    clean_duplicate_cascade_iptables
                     rm -f /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
                     systemctl daemon-reload
                     echo -e "${C_GREEN}✅ Прямой мост wg-cascade, хвосты интерфейса и служба udp2raw полностью зачищены.${C_RESET}"
@@ -1986,12 +2055,12 @@ enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 tries=0
-while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|wg-cascade|warp|tun[0-9]+" >/dev/null 2>&1; do
+while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -ge 15 ] && exit 0
     sleep 2
 done
-NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]+|wg-cascade|warp|tun[0-9]+" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
     ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
 fi
@@ -4295,7 +4364,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.17 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.18 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

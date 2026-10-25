@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.28 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.29 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -905,9 +905,9 @@ if [ -z "$PUB_IP" ] && [ -n "$WAN_IF" ]; then
 fi
 
 while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+while iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
 while iptables -t mangle -D OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+while iptables -t mangle -D OUTPUT -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
 
 for m_val in 1300 1220 1200 1160 1140 1120 1080; do
     while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
@@ -1121,7 +1121,7 @@ PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || ipta
 PostUp = iptables -C FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
 PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
-PostUp = iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
 PostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
 PostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
@@ -1352,8 +1352,10 @@ clean_duplicate_cascade_iptables() {
         while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
     done
     while iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-    iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    while iptables -t mangle -D OUTPUT -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
     while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
+    while iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null; do :; done
+    [ -n "$wan_dev" ] && while iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null; do :; done
 }
 
 apply_foreign_exit_mode() {
@@ -1515,10 +1517,9 @@ configure_udp2raw_service() {
     fi
     local addr_flags="-l ${l_addr} -r ${r_addr}"
 
-    local extra_flags="--sock-buf 10240"
-    if [ "$obfs_mode" = "faketcp" ]; then
-        extra_flags="-a --sock-buf 10240"
-    fi
+    # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
+    # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
+    local extra_flags="-a --fix-gro --sock-buf 10240"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]
@@ -1541,6 +1542,11 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+
+    local wan_if=$(get_wan_if)
+    if [ -n "$wan_if" ] && command -v ethtool &>/dev/null; then
+        ethtool -K "$wan_if" rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
+    fi
 
     systemctl daemon-reload
     systemctl reset-failed bobarev-udp2raw.service 2>/dev/null || true
@@ -2402,7 +2408,12 @@ while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|w
 done
 NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
-    ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
+    if systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null || [ -f /etc/systemd/system/bobarev-udp2raw.service ]; then
+        # Для сырых сокетов udp2raw (PF_PACKET) склейка UDP GRO в ядре вызывает дропы пакетов > MTU на virtio_net
+        ethtool -K "$NETDEV" rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
+    else
+        ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
+    fi
 fi
 ETHTOOL_SCRIPT_EOF
     chmod +x /usr/local/bin/tailscale-gro.sh
@@ -4704,7 +4715,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.28 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.29 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

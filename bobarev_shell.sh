@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.26 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.27 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -510,7 +510,7 @@ ensure_go_and_build_caddy_naive() {
         echo -e "${C_GREEN}✅ Компилятор Go ${GO_VERSION_PIN} успешно установлен.${C_RESET}"
     fi
 
-    if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy"; then
+    if [ -x "$CADDY_BIN" ] && { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
         rm -rf "$build_tmp_dir"
         echo -e "${C_GREEN}✅ Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
         return 0
@@ -524,9 +524,15 @@ ensure_go_and_build_caddy_naive() {
 
     go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}"
 
+    local tmp_caddy_bin="${build_tmp_dir}/caddy_built"
     "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
         --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
-        --output "$CADDY_BIN" || true
+        --output "$tmp_caddy_bin" || true
+
+    if [ -f "$tmp_caddy_bin" ]; then
+        chmod +x "$tmp_caddy_bin"
+        mv -f "$tmp_caddy_bin" "$CADDY_BIN"
+    fi
 
     rm -rf "$build_tmp_dir"
     unset GOTMPDIR TMPDIR
@@ -537,7 +543,7 @@ ensure_go_and_build_caddy_naive() {
     fi
 
     chmod +x "$CADDY_BIN"
-    if ! "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy"; then
+    if ! { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
         echo -e "${C_RED}❌ Ошибка сборки: модуль http.handlers.forward_proxy не найден в Caddy.${C_RESET}"
         return 1
     fi
@@ -934,11 +940,6 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     fi
     while ip rule del priority 100 2>/dev/null; do :; done
     [ -n "$PUB_IP" ] && while ip rule del from "$PUB_IP" lookup main 2>/dev/null; do :; done
-    systemctl stop wg-quick@wgcf.service sing-box.service 2>/dev/null || true
-    systemctl disable wg-quick@wgcf.service sing-box.service 2>/dev/null || true
-    nft delete table inet warp 2>/dev/null || true
-    while ip rule del fwmark 0xcab2 lookup 51890 2>/dev/null; do :; done
-    ip route del default dev wgcf table 51888 2>/dev/null || true
     ip route replace default dev wg-cascade table 51888 2>/dev/null || true
     ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
@@ -970,6 +971,9 @@ RU_SVC_EOF
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
+    if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
+        return 1
+    fi
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
@@ -1245,6 +1249,33 @@ manage_cascade_naive_ts_warp() {
 # ==============================================================================
 # МОДУЛЬ 20: ПРЯМОЙ СКОРОСТНОЙ КАСКАД (NAIVEPROXY -> WG + UDP2RAW -> WARP)
 # ==============================================================================
+check_required_ports_free() {
+    # Проверяет, не заняты ли целевые порты сторонними процессами (кроме наших собственных caddy / udp2raw)
+    local role="$1" # ru | foreign
+    shift
+    local ports=("$@")
+    local conflict_found=false
+
+    for p in "${ports[@]}"; do
+        [ -z "$p" ] && continue
+        local line=""
+        line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|udp2raw)"' | head -n 1 || echo "")
+        if [ -n "$line" ]; then
+            local proto=$(echo "$line" | awk '{print $1}')
+            local proc_info=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "неизвестный процесс")
+            local pid_info=$(echo "$line" | grep -oP 'pid=\K[0-9]+' || echo "?")
+            echo -e "${C_RED}❌ Внимание: Порт ${p}/${proto} уже занят сторонним процессом '${proc_info}' (PID: ${pid_info})!${C_RESET}"
+            conflict_found=true
+        fi
+    done
+
+    if [ "$conflict_found" = true ]; then
+        echo -e "${C_YELLOW}⚠️ Пожалуйста, освободите указанные порты (остановите/удалите конфликтующий процесс) и запустите настройку заново.${C_RESET}"
+        return 1
+    fi
+    return 0
+}
+
 ensure_udp2raw_installed() {
     if [ -x "$UDP2RAW_BIN" ]; then
         return 0
@@ -1511,6 +1542,9 @@ setup_direct_wg_server2_foreign() {
     prompt_default "1/3. Введите внешний порт на этом сервере для приема каскадного моста:" "51888" ext_port
     if [ "$MODULE_CANCELED" = true ] || [ -z "$ext_port" ]; then return 0; fi
     ext_port="${ext_port//[^0-9]/}"
+    if ! check_required_ports_free "foreign" "$ext_port" "51889"; then
+        return 1
+    fi
 
     local obfs_choice=""
     if ! obfs_choice=$(whiptail --title "2/3. Защита заголовков WireGuard от ТСПУ" --menu "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 \
@@ -1675,6 +1709,9 @@ EOF
 
 setup_direct_wg_server1_ru() {
     echo -e "${C_CYAN}🚀 === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY -> WG + ANTI-DPI) ===${C_RESET}"
+    if ! check_required_ports_free "ru" "80" "443" "51889"; then
+        return 1
+    fi
     enable_routing_optimizations || true
 
     if ! command -v wg &>/dev/null || ! command -v iptables &>/dev/null || ! command -v curl &>/dev/null || ! command -v python3 &>/dev/null; then
@@ -1780,27 +1817,11 @@ except Exception:
 
     ensure_go_and_build_caddy_naive || return 1
 
-    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade, конфликтов TProxy и старых маршрутов...${C_RESET}"
-    # Универсальная очистка любых конфликтующих туннелей/прокси (sing-box, xray, v2ray, trojan, wgcf)
-    for conflict_svc in wg-quick@wgcf.service sing-box.service xray.service v2ray.service trojan.service; do
-        if systemctl list-unit-files 2>/dev/null | grep -q "^${conflict_svc}"; then
-            silent_run systemctl stop "$conflict_svc"
-            silent_run systemctl disable "$conflict_svc"
-        fi
-    done
-    for pname in sing-box xray v2ray trojan; do
-        killall -q "$pname" 2>/dev/null || true
-    done
+    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade и старых маршрутов...${C_RESET}"
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
     silent_run wg-quick down wg-cascade
-    silent_run wg-quick down wgcf
     ip link del dev wg-cascade 2>/dev/null || true
-    ip link del dev wgcf 2>/dev/null || true
-    nft delete table inet warp 2>/dev/null || true
-    while ip rule del fwmark 0xcab2 lookup 51890 2>/dev/null; do :; done
-    while ip rule del fwmark 0xcab0 lookup 51888 2>/dev/null; do :; done
-    while ip rule del from 172.16.0.2 lookup 51888 2>/dev/null; do :; done
     ip route flush table 51888 2>/dev/null || true
-    ip route flush table 51890 2>/dev/null || true
     while ip rule del priority 100 2>/dev/null; do :; done
     while ip rule del priority 101 2>/dev/null; do :; done
     while ip rule del priority 30000 2>/dev/null; do :; done
@@ -4668,7 +4689,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.26 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.27 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

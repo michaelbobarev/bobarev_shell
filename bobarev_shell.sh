@@ -4360,6 +4360,12 @@ mod_server_audit() {
     check_param() {
         local param="$1" expected="$2" label="$3" ok_msg="$4" err_msg="$5"
         local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
+        if [ "$param" = "net.core.rmem_max" ]; then
+            if [ "$val" != "N/A" ] && [ "$val" -ge 26214400 ] 2>/dev/null; then
+                echo -e "  • ${label}${C_GREEN}✅ Активны (расширенные буферы под высокие скорости, сейчас: $val)${C_RESET}"
+                return
+            fi
+        fi
         if [ "$val" = "$expected" ]; then
             echo -e "  • ${label}${C_GREEN}✅ $ok_msg${C_RESET}"
         else
@@ -4370,7 +4376,7 @@ mod_server_audit() {
     check_param "net.ipv4.ip_forward"             "1"        "Форвардинг пакетов (IPv4): " "Включен (маршрутизация активна)" "Отключен"
     check_param "net.ipv4.tcp_syncookies"         "1"        "Защита от флуда (SYN):     " "Включена" "Отключена"
     check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:    " "Активно" "Стандартное"
-    check_param "net.core.rmem_max"               "26214400" "Расширенные буферы VPN:    " "Активны (25 МБ под высокие скорости)" "Стандартные"
+    check_param "net.core.rmem_max"               "67108864" "Расширенные буферы VPN:    " "Активны (расширенные буферы под высокие скорости)" "Стандартные"
 
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then

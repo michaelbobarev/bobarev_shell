@@ -2930,25 +2930,27 @@ smart_menu() {
     shift 5
     local options=("$@")
 
-    # 1. Печать списка в консоль для быстрого выбора
-    echo -e "\n${C_CYAN}=== $title ===${C_RESET}"
-    echo -e "$msg\n"
+    # 1. Печать списка в консоль (в stderr, чтобы не попасть в $(...))
+    echo -e "\n${C_CYAN}=== $title ===${C_RESET}" >&2
+    echo -e "$msg\n" >&2
     for ((i=0; i<${#options[@]}; i+=2)); do
-        echo -e "${C_WHITE}${options[i]}.${C_RESET} ${options[i+1]}"
+        echo -e "${C_WHITE}${options[i]}.${C_RESET} ${options[i+1]}" >&2
     done
-    echo -e "\n${C_BLUE}Введите номер или нажмите Enter для визуального меню:${C_RESET}"
+    echo -e "\n${C_BLUE}Введите номер или нажмите Enter для визуального меню:${C_RESET}" >&2
 
     local fast_choice
-    read -r fast_choice < /dev/tty
-
-    if [[ -n "$fast_choice" ]]; then
-        for ((i=0; i<${#options[@]}; i+=2)); do
-            if [[ "${options[i]}" == "$fast_choice" ]]; then
-                echo "$fast_choice"
-                return 0
-            fi
-        done
-        echo -e "${C_RED}❌ Неверный ввод. Переходим в визуальное меню...${C_RESET}"
+    # Используем read с тайм-аутом или просто чтение.
+    # < /dev/tty критично для работы внутри $(...)
+    if read -r fast_choice < /dev/tty; then
+        if [[ -n "$fast_choice" ]]; then
+            for ((i=0; i<${#options[@]}; i+=2)); do
+                if [[ "${options[i]}" == "$fast_choice" ]]; then
+                    echo "$fast_choice"
+                    return 0
+                fi
+            done
+            echo -e "${C_RED}❌ Неверный ввод. Переходим в визуальное меню...${C_RESET}" >&2
+        fi
     fi
 
     # 2. Fallback на whiptail

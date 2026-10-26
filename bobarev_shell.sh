@@ -1540,7 +1540,7 @@ toggle_foreign_warp_menu() {
     [ -z "$wan_dev" ] && wan_dev="ens3"
     if [ "$target_mode" = "direct" ]; then
         local my_ip=$(curl -4 -s --interface "$wan_dev" --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-        echo -e "\n${C_GREEN}✅ WARP отключен! Теперь трафик (и из WG-моста, и из Tailscale) выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-77.105.129.198}${C_RESET}"
+        echo -e "\n${C_GREEN}✅ WARP отключен! Теперь трафик (и из WG-моста, и из Tailscale) выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-Прямой IP сервера}${C_RESET}"
         echo -e "${C_BLUE}💡 Подсказка: Без двойного шифрования WARP сайт speed.cloudflare.com и Speedtest работают на полной скорости канала!${C_RESET}"
     else
         local w_ip=$(curl -4 -s --interface warp --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
@@ -1797,8 +1797,8 @@ EOF
     echo -e "\n  • ${C_BOLD}Токен #3 (резервный для 3-го РФ-сервера, IP 10.200.200.4):${C_RESET}"
     echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_3}${C_RESET}\n"
     echo -e "${C_BLUE}📌 Как подключить РФ-серверы:${C_RESET}"
-    echo -e "  1. На первом РФ-сервере (например, cloud-ru) -> Пункт 20 -> Пункт 2 -> вставьте Токен #1."
-    echo -e "  2. На втором РФ-сервере (например, landvps-ru) -> Пункт 20 -> Пункт 2 -> вставьте Токен #2."
+    echo -e "  1. На первом РФ-сервере -> Пункт 20 -> Пункт 2 -> вставьте Токен #1."
+    echo -e "  2. На втором РФ-сервере -> Пункт 20 -> Пункт 2 -> вставьте Токен #2."
 }
 
 setup_direct_wg_server1_ru() {

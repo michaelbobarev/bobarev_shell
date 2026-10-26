@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.36 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
+# Версия: 3.8.37 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1576,7 +1576,7 @@ configure_udp2raw_service() {
 
     # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
     # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a --fix-gro --sock-buf 10240"
+    local extra_flags="-a --fix-gro --sock-buf 67108864"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]

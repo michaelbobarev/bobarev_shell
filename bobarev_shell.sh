@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.40 (Professional Stealth & Audit Suite)
+# Версия: 3.8.41 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1935,24 +1935,16 @@ except Exception:
         return 1
     fi
 
-    local obfs_choice_ru=""
-    local def_obfs_item="1"
-    [ "$obfs_mode" = "faketcp" ] && def_obfs_item="2"
-    [ "$obfs_mode" = "none" ] && def_obfs_item="3"
-
-    if smart_menu "Режим транспорта WireGuard (Синхронизация с Сервером 2)" "\nИз токена Сервера 2 определен режим: ${obfs_mode}\nПодтвердите его или выберите нужный (должен совпадать с Сервером 2):" 16 $WT_WIDTH 3 "obfs_choice_ru" \
-    "1" "🛡️ UDP-XOR Маскировка (Обходит DPI без потери скорости)" \
-    "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
-    "3" "⚡ Чистый WireGuard без маскировки (Без udp2raw)"; then
-        case "$obfs_choice_ru" in
-            1) obfs_mode="udp" ;;
-            2) obfs_mode="faketcp" ;;
-            3) obfs_mode="none" ;;
-        esac
-    else
-        return 0
-    fi
-
+    # Режим маскировки берется строго из токена Сервера 2: у обоих концов моста он обязан совпадать,
+    # иначе рукопожатие WireGuard никогда не состоится.
+    case "$obfs_mode" in
+        udp|faketcp|none) ;;
+        *) obfs_mode="udp" ;;
+    esac
+    local obfs_human="UDP-XOR"
+    [ "$obfs_mode" = "faketcp" ] && obfs_human="FakeTCP"
+    [ "$obfs_mode" = "none" ] && obfs_human="Чистый WireGuard (без udp2raw)"
+    echo -e "${C_BLUE}ℹ️ Режим маскировки взят из токена Сервера 2: ${obfs_human} (${obfs_mode}).${C_RESET}"
     local n_dom=""
     prompt_default "2/4. Введите ваш домен на этом РФ-сервере (A-запись DNS):" "${saved_dom:-ru.yourdomain.com}" n_dom
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi

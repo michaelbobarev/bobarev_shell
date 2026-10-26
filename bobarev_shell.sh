@@ -3260,7 +3260,7 @@ mod_ssh_key() {
 
     if [ -n "$pubkey" ]; then
         local mode_choice
-        if ! mode_choice=$(smart_menu "Параметры сохранения" "Выберите действие:" 12 $WT_WIDTH 2 \
+        if ! smart_menu "Параметры сохранения" "Выберите действие:" 12 $WT_WIDTH 2 "mode_choice" \
         "1" "➕ Добавить ключ в существующий список" \
         "2" "🔄 Полностью перезаписать список ключей"); then
             echo -e "${C_YELLOW}↩️ Отмена сохранения.${C_RESET}"
@@ -3733,7 +3733,7 @@ mod_lock_root() {
     echo -e "${C_CYAN}🔐 === 9/21. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
     local root_choice
-    if ! root_choice=$(smart_menu "Системный доступ" "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
+    if ! smart_menu "Системный доступ" "Выберите желаемое действие:" 12 $WT_WIDTH 2 "root_choice" \
     "1" "🔐 Заблокировать" \
     "2" "🔓 Разблокировать"); then
         MODULE_CANCELED=true
@@ -3796,7 +3796,7 @@ mod_tailscale() {
         local nf_cur=$(get_tailscale_netfilter_mode)
 
         local ts_choice
-        if ! ts_choice=$(smart_menu "Настройка закрытой сети" "" 19 $WT_WIDTH 12 \
+        if ! smart_menu "Настройка закрытой сети" "" 19 $WT_WIDTH 12 "ts_choice" \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -3835,11 +3835,11 @@ mod_tailscale() {
                 ;;
             2)
                 local en_choice
-                if en_choice=$(smart_menu "Настройка шлюза" "Действие:" 12 $WT_WIDTH 4 \
+                if smart_menu "Настройка шлюза" "Действие:" 12 $WT_WIDTH 4 "en_choice" \
                 "1" "🌐 Назначить этот сервер шлюзом" \
                 "2" "❌ Отключить трансляцию шлюза" \
                 "3" "🔗 Подключиться к удаленному шлюзу" \
-                "4" "🔙 Отключиться от шлюза"); then
+                "4" "🔙 Отключиться от шлюза"; then
                     case "$en_choice" in
                         1) 
                             echo -e "${C_BLUE}⚙️ Настройка сервера в качестве сетевого шлюза...${C_RESET}"
@@ -3904,9 +3904,9 @@ mod_tailscale() {
                 ;;
             3)
                 local tr_choice
-                if tr_choice=$(smart_menu "Трансляция локальных сетей" "Действие:" 11 $WT_WIDTH 2 \
+                if smart_menu "Трансляция локальных сетей" "Действие:" 11 $WT_WIDTH 2 "tr_choice" \
                 "1" "🌐 Включить трансляцию (Задать подсеть)" \
-                "2" "❌ Отключить трансляцию"); then
+                "2" "❌ Отключить трансляцию"; then
                     case "$tr_choice" in
                         1)
                             local sub=$(get_interface_subnet "$DEFAULT_WAN_IF")
@@ -3966,11 +3966,11 @@ mod_tailscale() {
                 ;;
             8)
                 local nf_choice
-                if nf_choice=$(smart_menu "Приоритет сетевых правил" "Действие:" 13 $WT_WIDTH 4 \
+                if smart_menu "Приоритет сетевых правил" "Действие:" 13 $WT_WIDTH 4 "nf_choice" \
                 "1" "🔒 Приоритет брандмауэра UFW (системный режим)" \
                 "2" "🔗 Приоритет Tailscale (встроенный авто-режим)" \
                 "3" "🔀 Выбрать интерфейсы для сквозного транзита" \
-                "4" "🧹 Очистить дубликаты NAT и перезагрузить UFW" 3>&1 1>&2 2>&3); then
+                "4" "🧹 Очистить дубликаты NAT и перезагрузить UFW"; then
                     case "$nf_choice" in
                         1) set_tailscale_netfilter_priority "off" ;;
                         2) set_tailscale_netfilter_priority "on" ;;

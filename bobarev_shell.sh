@@ -2929,22 +2929,39 @@ backup_file() {
     fi
 }
 
+
 check_system_resources() {
     echo -e "${C_CYAN}🔍 Проверка системных ресурсов...${C_RESET}"
     local free_disk=$(df / --output=avail | tail -1 | tr -d ' ')
     local free_mem=$(free -m 2>/dev/null | awk '/^Mem:/ {print $4}' || echo "0")
+    local all_ok=true
 
     if [ "$free_disk" -lt 1048576 ]; then
         echo -e "${C_RED}❌ Ошибка: Недостаточно места на диске (минимум 1ГБ требуется для сборки Caddy).${C_RESET}"
         return 1
     fi
     if [ "$free_mem" -lt 512 ]; then
-        echo -e "${C_YELLOW}⚠️ Внимание: Малый объем свободной ОЗУ ($free_mem МБ). Сборка может быть медленной или упасть.${C_RESET}"
+        echo -e "${C_YELLOW}⚠️ Внимание: Малый объем свободной ОЗУ ($free_mem МБ).${C_RESET}"
+        echo -e "${C_BLUE}ℹ️ Сборка может упасть. Попытка автоматически создать временный Swap-файл...${C_RESET}"
+
+        if prompt_yn "Создать временный Swap-файл (2 ГБ) для обеспечения стабильной сборки?" "true"; then
+            echo -e "${C_BLUE}⚙️ Создание Swap...${C_RESET}"
+            silent_run fallocate -l 2G /swapfile || silent_run dd if=/dev/zero of=/swapfile bs=1M count=2048
+            silent_run chmod 600 /swapfile
+            silent_run mkswap /swapfile
+            silent_run swapon /swapfile
+            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null 2>&1 || true
+            echo -e "${C_GREEN}✅ Swap-файл успешно активирован.${C_RESET}"
+        else
+            echo -e "${C_RED}⚠️ Сборка может завершиться ошибкой Out of Memory!${C_RESET}"
+            all_ok=false
+        fi
     fi
-    echo -e "${C_GREEN}✅ Ресурсы в норме.${C_RESET}"
+    if [ "$all_ok" = true ]; then
+        echo -e "${C_GREEN}✅ Ресурсы в норме.${C_RESET}"
+    fi
     return 0
 }
-
 pause_enter() {
     if [ "$MODULE_CANCELED" = true ]; then
         return 0

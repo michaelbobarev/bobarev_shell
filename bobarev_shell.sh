@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.50 (Robust Python Base64 Token & No-Wrap Fix)
+# Версия: 3.9.0 (Hysteria 2 Cascade Hardening & Review)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -4107,7 +4107,7 @@ mod_boot_diag() {
 install_naive_hysteria_warp_stack() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
-    echo -e "${C_BOLD}   🚀 КАСКАД 1: NAIVEPROXY + HYSTERIA 2 + CLOUDFLARE WARP         ${C_RESET}"
+    echo -e "${C_BOLD}   🚀 КАСКАД 2: NAIVEPROXY + HYSTERIA 2 + CLOUDFLARE WARP         ${C_RESET}"
     echo -e "${C_CYAN}=================================================================${C_RESET}\n"
     echo -e "Этот каскад объединяет три мощных компонента:"
     echo -e "  1. ${C_BOLD}NaiveProxy (Caddy 2)${C_RESET} — маскировка клиентского подключения в РФ под стандартный HTTPS сайт (порт 443)."
@@ -4118,7 +4118,7 @@ install_naive_hysteria_warp_stack() {
     while true; do
         MODULE_CANCELED=false
         local stack_choice=""
-        if ! stack_choice=$(whiptail --title "Каскад 1: NaiveProxy + Hysteria 2 + WARP" --menu "\nВыберите шаг настройки каскада:" 16 $WT_WIDTH 4 \
+        if ! stack_choice=$(whiptail --title "Каскад 2: NaiveProxy + Hysteria 2 + WARP" --menu "\nВыберите шаг настройки каскада:" 16 $WT_WIDTH 4 \
         "1" "🔒 Настроить РФ-сервер (NaiveProxy -> Hysteria 2 клиент)" \
         "2" "🌍 Настроить Зарубежный сервер (Hysteria 2 сервер -> WARP выход)" \
         "3" "👤 Управление пользователями NaiveProxy" \
@@ -4152,6 +4152,10 @@ setup_hysteria_warp_foreign_server() {
     prompt_default "Введите внешний порт для Hysteria 2 (UDP):" "36533" h_port
     [ "$MODULE_CANCELED" = true ] && return 0
     h_port="${h_port//[^0-9]/}"
+    if [ -z "$h_port" ] || [ "$h_port" -lt 1 ] || [ "$h_port" -gt 65535 ]; then
+        echo -e "${C_RED}❌ Некорректный UDP-порт Hysteria: укажите число от 1 до 65535.${C_RESET}"
+        return 1
+    fi
 
     local h_pass=""
     local rand_pass=$(openssl rand -hex 16 2>/dev/null || echo "bobarev2026hy2")
@@ -4160,12 +4164,23 @@ setup_hysteria_warp_foreign_server() {
 
     echo -e "${C_BLUE}⬇️ Установка бинарника Hysteria 2...${C_RESET}"
     silent_run systemctl stop hysteria-server.service
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ] && arch="arm64" || arch="amd64"
-    wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria || true
-    chmod +x /usr/local/bin/hysteria
+    local arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+    case "$arch" in
+        arm64|aarch64) arch="arm64" ;;
+        *) arch="amd64" ;;
+    esac
+    if ! wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria; then
+        echo -e "${C_RED}❌ Не удалось скачать Hysteria 2 для архитектуры ${arch}. Проверьте доступ к GitHub и повторите.${C_RESET}"
+        return 1
+    fi
+    chmod 0755 /usr/local/bin/hysteria
+    if ! /usr/local/bin/hysteria version >/dev/null 2>&1; then
+        echo -e "${C_RED}❌ Скачанный бинарник Hysteria 2 не запускается на этой системе.${C_RESET}"
+        return 1
+    fi
 
     mkdir -p /etc/hysteria
+    chmod 700 /etc/hysteria
     openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
         -keyout /etc/hysteria/server.key \
         -out /etc/hysteria/server.crt \
@@ -4224,7 +4239,10 @@ H_SVC
 
     local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || hostname -I | awk '{print $1}')
     local raw_token="${ext_ip}|${h_port}|${h_pass}"
-    local bridge_token=$(python3 -c 'import sys, base64; print(base64.b64decode.__globals__["__builtins__"]["__import__"]("base64").b64encode(sys.argv[1].encode("utf-8")).decode("utf-8"))' "$raw_token" 2>/dev/null || printf '%s' "$raw_token" | base64 | tr -d '\n\r ')
+    local bridge_token=""
+bridge_token=$(python3 -c 'import sys, base64; print(base64.b64encode(sys.argv[1].encode("utf-8")).decode("ascii"))' "$raw_token" 2>/dev/null) || true
+[ -z "$bridge_token" ] && bridge_token=$(printf '%s' "$raw_token" | base64 | tr -d '\n\r ')
+[ -z "$bridge_token" ] && { echo -e "${C_RED}❌ Не удалось создать токен подключения: требуется python3 или base64.${C_RESET}"; return 1; }
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_hy2_warp"
@@ -4279,12 +4297,23 @@ except Exception as e:
 
     echo -e "${C_BLUE}⬇️ Установка бинарника Hysteria 2...${C_RESET}"
     silent_run systemctl stop hysteria-client.service
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ] && arch="arm64" || arch="amd64"
-    wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria || true
-    chmod +x /usr/local/bin/hysteria
+    local arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+    case "$arch" in
+        arm64|aarch64) arch="arm64" ;;
+        *) arch="amd64" ;;
+    esac
+    if ! wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria; then
+        echo -e "${C_RED}❌ Не удалось скачать Hysteria 2 для архитектуры ${arch}. Проверьте доступ к GitHub и повторите.${C_RESET}"
+        return 1
+    fi
+    chmod 0755 /usr/local/bin/hysteria
+    if ! /usr/local/bin/hysteria version >/dev/null 2>&1; then
+        echo -e "${C_RED}❌ Скачанный бинарник Hysteria 2 не запускается на этой системе.${C_RESET}"
+        return 1
+    fi
 
     mkdir -p /etc/hysteria
+    chmod 700 /etc/hysteria
     cat << EOF > /etc/hysteria/client.yaml
 server: ${s2_ip}:${s2_port}
 auth: ${s2_pass}
@@ -4317,7 +4346,15 @@ HY2_C_SVC
 
     render_naive_caddyfile
     print_naive_shadowrocket_links
-    echo -e "${C_GREEN}✅ Каскад NaiveProxy -> Hysteria 2 -> WARP успешно настроен и запущен!${C_RESET}"
+
+    if systemctl is-active --quiet hysteria-client.service && systemctl is-active --quiet caddy.service; then
+        echo -e "${C_GREEN}✅ Каскад NaiveProxy -> Hysteria 2 -> WARP успешно настроен и запущен!${C_RESET}"
+    else
+        echo -e "${C_YELLOW}⚠️ Конфигурация создана, но одна из служб не активна.${C_RESET}"
+        echo -e "${C_BLUE}Проверка:${C_RESET} systemctl status hysteria-client.service caddy.service --no-pager"
+        echo -e "${C_BLUE}Логи Hysteria:${C_RESET} journalctl -u hysteria-client.service -n 50 --no-pager"
+        echo -e "${C_BLUE}Логи Caddy:${C_RESET} journalctl -u caddy.service -n 50 --no-pager"
+    fi
 }
 
 mod_server_audit() {

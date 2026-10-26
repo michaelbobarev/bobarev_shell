@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.33 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
+# Версия: 3.8.34 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -222,11 +222,18 @@ disable_ufw_strict_rpfilter() {
 }
 
 ensure_ufw_mangle_tcpmss() {
-    if [ -f /etc/ufw/before.rules ] && ! grep -q "TCPMSS" /etc/ufw/before.rules; then
-        sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
+    if [ -f /etc/ufw/before.rules ]; then
+        if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
+            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-F FORWARD\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
+        elif ! grep -q "^-F FORWARD" /etc/ufw/before.rules; then
+            sed -i '/^:FORWARD ACCEPT/a -F FORWARD' /etc/ufw/before.rules 2>/dev/null || true
+        fi
     fi
-    if [ -f /etc/ufw/before6.rules ] && ! grep -q "TCPMSS" /etc/ufw/before6.rules; then
-        sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before6.rules
+    if [ -f /etc/ufw/before6.rules ]; then
+        sed -i '/^\*mangle/,/^COMMIT/d' /etc/ufw/before6.rules 2>/dev/null || true
+    fi
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -t mangle -F FORWARD 2>/dev/null || true
     fi
 }
 
@@ -768,8 +775,20 @@ manage_naive_users_menu() {
     done
 }
 
+tune_fq_qdisc_interfaces() {
+    command -v tc &>/dev/null || return 0
+    local wan_if=$(get_wan_if)
+    for dev in $wan_if tailscale0; do
+        [ -z "$dev" ] && continue
+        if ip link show "$dev" >/dev/null 2>&1; then
+            tc qdisc replace dev "$dev" root fq limit 30000 flow_limit 10000 2>/dev/null || true
+        fi
+    done
+}
+
 apply_naive_tcp_tuning_profile() {
     local profile="${1:-balanced}"
+    silent_run modprobe nf_conntrack
     mkdir -p /etc/sysctl.d
 
     if [ "$profile" = "aggressive" ]; then
@@ -793,10 +812,13 @@ net.core.optmem_max = 262144
 net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_mem = 65536 131072 262144
+net.ipv4.udp_mem = 65536 131072 262144
 net.ipv4.udp_rmem_min = 65536
 net.ipv4.udp_wmem_min = 65536
 net.ipv4.tcp_rmem = 4096 131072 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
+net.netfilter.nf_conntrack_max = 131072
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
@@ -821,10 +843,13 @@ net.core.optmem_max = 262144
 net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_mem = 65536 131072 262144
+net.ipv4.udp_mem = 65536 131072 262144
 net.ipv4.udp_rmem_min = 65536
 net.ipv4.udp_wmem_min = 65536
-net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_rmem = 4096 131072 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
+net.netfilter.nf_conntrack_max = 131072
 net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
 net.core.default_qdisc = fq
@@ -833,6 +858,8 @@ TUNE_EOF
     fi
 
     sysctl -p /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
+    sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null 2>&1 || true
+    tune_fq_qdisc_interfaces
     ip tcp_metrics flush all >/dev/null 2>&1 || true
 
     if systemctl is-active --quiet caddy.service 2>/dev/null; then
@@ -898,7 +925,11 @@ else
     sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
 fi
 
+sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null 2>&1 || true
 WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+if [ -n "$WAN_IF" ] && command -v tc &>/dev/null; then
+    tc qdisc replace dev "$WAN_IF" root fq limit 30000 flow_limit 10000 2>/dev/null || true
+fi
 PUB_IP="${SERVER_PUB_IP:-}"
 if [ -z "$PUB_IP" ] && [ -n "$WAN_IF" ]; then
     PUB_IP=$(ip -4 -o addr show dev "$WAN_IF" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
@@ -1092,7 +1123,7 @@ ensure_warp_installed_and_configured() {
             cp /root/wgcf-profile.conf /etc/wireguard/warp.conf
         )
         need_patch=true
-    elif ! grep -q "10.200.200.0/30" /etc/wireguard/warp.conf 2>/dev/null; then
+    elif ! grep -q "10.200.200.0/24" /etc/wireguard/warp.conf 2>/dev/null; then
         need_patch=true
     fi
 
@@ -1113,8 +1144,8 @@ MTU = 1280
 Table = 51820
 PostUp = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
 PostUp = ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 || true
-PostUp = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
-PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true
+PostUp = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
+PostUp = ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 || true
 PostUp = ip link set dev warp mtu 1280 txqueuelen 10000 || true
 PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
 PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT
@@ -1123,7 +1154,7 @@ PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || ipta
 PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
 PostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
-PostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
+PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
@@ -1328,7 +1359,26 @@ ensure_udp2raw_installed() {
     return 0
 }
 
+clean_udp2raw_iptables() {
+    local rline=""
+    while read -r rline; do
+        [ -z "$rline" ] && continue
+        eval "iptables ${rline/-A /-D }" 2>/dev/null || true
+    done < <(iptables -S INPUT 2>/dev/null | grep "udp2rawDwrW_" || true)
+
+    local cname=""
+    while read -r cname; do
+        [ -z "$cname" ] && continue
+        iptables -F "$cname" 2>/dev/null || true
+        iptables -X "$cname" 2>/dev/null || true
+    done < <(iptables -S 2>/dev/null | awk '/^-N udp2rawDwrW_/{print $2}' || true)
+}
+
 clean_duplicate_cascade_iptables() {
+    clean_udp2raw_iptables
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -t mangle -F FORWARD 2>/dev/null || true
+    fi
     local wan_dev=$(get_wan_if)
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
@@ -1371,6 +1421,10 @@ apply_foreign_exit_mode() {
     while ip rule del from 100.64.0.0/10 lookup 51820 2>/dev/null; do :; done
     while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
     while ip rule del from 10.200.200.0/30 lookup 51820 2>/dev/null; do :; done
+    while ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null; do :; done
+    while ip rule del from 10.200.200.0/24 lookup 51820 2>/dev/null; do :; done
+    while iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null; do :; done
+    tune_fq_qdisc_interfaces
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
@@ -1423,7 +1477,7 @@ apply_foreign_exit_mode() {
         ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
         ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
-        ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
+        ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 
         iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
         iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
@@ -1504,12 +1558,15 @@ configure_udp2raw_service() {
     if [ "$obfs_mode" = "none" ]; then
         silent_run systemctl stop bobarev-udp2raw.service
         silent_run systemctl disable bobarev-udp2raw.service
+        clean_udp2raw_iptables
         rm -f "$UDP2RAW_SERVICE"
         systemctl daemon-reload
         return 0
     fi
 
     ensure_udp2raw_installed || return 1
+    silent_run systemctl stop bobarev-udp2raw.service
+    clean_udp2raw_iptables
 
     local mode_flag="-s"
     if [ "$role" = "client" ]; then
@@ -1601,16 +1658,18 @@ setup_direct_wg_server2_foreign() {
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service
     silent_run wg-quick down wg-cascade
     ip link del dev wg-cascade 2>/dev/null || true
-    while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
+    while ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null; do :; done
     clean_duplicate_cascade_iptables
     disable_ufw_strict_rpfilter
 
     mkdir -p /etc/wireguard
     local s2_priv=$(wg genkey)
     local s2_pub=$(echo "$s2_priv" | wg pubkey)
-    local s1_priv=$(wg genkey)
-    local s1_pub=$(echo "$s1_priv" | wg pubkey)
-    local psk=$(wg genpsk)
+
+    # Генерируем 3 независимых слота (пира) для одновременного подключения до 3 российских серверов без конфликта ключей и IP!
+    local s1_priv_1=$(wg genkey); local s1_pub_1=$(echo "$s1_priv_1" | wg pubkey); local psk_1=$(wg genpsk)
+    local s1_priv_2=$(wg genkey); local s1_pub_2=$(echo "$s1_priv_2" | wg pubkey); local psk_2=$(wg genpsk)
+    local s1_priv_3=$(wg genkey); local s1_pub_3=$(echo "$s1_priv_3" | wg pubkey); local psk_3=$(wg genpsk)
     local obfs_key=$(openssl rand -hex 8 2>/dev/null || echo "bobarev2026key")
 
     local wg_listen_port="$ext_port"
@@ -1623,13 +1682,13 @@ setup_direct_wg_server2_foreign() {
 
     local warp_rule_postup=""
     if [ "$exit_mode" = "warp" ]; then
-        warp_rule_postup="PostUp = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
-PostUp = ip rule add from 10.200.200.0/30 lookup 51820 priority 6001 || true"
+        warp_rule_postup="PostUp = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
+PostUp = ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 || true"
     fi
 
     cat << EOF > /etc/wireguard/wg-cascade.conf
 [Interface]
-Address = 10.200.200.1/30
+Address = 10.200.200.1/24
 ListenPort = $wg_listen_port
 PrivateKey = $s2_priv
 MTU = 1280
@@ -1637,16 +1696,10 @@ Table = off
 PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
 PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 ${warp_rule_postup}
-PostUp = iptables -C FORWARD -i wg-cascade -o $wan_dev -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o $wan_dev -j ACCEPT || true
-PostUp = iptables -C FORWARD -i $wan_dev -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i $wan_dev -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT || true
-PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT || true
-PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT || true
-PostUp = iptables -t nat -C POSTROUTING -o $wan_dev -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o $wan_dev -j MASQUERADE || true
-PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE || true
 PostUp = iptables -t mangle -C FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
 PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
 PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
-PostDown = ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null || true
+PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o $wan_dev -j ACCEPT 2>/dev/null || true
@@ -1656,10 +1709,22 @@ PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RS
 PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true
 
 [Peer]
-# Server 1 (RU Entry)
-PublicKey = $s1_pub
-PresharedKey = $psk
+# RU Entry Server #1 (10.200.200.2)
+PublicKey = $s1_pub_1
+PresharedKey = $psk_1
 AllowedIPs = 10.200.200.2/32
+
+[Peer]
+# RU Entry Server #2 (10.200.200.3)
+PublicKey = $s1_pub_2
+PresharedKey = $psk_2
+AllowedIPs = 10.200.200.3/32
+
+[Peer]
+# RU Entry Server #3 (10.200.200.4)
+PublicKey = $s1_pub_3
+PresharedKey = $psk_3
+AllowedIPs = 10.200.200.4/32
 EOF
     chmod 600 /etc/wireguard/wg-cascade.conf
 
@@ -1674,14 +1739,6 @@ EOF
         systemctl start wg-quick@wg-cascade.service
     fi
 
-    apply_foreign_exit_mode "$exit_mode"
-
-    if [ "$obfs_mode" != "none" ]; then
-        configure_udp2raw_service "server" "127.0.0.1:${wg_listen_port}" "0.0.0.0:${ext_port}" "$obfs_mode" "$obfs_key"
-    else
-        configure_udp2raw_service "server" "" "" "none" ""
-    fi
-
     if command -v ufw &>/dev/null; then
         silent_run ufw allow "${ext_port}/udp" comment 'WG Direct Cascade UDP'
         silent_run ufw allow "${ext_port}/tcp" comment 'WG Direct Cascade FakeTCP'
@@ -1694,6 +1751,14 @@ EOF
         while iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
     fi
+
+    apply_foreign_exit_mode "$exit_mode"
+
+    if [ "$obfs_mode" != "none" ]; then
+        configure_udp2raw_service "server" "127.0.0.1:${wg_listen_port}" "0.0.0.0:${ext_port}" "$obfs_mode" "$obfs_key"
+    else
+        configure_udp2raw_service "server" "" "" "none" ""
+    fi
     disable_ufw_strict_rpfilter
 
     local ext_ip=""
@@ -1702,14 +1767,13 @@ EOF
         ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
     fi
 
-    local raw_str=""
-    if [ "$obfs_mode" = "none" ]; then
-        raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}"
-    else
-        raw_str="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv}|${psk}|${obfs_mode}|${obfs_key}"
-    fi
-    local bridge_token=""
-    bridge_token=$(printf '%s' "$raw_str" | base64 -w0 2>/dev/null || printf '%s' "$raw_str" | base64 | tr -d '\n\r ')
+    local raw_1="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv_1}|${psk_1}|${obfs_mode}|${obfs_key}|10.200.200.2"
+    local raw_2="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv_2}|${psk_2}|${obfs_mode}|${obfs_key}|10.200.200.3"
+    local raw_3="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv_3}|${psk_3}|${obfs_mode}|${obfs_key}|10.200.200.4"
+
+    local bridge_token_1=$(printf '%s' "$raw_1" | base64 -w0 2>/dev/null || printf '%s' "$raw_1" | base64 | tr -d '\n\r ')
+    local bridge_token_2=$(printf '%s' "$raw_2" | base64 -w0 2>/dev/null || printf '%s' "$raw_2" | base64 | tr -d '\n\r ')
+    local bridge_token_3=$(printf '%s' "$raw_3" | base64 -w0 2>/dev/null || printf '%s' "$raw_3" | base64 | tr -d '\n\r ')
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_wg_warp_exit"
@@ -1717,16 +1781,24 @@ FOREIGN_EXIT_MODE="$exit_mode"
 WG_CASCADE_PORT="$ext_port"
 WG_OBFS_MODE="$obfs_mode"
 WG_OBFS_KEY="$obfs_key"
-WG_BRIDGE_TOKEN="$bridge_token"
+WG_BRIDGE_TOKEN="$bridge_token_1"
+WG_BRIDGE_TOKEN_2="$bridge_token_2"
+WG_BRIDGE_TOKEN_3="$bridge_token_3"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
     echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1280, MSS 1200, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "\n${C_CYAN}🔑 === СКОПИРУЙТЕ ЭТОТ ТОКЕН СОЕДИНЕНИЯ ДЛЯ РОССИЙСКОГО СЕРВЕРА 1 ===${C_RESET}"
-    echo -e "${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}\n"
-    echo -e "${C_BLUE}📌 Как подключить Сервер 1 (РФ):${C_RESET}"
-    echo -e "  1. Запустите скрипт на Российском Сервере 1 -> Пункт 20 -> Пункт 2."
-    echo -e "  2. Вставьте скопированный выше токен в графическое окно — режим ($obfs_mode) и скоростной мост поднимутся автоматически!"
+    echo -e "\n${C_CYAN}🔑 === ИНДИВИДУАЛЬНЫЕ ТОКЕНЫ ДЛЯ ПОДКЛЮЧЕНИЯ РОССИЙСКИХ СЕРВЕРОВ ===${C_RESET}"
+    echo -e "${C_YELLOW}💡 Используйте свой отдельный токен для каждого РФ-сервера, чтобы они работали одновременно без конфликта IP!${C_RESET}"
+    echo -e "\n  • ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
+    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_1}${C_RESET}"
+    echo -e "\n  • ${C_BOLD}Токен #2 (для 2-го РФ-сервера, IP 10.200.200.3):${C_RESET}"
+    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_2}${C_RESET}"
+    echo -e "\n  • ${C_BOLD}Токен #3 (резервный для 3-го РФ-сервера, IP 10.200.200.4):${C_RESET}"
+    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_3}${C_RESET}\n"
+    echo -e "${C_BLUE}📌 Как подключить РФ-серверы:${C_RESET}"
+    echo -e "  1. На первом РФ-сервере (например, cloud-ru) -> Пункт 20 -> Пункт 2 -> вставьте Токен #1."
+    echo -e "  2. На втором РФ-сервере (например, landvps-ru) -> Пункт 20 -> Пункт 2 -> вставьте Токен #2."
 }
 
 setup_direct_wg_server1_ru() {
@@ -1781,8 +1853,8 @@ except Exception:
         decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\n\r' || echo "")
     fi
 
-    local s2_ip="" s2_port="" s2_pub="" s1_priv="" psk="" obfs_mode="none" obfs_key="bobarev2026key"
-    IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key <<< "$decoded"
+    local s2_ip="" s2_port="" s2_pub="" s1_priv="" psk="" obfs_mode="none" obfs_key="bobarev2026key" s1_tun_ip="10.200.200.2"
+    IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key s1_tun_ip <<< "$decoded"
     s2_ip=$(printf '%s' "$s2_ip" | tr -d '[:space:]')
     s2_port=$(printf '%s' "$s2_port" | tr -dc '0-9')
     s2_pub=$(printf '%s' "$s2_pub" | tr -d '[:space:]')
@@ -1790,6 +1862,8 @@ except Exception:
     psk=$(printf '%s' "$psk" | tr -d '[:space:]')
     obfs_mode=$(printf '%s' "${obfs_mode:-none}" | tr -d '[:space:]')
     obfs_key=$(printf '%s' "${obfs_key:-bobarev2026key}" | tr -d '[:space:]')
+    s1_tun_ip=$(printf '%s' "${s1_tun_ip:-10.200.200.2}" | tr -d '[:space:]')
+    [ -z "$s1_tun_ip" ] && s1_tun_ip="10.200.200.2"
 
     if [ -z "${s2_ip:-}" ] || [ -z "${s2_port:-}" ] || [ -z "${s2_pub:-}" ] || [ -z "${s1_priv:-}" ] || [ -z "${psk:-}" ]; then
         echo -e "${C_RED}❌ Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
@@ -1886,7 +1960,7 @@ except Exception:
     mkdir -p /etc/wireguard
     cat << EOF > /etc/wireguard/wg-cascade.conf
 [Interface]
-Address = 10.200.200.2/30
+Address = ${s1_tun_ip}/24
 PrivateKey = $s1_priv
 MTU = 1280
 Table = 51888
@@ -2037,8 +2111,19 @@ mod_direct_wg_cascade() {
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${WG_BRIDGE_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN}🔑 Токен соединения Зарубежного Сервера 2 (Режим обфускации: ${WG_OBFS_MODE:-udp}):${C_RESET}\n"
-                        echo -e "${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN}${C_RESET}\n"
+                        echo -e "${C_CYAN}🔑 Токены соединения Зарубежного Сервера 2 (Режим обфускации: ${WG_OBFS_MODE:-udp}):${C_RESET}"
+                        echo -e "${C_YELLOW}💡 Используйте отдельный токен для каждого РФ-сервера:${C_RESET}"
+                        echo -e "\n  • ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
+                        echo -e "    ${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN}${C_RESET}"
+                        if [ -n "${WG_BRIDGE_TOKEN_2:-}" ]; then
+                            echo -e "\n  • ${C_BOLD}Токен #2 (для 2-го РФ-сервера, IP 10.200.200.3):${C_RESET}"
+                            echo -e "    ${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN_2}${C_RESET}"
+                        fi
+                        if [ -n "${WG_BRIDGE_TOKEN_3:-}" ]; then
+                            echo -e "\n  • ${C_BOLD}Токен #3 (резервный для 3-го РФ-сервера, IP 10.200.200.4):${C_RESET}"
+                            echo -e "    ${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN_3}${C_RESET}"
+                        fi
+                        echo ""
                     else
                         echo -e "${C_YELLOW}⚠️ На этом сервере еще не генерировался токен Сервера 2 (выполните Шаг 1).${C_RESET}"
                     fi
@@ -2060,7 +2145,7 @@ mod_direct_wg_cascade() {
                     while ip rule del priority 103 2>/dev/null; do :; done
                     while ip rule del priority 104 2>/dev/null; do :; done
                     while ip rule del priority 30000 2>/dev/null; do :; done
-                    while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
+                    while ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null; do :; done
                     clean_duplicate_cascade_iptables
                     rm -f /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
                     systemctl daemon-reload
@@ -2452,9 +2537,9 @@ ETHTOOL_SVC_EOF
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     
     if command -v ip6tables &>/dev/null; then
-        ip6tables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        ip6tables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        ip6tables -t mangle -F FORWARD 2>/dev/null || true
     fi
+    tune_fq_qdisc_interfaces
 
     echo -e "${C_GREEN}✅ Аппаратное ускорение (GRO с защитой от зависаний) и фиксация MTU (MSS Clamping) включены.${C_RESET}"
 }
@@ -4680,6 +4765,12 @@ mod_backup_manager() {
 
 # 21. Универсальный аудит сети, протоколов обхода ТСПУ и каскадных пар (network-audit v3.1)
 install_network_audit_tool() {
+    if ! command -v tcpdump &>/dev/null || ! command -v mtr &>/dev/null || ! command -v conntrack &>/dev/null; then
+        echo -e "${C_BLUE}📦 Доустановка диагностических утилит (tcpdump, mtr-tiny, conntrack) для глубокого перехвата пакетов...${C_RESET}"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -yq tcpdump mtr-tiny conntrack >/dev/null 2>&1 || true
+    fi
     cat << 'NET_AUDIT_EOF' > /usr/local/bin/bobarev-network-audit.sh
 #!/bin/bash
 # ==============================================================================
@@ -5328,7 +5419,7 @@ run_realtime_fail_safe_recorder() {
                 if [ -n "$LIVE_FILTER" ]; then
                     CLEAN_IP=$(echo "$LIVE_FILTER" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -n 1)
                     if [ -n "$CLEAN_IP" ]; then
-                        ss -tin state established | grep -A 1 "$CLEAN_IP" || echo "  (нет активных TCP-соединений с $CLEAN_IP в эту секунду)"
+                        ss -tin state established | grep -A 1 -E "${CLEAN_IP}|10\.200\.200\.|100\.|172\.16\.|:443 " | head -n 40 || echo "  (нет активных TCP-соединений каскада в эту секунду)"
                     else
                         ss -tin state established | head -n 30
                     fi
@@ -5699,7 +5790,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.33 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.34 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

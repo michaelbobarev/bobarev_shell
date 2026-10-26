@@ -3,7 +3,8 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.34 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
+# Версия: 3.8.35 (High-Performance Multi-Gigabit Architecture for NaiveProxy + 
+# WireGuard + udp2raw Cascade | Gold Master)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -804,12 +805,12 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
 net.core.rmem_default = 2097152
 net.core.wmem_default = 2097152
 net.core.optmem_max = 262144
-net.core.netdev_max_backlog = 30000
+net.core.netdev_max_backlog = 100000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 65536 131072 262144
@@ -818,7 +819,7 @@ net.ipv4.udp_rmem_min = 65536
 net.ipv4.udp_wmem_min = 65536
 net.ipv4.tcp_rmem = 4096 131072 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
-net.netfilter.nf_conntrack_max = 131072
+net.netfilter.nf_conntrack_max = 262144
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
@@ -835,12 +836,12 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
 net.core.rmem_default = 2097152
 net.core.wmem_default = 2097152
 net.core.optmem_max = 262144
-net.core.netdev_max_backlog = 30000
+net.core.netdev_max_backlog = 100000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 65536 131072 262144
@@ -849,7 +850,7 @@ net.ipv4.udp_rmem_min = 65536
 net.ipv4.udp_wmem_min = 65536
 net.ipv4.tcp_rmem = 4096 131072 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
-net.netfilter.nf_conntrack_max = 131072
+net.netfilter.nf_conntrack_max = 262144
 net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
 net.core.default_qdisc = fq
@@ -1576,7 +1577,7 @@ configure_udp2raw_service() {
 
     # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
     # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a --fix-gro --sock-buf 10240"
+    local extra_flags="-a --fix-gro --sock-buf 67108864"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]
@@ -3165,7 +3166,7 @@ net.core.wmem_max = 26214400
 net.core.rmem_default = 1048576
 net.core.wmem_default = 1048576
 net.core.netdev_max_backlog = 10000
-net.netfilter.nf_conntrack_max = 131072
+net.netfilter.nf_conntrack_max = 262144
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 net.ipv4.tcp_syncookies = 1

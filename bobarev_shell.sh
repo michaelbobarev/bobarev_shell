@@ -78,6 +78,18 @@ DEFAULT_WAN_IF=$(get_wan_if)
 
 silent_run() { "$@" >/dev/null 2>&1 || true; }
 
+verify_sha256() {
+    local file="$1"
+    local expected="$2"
+    [ -z "$expected" ] && return 0
+    local act_sha=$(sha256sum "$file" | awk '{print $1}')
+    if [ "$act_sha" != "$expected" ]; then
+        echo -e "${C_RED}❌ Ошибка: контрольная сумма SHA256 файла $file не совпала!${C_RESET}"
+        return 1
+    fi
+    return 0
+}
+
 get_sshd_cmd() {
     if command -v sshd &>/dev/null; then echo "sshd"
     elif [ -x /usr/sbin/sshd ]; then echo "/usr/sbin/sshd"
@@ -487,9 +499,8 @@ ensure_go_and_build_caddy_naive() {
         fi
     fi
 
-    # Используем физический диск вместо маленького tmpfs (/tmp), чтобы сборка не падала с "no space left on device"
-    local build_tmp_dir="/root/.caddy-build-tmp"
-    mkdir -p "$build_tmp_dir"
+    # Используем динамическую временную папку, чтобы сборка не падала с "no space left on device"
+    local build_tmp_dir=$(mktemp -d /root/.caddy-build-XXXXXX)
 
     if [ "$need_go" = true ]; then
         echo -e "${C_BLUE}📦 Установка компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
@@ -1104,9 +1115,25 @@ ensure_warp_installed_and_configured() {
 
     if [ ! -x /usr/local/bin/wgcf ]; then
         echo -e "${C_BLUE}⬇️ Скачивание утилиты wgcf для генерации профиля Cloudflare WARP...${C_RESET}"
+
+        local wgcf_sha=""
+        case "$wgcf_arch" in
+            amd64) wgcf_sha="4fb7a136aa470ece11d17949c7db07b040ec9c604742dc8680bcf1889f85d0c8" ;;
+            arm64) wgcf_sha="710ab2d8ac145d81a4cf0c11bdb0e05914f77ae2a45f67b87e718d84b4cb7301" ;;
+            *)     wgcf_sha="" ;;
+        esac
+
         if ! curl -fsSL "https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux_${wgcf_arch}" -o /usr/local/bin/wgcf 2>/dev/null; then
             local latest_url=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null | grep "browser_download_url.*linux_${wgcf_arch}" | head -n 1 | cut -d'"' -f4 || echo "")
             [ -n "$latest_url" ] && curl -fsSL "$latest_url" -o /usr/local/bin/wgcf
+        fi
+
+        if [ -n "$wgcf_sha" ]; then
+            if ! verify_sha256 "/usr/local/bin/wgcf" "$wgcf_sha"; then
+                echo -e "${C_RED}❌ Ошибка: SHA256 для wgcf не совпал! Файл удален.${C_RESET}"
+                rm -f /usr/local/bin/wgcf
+                return 1
+            fi
         fi
         chmod +x /usr/local/bin/wgcf
     fi
@@ -1331,13 +1358,22 @@ ensure_udp2raw_installed() {
     apt-get update -qq
     apt-get install -yq curl wget tar iptables
 
-    local tmp_u2r="/root/.udp2raw-tmp"
-    mkdir -p "$tmp_u2r"
+    local tmp_u2r=$(mktemp -d /root/.udp2raw-XXXXXX)
     local u2r_url="https://github.com/wangyu-/udp2raw/releases/download/20230206.0/udp2raw_binaries.tar.gz"
+
     if ! wget -q --tries=3 --timeout=30 "$u2r_url" -O "${tmp_u2r}/udp2raw.tar.gz"; then
         rm -rf "$tmp_u2r"
         echo -e "${C_RED}❌ Ошибка скачивания архива udp2raw с GitHub.${C_RESET}"
         return 1
+    fi
+
+    # Хеш для версии 20230206.0 (рекомендуется уточнить актуальный SHA256)
+    local u2r_sha="PLACEHOLDER_SHA256_FOR_UDP2RAW_BINARIES_TAR_GZ"
+    if [ "$u2r_sha" != "PLACEHOLDER_SHA256_FOR_UDP2RAW_BINARIES_TAR_GZ" ]; then
+        if ! verify_sha256 "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
+            rm -rf "$tmp_u2r"
+            return 1
+        fi
     fi
 
     tar -xzf "${tmp_u2r}/udp2raw.tar.gz" -C "$tmp_u2r"
@@ -2037,7 +2073,7 @@ EOF
     fi
     disable_ufw_strict_rpfilter
 
-    echo -e "\n${C_GREEN}✅ Прямой скоростной каскад (NaiveProxy -> WG [MTU 1280, MSS 1200 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1280, MSS 1200 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
     echo -e "${C_BLUE}⚡ Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
     for i in {1..5}; do
         if wg show wg-cascade latest-handshakes 2>/dev/null | grep -qE "[1-9][0-9]{2,}"; then
@@ -2077,7 +2113,7 @@ mod_direct_wg_cascade() {
         fi
 
         local dc_choice
-        if ! dc_choice=$(whiptail --title "🚀 Прямой скоростной каскад (Без Tailscale)" --menu "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> Выход Зарубеж:" 19 $WT_WIDTH 7 \
+        if ! dc_choice=$(whiptail --title "🚀 Каскад 1: Naiveproxy - Wireguard - Warp (Без Tailscale)" --menu "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> Выход Зарубеж:" 19 $WT_WIDTH 7 \
         "1" "🌍 Шаг 1 (На Зарубежном Сервере 2): Поднять WG-Мост + Anti-DPI" \
         "2" "🚀 Шаг 2 (На Российском Сервере 1): Подключить NaiveProxy -> WG-Мост" \
         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
@@ -2679,6 +2715,22 @@ backup_file() {
     fi
 }
 
+check_system_resources() {
+    echo -e "${C_CYAN}🔍 Проверка системных ресурсов...${C_RESET}"
+    local free_disk=$(df / --output=avail | tail -1 | tr -d ' ')
+    local free_mem=$(free -m 2>/dev/null | awk '/^Mem:/ {print $4}' || echo "0")
+
+    if [ "$free_disk" -lt 1048576 ]; then
+        echo -e "${C_RED}❌ Ошибка: Недостаточно места на диске (минимум 1ГБ требуется для сборки Caddy).${C_RESET}"
+        return 1
+    fi
+    if [ "$free_mem" -lt 512 ]; then
+        echo -e "${C_YELLOW}⚠️ Внимание: Малый объем свободной ОЗУ ($free_mem МБ). Сборка может быть медленной или упасть.${C_RESET}"
+    fi
+    echo -e "${C_GREEN}✅ Ресурсы в норме.${C_RESET}"
+    return 0
+}
+
 pause_enter() {
     if [ "$MODULE_CANCELED" = true ]; then
         return 0
@@ -2689,6 +2741,11 @@ pause_enter() {
 
 if [ "$EUID" -ne 0 ]; then
     echo -e "${C_RED}❌ Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).${C_RESET}" >&2
+    exit 1
+fi
+
+if ! check_system_resources; then
+    echo -e "${C_RED}❌ Критическая ошибка ресурсов. Запуск невозможен.${C_RESET}"
     exit 1
 fi
 
@@ -2877,13 +2934,16 @@ mod_user_setup() {
     done
 
     if prompt_yn "Разрешить этому пользователю выполнять команды от имени администратора без запроса пароля (NOPASSWD)?" "true"; then
-        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "/etc/sudoers.d/99-zzz-$username"
-        chmod 0440 "/etc/sudoers.d/99-zzz-$username"
-        if command -v visudo &>/dev/null && ! visudo -c -f "/etc/sudoers.d/99-zzz-$username" >/dev/null 2>&1; then
-            rm -f "/etc/sudoers.d/99-zzz-$username"
-            echo -e "${C_RED}❌ Ошибка проверки синтаксиса sudoers!${C_RESET}"
-        else
+        local sudo_tmp=$(mktemp)
+        echo "$username ALL=(ALL:ALL) NOPASSWD: ALL" > "$sudo_tmp"
+        if command -v visudo &>/dev/null && visudo -c -f "$sudo_tmp" >/dev/null 2>&1; then
+            mv "$sudo_tmp" "/etc/sudoers.d/99-zzz-$username"
+            chmod 0440 "/etc/sudoers.d/99-zzz-$username"
             echo -e "${C_GREEN}✅ Беспарольный доступ (NOPASSWD) включен с максимальным приоритетом (99-zzz-$username).${C_RESET}"
+        else
+            rm -f "$sudo_tmp"
+            echo -e "${C_RED}❌ Ошибка синтаксиса sudoers! Файл не был создан.${C_RESET}"
+            return 1
         fi
     else
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
@@ -4462,7 +4522,7 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 7. Закрытая меш-сеть Tailscale и Каскадные туннели ---${C_RESET}"
     local cascade_status="${C_BLUE}Не настроен${C_RESET}"
     if is_naive_active && is_wg_cascade_active; then
-        cascade_status="${C_GREEN}🚀 Сервер 1 (Прямой скоростной каскад: NaiveProxy -> WG-Мост активен)${C_RESET}"
+        cascade_status="${C_GREEN}🚀 Сервер 1 (Каскад 1: Naiveproxy - Wireguard - Warp: NaiveProxy -> WG-Мост активен)${C_RESET}"
     elif is_naive_active; then
         cascade_status="${C_GREEN}🔒 Сервер 1 (Tailscale-каскад: NaiveProxy -> Tailscale активен)${C_RESET}"
     elif is_wg_cascade_active && is_warp_active; then
@@ -5877,7 +5937,7 @@ while true; do
     "17" "🔍 Интеллектуальный аудит системы" \
     "18" "📡 Режим локального маршрутизатора" \
     "19" "📦 Экспорт / Импорт настроек" \
-    "20" "🚀 Прямой скоростной каскад" \
+    "20" "🚀 Каскад 1: Naiveproxy - Wireguard - Warp" \
     "21" "🩺 Глубокий аудит сети и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.45 (Stable Master + Hysteria2 NaiveProxy WARP Cascade)
+# Версия: 3.8.46 (Dual Cascade Menu: WG+udp2raw & Hysteria2)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6099,8 +6099,9 @@ while true; do
     "17" "🔍 Интеллектуальный аудит системы" \
     "18" "📡 Режим локального маршрутизатора" \
     "19" "📦 Экспорт / Импорт настроек" \
-    "20" "🚀 Прямой скоростной каскад" \
-    "21" "🩺 Глубокий аудит сети и каскадные пары" \
+    "20" "🚀 Каскад 1: NaiveProxy + WG + udp2raw + WARP" \
+    "21" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
+    "22" "🩺 Глубокий аудит сети и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then
         clear
@@ -6132,7 +6133,8 @@ while true; do
         18) mod_router_sbc; pause_enter ;;
         19) mod_backup_manager; pause_enter ;;
         20) mod_direct_wg_cascade ;;
-        21) mod_network_cascade_audit ;;
+        21) install_naive_hysteria_warp_stack ;;
+        22) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

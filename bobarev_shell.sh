@@ -1,226 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-
-# ==============================================================================
-# МОДУЛЬ 21: КАСКАД 1 (NAIVEPROXY + HYSTERIA 2 + CLOUDFLARE WARP)
-# ==============================================================================
-install_naive_hysteria_warp_stack() {
-    clear
-    echo -e "${C_CYAN}=================================================================${C_RESET}"
-    echo -e "${C_BOLD}   🚀 КАСКАД 1: NAIVEPROXY + HYSTERIA 2 + CLOUDFLARE WARP         ${C_RESET}"
-    echo -e "${C_CYAN}=================================================================${C_RESET}\n"
-    echo -e "Этот каскад объединяет три мощных компонента:"
-    echo -e "  1. ${C_BOLD}NaiveProxy (Caddy 2)${C_RESET} — маскировка клиентского подключения в РФ под стандартный HTTPS сайт (порт 443)."
-    echo -e "  2. ${C_BOLD}Hysteria 2 (QUIC)${C_RESET} — высокоскоростной защищенный туннель между РФ-сервером и зарубежным узлом с устойчивостью к шейпингу."
-    echo -e "  3. ${C_BOLD}Cloudflare WARP${C_RESET} — чистый или замаскированный выход в мировой интернет с IP-адресов Cloudflare."
-    echo ""
-
-    while true; do
-        MODULE_CANCELED=false
-        local stack_choice=""
-        if ! stack_choice=$(whiptail --title "Каскад 1: NaiveProxy + Hysteria 2 + WARP" --menu "\nВыберите шаг настройки каскада:" 16 $WT_WIDTH 4 \
-        "1" "🔒 Настроить РФ-сервер (NaiveProxy -> Hysteria 2 клиент)" \
-        "2" "🌍 Настроить Зарубежный сервер (Hysteria 2 сервер -> WARP выход)" \
-        "3" "👤 Управление пользователями NaiveProxy" \
-        "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$stack_choice" = "0" ]; then
-            return 0
-        fi
-
-        clear
-        case "$stack_choice" in
-            1)
-                setup_naive_hysteria_ru_server || true
-                pause_enter
-                ;;
-            2)
-                setup_hysteria_warp_foreign_server || true
-                pause_enter
-                ;;
-            3)
-                manage_naive_users_menu
-                ;;
-        esac
-    done
-}
-
-setup_hysteria_warp_foreign_server() {
-    echo -e "${C_CYAN}🌍 === НАСТРОЙКА ЗАРУБЕЖНОГО СЕРВЕРА (HYSTERIA 2 СЕРВЕР -> WARP) ===${C_RESET}"
-    ensure_warp_installed_and_configured || true
-    enable_routing_optimizations || true
-
-    local h_port="36533"
-    prompt_default "Введите внешний порт для Hysteria 2 (UDP):" "36533" h_port
-    [ "$MODULE_CANCELED" = true ] && return 0
-    h_port="${h_port//[^0-9]/}"
-
-    local h_pass=""
-    local rand_pass=$(openssl rand -hex 16 2>/dev/null || echo "bobarev2026hy2")
-    prompt_default "Введите общий пароль (authToken) для подключения с РФ-сервера:" "$rand_pass" h_pass
-    [ "$MODULE_CANCELED" = true ] && return 0
-
-    echo -e "${C_BLUE}⬇️ Установка бинарника Hysteria 2...${C_RESET}"
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ] && arch="arm64" || arch="amd64"
-    wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria || true
-    chmod +x /usr/local/bin/hysteria
-
-    mkdir -p /etc/hysteria
-    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-        -keyout /etc/hysteria/server.key \
-        -out /etc/hysteria/server.crt \
-        -subj "/CN=bing.com" >/dev/null 2>&1 || true
-
-    cat << EOF > /etc/hysteria/config.yaml
-listen: :${h_port}
-auth:
-  type: password
-  password: ${h_pass}
-tls:
-  cert: /etc/hysteria/server.crt
-  key: /etc/hysteria/server.key
-masquerade:
-  type: proxy
-  proxy:
-    url: https://bing.com
-    rewriteHost: true
-EOF
-
-    cat << 'H_SVC' > /etc/systemd/system/hysteria-server.service
-[Unit]
-Description=Bobarev Hysteria 2 Server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
-Restart=always
-RestartSec=5
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-H_SVC
-
-    systemctl daemon-reload
-    systemctl enable --now hysteria-server.service
-    systemctl restart hysteria-server.service
-
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-    local wan_dev=$(get_wan_if)
-    [ -z "$wan_dev" ] && wan_dev="ens3"
-
-    iptables -t nat -A POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
-    iptables -A FORWARD -i lo -o warp -j ACCEPT 2>/dev/null || true
-    iptables -A FORWARD -i warp -o lo -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${h_port}/udp" comment 'Hysteria 2 Bridge Port'
-        ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
-        silent_run ufw reload
-    fi
-
-    local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || hostname -I | awk '{print $1}')
-    local raw_token="${ext_ip}|${h_port}|${h_pass}"
-    local bridge_token=$(printf '%s' "$raw_token" | base64 -w0 2>/dev/null || printf '%s' "$raw_token" | base64 | tr -d '\n\r ')
-
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="foreign_hy2_warp"
-HY2_PORT="$h_port"
-HY2_PASS="$h_pass"
-HY2_TOKEN="$bridge_token"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    echo -e "${C_GREEN}✅ Зарубежный сервер настроен (Hysteria 2 -> WARP выход активен)!${C_RESET}"
-    echo -e "${C_CYAN}🔑 Токен подключения для Российского сервера 1:${C_RESET}"
-    echo -e "${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}\n"
-}
-
-setup_naive_hysteria_ru_server() {
-    echo -e "${C_CYAN}🔒 === НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА (NAIVEPROXY -> HYSTERIA 2) ===${C_RESET}"
-    ensure_go_and_build_caddy_naive || return 1
-
-    local token_in=""
-    prompt_clean "Вставьте Токен подключения, полученный с Зарубежного Сервера:" token_in
-    [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ] && return 0
-
-    local decoded=""
-    decoded=$(python3 -c '
-import sys, base64
-try:
-    raw = "".join(sys.argv[1].split())
-    pad = len(raw) % 4
-    if pad:
-        raw += "=" * (4 - pad)
-    print(base64.b64decode(raw.encode("utf-8")).decode("utf-8", errors="ignore").strip())
-except Exception:
-    print("")
-' "$token_in" 2>/dev/null || echo "")
-
-    [ -z "$decoded" ] && decoded=$(printf '%s' "$token_in" | base64 -d 2>/dev/null || echo "")
-    local s2_ip="" s2_port="" s2_pass=""
-    IFS="|" read -r s2_ip s2_port s2_pass <<< "$decoded"
-    [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ] && { echo -e "${C_RED}❌ Неверный токен!${C_RESET}"; return 1; }
-
-    local n_dom=""
-    prompt_default "Введите ваш домен (A-запись DNS на этот РФ-сервер):" "ru.yourdomain.com" n_dom
-    [ "$MODULE_CANCELED" = true ] && return 0
-
-    local n_email=""
-    prompt_default "Введите Email для SSL сертификата Let's Encrypt:" "admin@${n_dom}" n_email
-    [ "$MODULE_CANCELED" = true ] && return 0
-
-    if [ ! -s "$NAIVE_PASS_FILE" ]; then
-        add_or_update_naive_user "user1" "NaivePass2026"
-    fi
-
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ] && arch="arm64" || arch="amd64"
-    wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria || true
-    chmod +x /usr/local/bin/hysteria
-
-    mkdir -p /etc/hysteria
-    cat << EOF > /etc/hysteria/client.yaml
-server: ${s2_ip}:${s2_port}
-auth: ${s2_pass}
-tls:
-  insecure: true
-socks5:
-  listen: 127.0.0.1:1080
-EOF
-
-    cat << 'HY2_C_SVC' > /etc/systemd/system/hysteria-client.service
-[Unit]
-Description=Bobarev Hysteria 2 Client
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/hysteria client -c /etc/hysteria/client.yaml
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-HY2_C_SVC
-
-    systemctl daemon-reload
-    systemctl enable --now hysteria-client.service
-    systemctl restart hysteria-client.service
-
-    render_naive_caddyfile
-    print_naive_shadowrocket_links
-    echo -e "${C_GREEN}✅ Каскад NaiveProxy -> Hysteria 2 -> WARP успешно настроен и запущен!${C_RESET}"
-}
-
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.44 (Hysteria 2 Upstream Fix - Foreign IP Guaranteed)
+# Версия: 3.8.45 (Stable Master + Hysteria2 NaiveProxy WARP Cascade)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -791,20 +574,16 @@ render_naive_caddyfile() {
     local auth_lines=""
     while IFS=: read -r u h; do
         [ -z "$u" ] || [ -z "$h" ] && continue
-        auth_lines+="            ${u} ${h}"$'
-'
+        auth_lines+="            ${u} ${h}"$'\n'
     done < "$NAIVE_USERS_FILE"
 
     if [ -z "$auth_lines" ]; then
         local dummy_hash=$(printf '%s\n' "disabled_placeholder" | htpasswd -niBC 12 "__disabled__" | cut -d: -f2)
-        auth_lines="            __disabled__ ${dummy_hash}"$'
-'
+        auth_lines="            __disabled__ ${dummy_hash}"$'\n'
     fi
 
-    local hy_upstream=""
-    if [ -f /etc/hysteria/client.yaml ]; then
-        hy_upstream="            upstream socks5://127.0.0.1:1080"
-    fi
+    local hy_up=""
+    [ -f /etc/hysteria/client.yaml ] && hy_up="            upstream socks5://127.0.0.1:1080"
 
     cat << EOF > "$CADDYFILE"
 {
@@ -820,19 +599,19 @@ render_naive_caddyfile() {
     }
 }
 
-:443, \${dom} {
-    tls \${email}
+:443, ${dom} {
+    tls ${email}
 
     @naive_proxy method CONNECT
     route @naive_proxy {
         request_header Authorization "{http.request.header.Proxy-Authorization}"
         basic_auth bcrypt {
-\${auth_lines}        }
+${auth_lines}        }
         request_header -Authorization
         forward_proxy {
             hide_ip
             hide_via
-\${hy_upstream}
+${hy_up}
         }
     }
 
@@ -850,6 +629,42 @@ render_naive_caddyfile() {
 }
 EOF
     chmod 600 "$CADDYFILE"
+
+    cat << 'SVC_EOF' > "$CADDY_SERVICE"
+[Unit]
+Description=Bobarev Shell NaiveProxy (Caddy 2)
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+SVC_EOF
+
+    systemctl daemon-reload
+    systemctl enable caddy.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet caddy.service; then
+        systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service
+    else
+        systemctl restart caddy.service
+    fi
+}
 
 add_or_update_naive_user() {
     local u_name="$1"
@@ -4285,6 +4100,224 @@ mod_boot_diag() {
 }
 
 # 17. Полный аудит сервера (с проверкой ретранслятора DERP и обоих типов каскада)
+
+# ==============================================================================
+# МОДУЛЬ 21: КАСКАД 1 (NAIVEPROXY + HYSTERIA 2 + CLOUDFLARE WARP)
+# ==============================================================================
+install_naive_hysteria_warp_stack() {
+    clear
+    echo -e "${C_CYAN}=================================================================${C_RESET}"
+    echo -e "${C_BOLD}   🚀 КАСКАД 1: NAIVEPROXY + HYSTERIA 2 + CLOUDFLARE WARP         ${C_RESET}"
+    echo -e "${C_CYAN}=================================================================${C_RESET}\n"
+    echo -e "Этот каскад объединяет три мощных компонента:"
+    echo -e "  1. ${C_BOLD}NaiveProxy (Caddy 2)${C_RESET} — маскировка клиентского подключения в РФ под стандартный HTTPS сайт (порт 443)."
+    echo -e "  2. ${C_BOLD}Hysteria 2 (QUIC)${C_RESET} — высокоскоростной защищенный туннель между РФ-сервером и зарубежным узлом с устойчивостью к шейпингу."
+    echo -e "  3. ${C_BOLD}Cloudflare WARP${C_RESET} — чистый или замаскированный выход в мировой интернет с IP-адресов Cloudflare."
+    echo ""
+
+    while true; do
+        MODULE_CANCELED=false
+        local stack_choice=""
+        if ! stack_choice=$(whiptail --title "Каскад 1: NaiveProxy + Hysteria 2 + WARP" --menu "\nВыберите шаг настройки каскада:" 16 $WT_WIDTH 4 \
+        "1" "🔒 Настроить РФ-сервер (NaiveProxy -> Hysteria 2 клиент)" \
+        "2" "🌍 Настроить Зарубежный сервер (Hysteria 2 сервер -> WARP выход)" \
+        "3" "👤 Управление пользователями NaiveProxy" \
+        "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$stack_choice" = "0" ]; then
+            return 0
+        fi
+
+        clear
+        case "$stack_choice" in
+            1)
+                setup_naive_hysteria_ru_server || true
+                pause_enter
+                ;;
+            2)
+                setup_hysteria_warp_foreign_server || true
+                pause_enter
+                ;;
+            3)
+                manage_naive_users_menu
+                ;;
+        esac
+    done
+}
+
+setup_hysteria_warp_foreign_server() {
+    echo -e "${C_CYAN}🌍 === НАСТРОЙКА ЗАРУБЕЖНОГО СЕРВЕРА (HYSTERIA 2 СЕРВЕР -> WARP) ===${C_RESET}"
+    ensure_warp_installed_and_configured || true
+    enable_routing_optimizations || true
+
+    local h_port="36533"
+    prompt_default "Введите внешний порт для Hysteria 2 (UDP):" "36533" h_port
+    [ "$MODULE_CANCELED" = true ] && return 0
+    h_port="${h_port//[^0-9]/}"
+
+    local h_pass=""
+    local rand_pass=$(openssl rand -hex 16 2>/dev/null || echo "bobarev2026hy2")
+    prompt_default "Введите общий пароль (authToken) для подключения с РФ-сервера:" "$rand_pass" h_pass
+    [ "$MODULE_CANCELED" = true ] && return 0
+
+    echo -e "${C_BLUE}⬇️ Установка бинарника Hysteria 2...${C_RESET}"
+    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+    [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ] && arch="arm64" || arch="amd64"
+    wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria || true
+    chmod +x /usr/local/bin/hysteria
+
+    mkdir -p /etc/hysteria
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/hysteria/server.key \
+        -out /etc/hysteria/server.crt \
+        -subj "/CN=bing.com" >/dev/null 2>&1 || true
+
+    cat << EOF > /etc/hysteria/config.yaml
+listen: :\${h_port}
+auth:
+  type: password
+  password: \${h_pass}
+tls:
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key
+masquerade:
+  type: proxy
+  proxy:
+    url: https://bing.com
+    rewriteHost: true
+EOF
+
+    cat << 'H_SVC' > /etc/systemd/system/hysteria-server.service
+[Unit]
+Description=Bobarev Hysteria 2 Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+H_SVC
+
+    systemctl daemon-reload
+    systemctl enable --now hysteria-server.service
+    systemctl restart hysteria-server.service
+
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    local wan_dev=$(get_wan_if)
+    [ -z "$wan_dev" ] && wan_dev="ens3"
+
+    iptables -t nat -A POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
+    iptables -A FORWARD -i lo -o warp -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -i warp -o lo -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+
+    if command -v ufw &>/dev/null; then
+        silent_run ufw allow "\${h_port}/udp" comment 'Hysteria 2 Bridge Port'
+        ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
+        silent_run ufw reload
+    fi
+
+    local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || hostname -I | awk '{print $1}')
+    local raw_token="\${ext_ip}|\${h_port}|\${h_pass}"
+    local bridge_token=$(printf '%s' "\$raw_token" | base64 -w0 2>/dev/null || printf '%s' "\$raw_token" | base64 | tr -d '\n\r ')
+
+    cat << EOF > /etc/default/bobarev-cascade
+CASCADE_ROLE="foreign_hy2_warp"
+HY2_PORT="\${h_port}"
+HY2_PASS="\${h_pass}"
+HY2_TOKEN="\${bridge_token}"
+EOF
+    chmod 600 /etc/default/bobarev-cascade
+
+    echo -e "${C_GREEN}✅ Зарубежный сервер настроен (Hysteria 2 -> WARP выход активен)!${C_RESET}"
+    echo -e "${C_CYAN}🔑 Токен подключения для Российского сервера 1:${C_RESET}"
+    echo -e "${C_BOLD}${C_GREEN}\${bridge_token}${C_RESET}\n"
+}
+
+setup_naive_hysteria_ru_server() {
+    echo -e "${C_CYAN}🔒 === НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА (NAIVEPROXY -> HYSTERIA 2) ===${C_RESET}"
+    ensure_go_and_build_caddy_naive || return 1
+
+    local token_in=""
+    prompt_clean "Вставьте Токен подключения, полученный с Зарубежного Сервера:" token_in
+    [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ] && return 0
+
+    local decoded=""
+    decoded=$(python3 -c '
+import sys, base64
+try:
+    raw = "".join(sys.argv[1].split())
+    pad = len(raw) % 4
+    if pad:
+        raw += "=" * (4 - pad)
+    print(base64.b64decode(raw.encode("utf-8")).decode("utf-8", errors="ignore").strip())
+except Exception:
+    print("")
+' "$token_in" 2>/dev/null || echo "")
+
+    [ -z "$decoded" ] && decoded=$(printf '%s' "$token_in" | base64 -d 2>/dev/null || echo "")
+    local s2_ip="" s2_port="" s2_pass=""
+    IFS="|" read -r s2_ip s2_port s2_pass <<< "$decoded"
+    [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ] && { echo -e "${C_RED}❌ Неверный токен!${C_RESET}"; return 1; }
+
+    local n_dom=""
+    prompt_default "Введите ваш домен (A-запись DNS на этот РФ-сервер):" "ru.yourdomain.com" n_dom
+    [ "$MODULE_CANCELED" = true ] && return 0
+
+    local n_email=""
+    prompt_default "Введите Email для SSL сертификата Let's Encrypt:" "admin@\${n_dom}" n_email
+    [ "$MODULE_CANCELED" = true ] && return 0
+
+    if [ ! -s "$NAIVE_PASS_FILE" ]; then
+        add_or_update_naive_user "user1" "NaivePass2026"
+    fi
+
+    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+    [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ] && arch="arm64" || arch="amd64"
+    wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-\${arch}" -O /usr/local/bin/hysteria || true
+    chmod +x /usr/local/bin/hysteria
+
+    mkdir -p /etc/hysteria
+    cat << EOF > /etc/hysteria/client.yaml
+server: \${s2_ip}:\${s2_port}
+auth: \${s2_pass}
+tls:
+  insecure: true
+socks5:
+  listen: 127.0.0.1:1080
+EOF
+
+    cat << 'HY2_C_SVC' > /etc/systemd/system/hysteria-client.service
+[Unit]
+Description=Bobarev Hysteria 2 Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hysteria client -c /etc/hysteria/client.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+HY2_C_SVC
+
+    systemctl daemon-reload
+    systemctl enable --now hysteria-client.service
+    systemctl restart hysteria-client.service
+
+    render_naive_caddyfile
+    print_naive_shadowrocket_links
+    echo -e "${C_GREEN}✅ Каскад NaiveProxy -> Hysteria 2 -> WARP успешно настроен и запущен!${C_RESET}"
+}
+
+
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -6067,8 +6100,7 @@ while true; do
     "18" "📡 Режим локального маршрутизатора" \
     "19" "📦 Экспорт / Импорт настроек" \
     "20" "🚀 Прямой скоростной каскад" \
-    "21" "🚀 Каскад 1: NaiveProxy + Hysteria 2 + WARP" \
-    "22" "🩺 Глубокий аудит сети и каскадные пары" \
+    "21" "🩺 Глубокий аудит сети и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then
         clear
@@ -6100,8 +6132,7 @@ while true; do
         18) mod_router_sbc; pause_enter ;;
         19) mod_backup_manager; pause_enter ;;
         20) mod_direct_wg_cascade ;;
-        21) install_naive_hysteria_warp_stack ;;
-        22) mod_network_cascade_audit ;;
+        21) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

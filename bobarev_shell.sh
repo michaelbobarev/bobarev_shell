@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.35 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
+# Версия: 3.8.36 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'

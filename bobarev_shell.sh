@@ -2304,6 +2304,7 @@ manage_cascade_hysteria_menu() {
     done
 }
 
+mod_direct_wg_cascade() {
     while true; do
         MODULE_CANCELED=false
         local d_status="Не активен"

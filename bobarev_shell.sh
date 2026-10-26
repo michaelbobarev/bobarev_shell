@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.51 (Console Read Prompt for Hysteria2 Token & No-Wrap Fix)
+# Версия: 3.8.50 (Robust Python Base64 Token & No-Wrap Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -4244,10 +4244,8 @@ setup_naive_hysteria_ru_server() {
     ensure_go_and_build_caddy_naive || return 1
 
     local token_in=""
-    echo -e "${C_CYAN}Вставьте Токен подключения, полученный с Зарубежного Сервера (нажмите Enter после вставки):${C_RESET}"
-    read -r -p "Токен: " token_in < /dev/tty || true
-    token_in=$(echo "$token_in" | tr -d '\n\r ')
-    [ -z "$token_in" ] && return 0
+    prompt_clean "Вставьте Токен подключения, полученный с Зарубежного Сервера:" token_in
+    [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ] && return 0
 
     local decoded=""
     decoded=$(python3 -c '

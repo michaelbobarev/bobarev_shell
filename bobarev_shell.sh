@@ -3,8 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.35 (High-Performance Multi-Gigabit Architecture for NaiveProxy + 
-# WireGuard + udp2raw Cascade | Gold Master)
+# Версия: 3.8.35 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -805,12 +804,12 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
 net.core.rmem_default = 2097152
 net.core.wmem_default = 2097152
 net.core.optmem_max = 262144
-net.core.netdev_max_backlog = 100000
+net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 65536 131072 262144
@@ -836,12 +835,12 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
 net.core.rmem_default = 2097152
 net.core.wmem_default = 2097152
 net.core.optmem_max = 262144
-net.core.netdev_max_backlog = 100000
+net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 65536 131072 262144
@@ -1577,7 +1576,7 @@ configure_udp2raw_service() {
 
     # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
     # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a --fix-gro --sock-buf 67108864"
+    local extra_flags="-a --fix-gro --sock-buf 10240"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]
@@ -2039,10 +2038,14 @@ EOF
     disable_ufw_strict_rpfilter
 
     echo -e "\n${C_GREEN}✅ Прямой скоростной каскад (NaiveProxy -> WG [MTU 1280, MSS 1200 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
-    echo -e "${C_BLUE}⚡ Проверка рукопожатия и внешнего IP через замаскированный мост:${C_RESET}"
-    ping -c 1 -W 2 10.200.200.1 >/dev/null 2>&1 || true
-    sleep 1
-    local test_ip=$(curl -4 -s --interface wg-cascade --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
+    echo -e "${C_BLUE}⚡ Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
+    for i in {1..5}; do
+        if wg show wg-cascade latest-handshakes 2>/dev/null | grep -qE "[1-9][0-9]{2,}"; then
+            break
+        fi
+        sleep 1
+    done
+    local test_ip=$(curl -4 -s --interface wg-cascade --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
     if [ -z "$test_ip" ]; then
         test_ip=$(curl -4 -s --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Установка рукопожатия...")
     fi
@@ -3161,8 +3164,8 @@ kernel.sysrq = 0
 kernel.panic = 10
 kernel.panic_on_oops = 1
 net.core.bpf_jit_harden = 2
-net.core.rmem_max = 26214400
-net.core.wmem_max = 26214400
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
 net.core.rmem_default = 1048576
 net.core.wmem_default = 1048576
 net.core.netdev_max_backlog = 10000

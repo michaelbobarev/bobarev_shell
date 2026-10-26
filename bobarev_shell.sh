@@ -2932,28 +2932,6 @@ smart_menu() {
     shift 6
     local options=("$@")
 
-    # 1. Печать списка в консоль
-    echo -e "\n${C_CYAN}=== $title ===${C_RESET}"
-    echo -e "$msg\n"
-    for ((i=0; i<${#options[@]}; i+=2)); do
-        echo -e "${C_WHITE}${options[i]}.${C_RESET} ${options[i+1]}"
-    done
-    echo -e "\n${C_BLUE}Введите номер или нажмите Enter для визуального меню:${C_RESET}"
-
-    local fast_choice
-    if read -r fast_choice; then
-        if [[ -n "$fast_choice" ]]; then
-            for ((i=0; i<${#options[@]}; i+=2)); do
-                if [[ "${options[i]}" == "$fast_choice" ]]; then
-                    printf -v "$var_name" "%s" "$fast_choice"
-                    return 0
-                fi
-            done
-            echo -e "${C_RED}❌ Неверный ввод. Переходим в визуальное меню...${C_RESET}"
-        fi
-    fi
-
-    # 2. Fallback на whiptail
     local wt_choice
     if wt_choice=$(whiptail --title "$title" --menu "$msg" "$height" "$width" "$menu_h" "${options[@]}" 3>&1 1>&2 2>&3); then
         printf -v "$var_name" "%s" "$wt_choice"

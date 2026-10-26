@@ -722,7 +722,7 @@ delete_naive_user_interactive() {
     local list_h=$((count < 7 ? count : 7))
     local box_h=$((list_h + 8))
     local del_u=""
-    if ! del_u=$(whiptail --title "Удаление пользователя NaiveProxy" --menu "Выберите пользователя для удаления:" $box_h $WT_WIDTH $list_h "${menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$del_u" ]; then
+    if ! del_u=$(smart_menu "Удаление пользователя NaiveProxy" "Выберите пользователя для удаления:" $box_h $WT_WIDTH $list_h "${menu_items[@]}") || [ -z "$del_u" ]; then
         echo -e "${C_YELLOW}↩️ Удаление отменено.${C_RESET}"
         return 0
     fi
@@ -747,11 +747,11 @@ manage_naive_users_menu() {
         [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || echo 0)
 
         local u_choice
-        if ! u_choice=$(whiptail --title "Управление пользователями NaiveProxy" --menu "\nАктивных пользователей: $u_cnt\nВыберите действие:" 15 $WT_WIDTH 4 \
+        if ! u_choice=$(smart_menu "Управление пользователями NaiveProxy" "\nАктивных пользователей: $u_cnt\nВыберите действие:" 15 $WT_WIDTH 4 \
         "1" "➕ Добавить пользователя / Сменить пароль" \
         "2" "🗑️ Удалить пользователя (выбор из списка)" \
         "3" "📋 Показать ссылки всех пользователей" \
-        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$u_choice" = "0" ]; then
+        "0" "🔙 Вернуться назад") || [ "$u_choice" = "0" ]; then
             break
         fi
 
@@ -1209,9 +1209,9 @@ setup_cascade_server2_warp() {
     enable_routing_optimizations || true
 
     local exit_choice=""
-    if ! exit_choice=$(whiptail --title "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" --menu "\nКак выпускать трафик из Tailscale в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 $WT_WIDTH 2 \
+    if ! exit_choice=$(smart_menu "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" "\nКак выпускать трафик из Tailscale в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 $WT_WIDTH 2 \
     "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" "☁️ Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)" 3>&1 1>&2 2>&3); then
+    "2" "☁️ Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"); then
         return 0
     fi
 
@@ -1258,14 +1258,14 @@ manage_cascade_naive_ts_warp() {
         fi
 
         local c_choice
-        if ! c_choice=$(whiptail --title "Каскад: NaiveProxy + Tailscale + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 \
+        if ! c_choice=$(smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 \
         "1" "🔒 Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
         "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> WARP / Чистый IP" \
         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
         "4" "📋 Показать ссылки для Shadowrocket" \
         "5" "🔄 Переключить выход на Сервере 2: Чистый IP <-> Cloudflare WARP" \
         "6" "🛑 Остановить и удалить компоненты каскада" \
-        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
+        "0" "🔙 Вернуться назад") || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -1582,9 +1582,9 @@ toggle_foreign_warp_menu() {
     local def_item="1"
     [ "$cur_mode" = "warp" ] && def_item="2"
 
-    if ! m_choice=$(whiptail --title "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" --default-item "$def_item" --menu "\nТекущий режим выхода: $cur_human\n\nРаботает для обоих каскадов (и для Прямого WG-моста, и для Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 \
+    if ! m_choice=$(smart_menu "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" "\nТекущий режим выхода: $cur_human\n\nРаботает для обоих каскадов (и для Прямого WG-моста, и для Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 \
     "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" "☁️ Cloudflare WARP (Маскировка выходного IP под Cloudflare)" 3>&1 1>&2 2>&3); then
+    "2" "☁️ Cloudflare WARP (Маскировка выходного IP под Cloudflare)"); then
         return 0
     fi
 
@@ -1682,10 +1682,10 @@ setup_direct_wg_server2_foreign() {
     fi
 
     local obfs_choice=""
-    if ! obfs_choice=$(whiptail --title "2/3. Защита заголовков WireGuard от ТСПУ" --menu "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 \
+    if ! obfs_choice=$(smart_menu "2/3. Защита заголовков WireGuard от ТСПУ" "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 \
     "1" "🛡️ UDP-XOR Маскировка (Рекомендуется — обходит DPI без потери скорости)" \
     "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
-    "3" "⚡ Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)" 3>&1 1>&2 2>&3); then
+    "3" "⚡ Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"); then
         return 0
     fi
 
@@ -1697,9 +1697,9 @@ setup_direct_wg_server2_foreign() {
     esac
 
     local exit_choice=""
-    if ! exit_choice=$(whiptail --title "3/3. Выход в интернет на Зарубежном Сервере 2" --menu "\nКак выпускать трафик в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим в любой момент в Пункте 5 меню каскада):" 16 $WT_WIDTH 2 \
+    if ! exit_choice=$(smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2" "\nКак выпускать трафик в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим в любой момент в Пункте 5 меню каскада):" 16 $WT_WIDTH 2 \
     "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" "☁️ Через Cloudflare WARP (Скрывает IP сервера за IP Cloudflare)" 3>&1 1>&2 2>&3); then
+    "2" "☁️ Через Cloudflare WARP (Скрывает IP сервера за IP Cloudflare)"); then
         return 0
     fi
 
@@ -1932,10 +1932,10 @@ except Exception:
     [ "$obfs_mode" = "faketcp" ] && def_obfs_item="2"
     [ "$obfs_mode" = "none" ] && def_obfs_item="3"
 
-    if obfs_choice_ru=$(whiptail --title "Режим транспорта WireGuard (Синхронизация с Сервером 2)" --default-item "$def_obfs_item" --menu "\nИз токена Сервера 2 определен режим: ${obfs_mode}\nПодтвердите его или выберите нужный (должен совпадать с Сервером 2):" 16 $WT_WIDTH 3 \
+    if obfs_choice_ru=$(smart_menu "Режим транспорта WireGuard (Синхронизация с Сервером 2)" "\nИз токена Сервера 2 определен режим: ${obfs_mode}\nПодтвердите его или выберите нужный (должен совпадать с Сервером 2):" 16 $WT_WIDTH 3 \
     "1" "🛡️ UDP-XOR Маскировка (Обходит DPI без потери скорости)" \
     "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
-    "3" "⚡ Чистый WireGuard без маскировки (Без udp2raw)" 3>&1 1>&2 2>&3); then
+    "3" "⚡ Чистый WireGuard без маскировки (Без udp2raw)"); then
         case "$obfs_choice_ru" in
             1) obfs_mode="udp" ;;
             2) obfs_mode="faketcp" ;;
@@ -2285,12 +2285,12 @@ manage_cascade_hysteria_menu() {
         fi
 
         local c_choice
-        if ! c_choice=$(whiptail --title "🚀 Каскад 2: NaiveProxy + Hysteria + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 5 \
+        if ! c_choice=$(smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 5 \
         "1" "🌍 Сервер 2 (Выход Зарубеж): Hysteria -> WARP" \
         "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> Hysteria" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки для Shadowrocket" \
-        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
+        "0" "🔙 Вернуться назад") || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -2327,7 +2327,7 @@ mod_direct_wg_cascade() {
         fi
 
         local dc_choice
-        if ! dc_choice=$(whiptail --title "🚀 Каскад 1: Naiveproxy - Wireguard - Warp (Без Tailscale)" --menu "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> Выход Зарубеж:" 19 $WT_WIDTH 7 \
+        if ! dc_choice=$(smart_menu "🚀 Каскад 1: Naiveproxy - Wireguard - Warp (Без Tailscale)" "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> Выход Зарубеж:" 19 $WT_WIDTH 7 \
         "1" "🌍 Сервер 2 (Выход Зарубеж): WG-Мост + Anti-DPI" \
         "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> WG-Мост" \
         "3" "👤 Управление пользователями NaiveProxy" \
@@ -2335,7 +2335,7 @@ mod_direct_wg_cascade() {
         "5" "🔄 Переключить выход: IP <-> WARP" \
         "6" "🔑 Показать Токен соединения" \
         "7" "🛑 Остановить каскад и udp2raw" \
-        "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$dc_choice" = "0" ]; then
+        "0" "🔙 Вернуться в главное меню") || [ "$dc_choice" = "0" ]; then
             break
         fi
 
@@ -2508,12 +2508,12 @@ manage_custom_derp() {
         fi
 
         local d_choice
-        if ! d_choice=$(whiptail --title "Личный ретранслятор (DERP)" --menu "\nСтатус ретранслятора: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 \
+        if ! d_choice=$(smart_menu "Личный ретранслятор (DERP)" "\nСтатус ретранслятора: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 \
         "1" "🚀 Установить / Обновить узел DERP (Cloudflare + STUN)" \
         "2" "📋 Показать JSON-код (derpMap) для консоли" \
         "3" "🔑 Редактировать сертификаты Cloudflare (.crt / .key)" \
         "4" "🛑 Остановить и удалить службу DERP" \
-        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$d_choice" = "0" ]; then
+        "0" "🔙 Вернуться назад") || [ "$d_choice" = "0" ]; then
             break
         fi
 
@@ -2921,6 +2921,44 @@ prompt_clean() {
     fi
 }
 
+smart_menu() {
+    local title="$1"
+    local msg="$2"
+    local height="$3"
+    local width="$4"
+    local menu_h="$5"
+    shift 5
+    local options=("$@")
+
+    # 1. Печать списка в консоль для быстрого выбора
+    echo -e "\n${C_CYAN}=== $title ===${C_RESET}"
+    echo -e "$msg\n"
+    for ((i=0; i<${#options[@]}; i+=2)); do
+        echo -e "${C_WHITE}${options[i]}.${C_RESET} ${options[i+1]}"
+    done
+    echo -e "\n${C_BLUE}Введите номер или нажмите Enter для визуального меню:${C_RESET}"
+
+    local fast_choice
+    read -r fast_choice < /dev/tty
+
+    if [[ -n "$fast_choice" ]]; then
+        for ((i=0; i<${#options[@]}; i+=2)); do
+            if [[ "${options[i]}" == "$fast_choice" ]]; then
+                echo "$fast_choice"
+                return 0
+            fi
+        done
+        echo -e "${C_RED}❌ Неверный ввод. Переходим в визуальное меню...${C_RESET}"
+    fi
+
+    # 2. Fallback на whiptail
+    local wt_choice
+    if ! wt_choice=$(whiptail --title "$title" --menu "$msg" "$height" "$width" "$menu_h" "${options[@]}" 3>&1 1>&2 2>&3); then
+        return 1
+    fi
+    echo "$wt_choice"
+}
+
 backup_file() {
     local file="$1"
     if [ -f "$file" ] && [ ! -f "${file}.bak" ]; then
@@ -3219,9 +3257,9 @@ mod_ssh_key() {
 
     if [ -n "$pubkey" ]; then
         local mode_choice
-        if ! mode_choice=$(whiptail --title "Параметры сохранения" --menu "Выберите действие:" 12 $WT_WIDTH 2 \
-        "1" "Добавить ключ в существующий список" \
-        "2" "Полностью перезаписать список ключей" 3>&1 1>&2 2>&3); then
+        if ! mode_choice=$(smart_menu "Параметры сохранения" "Выберите действие:" 12 $WT_WIDTH 2 \
+        "1" "➕ Добавить ключ в существующий список" \
+        "2" "🔄 Полностью перезаписать список ключей"); then
             echo -e "${C_YELLOW}↩️ Отмена сохранения.${C_RESET}"
             MODULE_CANCELED=true
             return 0
@@ -3692,9 +3730,9 @@ mod_lock_root() {
     echo -e "${C_CYAN}🔐 === 9/21. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
     local root_choice
-    if ! root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
-    "1" "Заблокировать" \
-    "2" "Разблокировать" 3>&1 1>&2 2>&3); then
+    if ! root_choice=$(smart_menu "Системный доступ" "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
+    "1" "🔐 Заблокировать" \
+    "2" "🔓 Разблокировать"); then
         MODULE_CANCELED=true
         return 0
     fi
@@ -3755,7 +3793,7 @@ mod_tailscale() {
         local nf_cur=$(get_tailscale_netfilter_mode)
 
         local ts_choice
-        if ! ts_choice=$(whiptail --title "Настройка закрытой сети" --menu "" 19 $WT_WIDTH 12 \
+        if ! ts_choice=$(smart_menu "Настройка закрытой сети" "" 19 $WT_WIDTH 12 \
         "1" "🔑 Авторизация" \
         "2" "🌐 Настройка шлюза" \
         "3" "🔀 Трансляция локальных сетей" \
@@ -3767,7 +3805,7 @@ mod_tailscale() {
         "9" "📡 Личный ретранслятор (DERP)" \
         "10" "🔗 Каскад: NaiveProxy + Tailscale + WARP" \
         "11" "🔄 Полный сброс" \
-        "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3); then
+        "0" "🔙 Вернуться назад"); then
             break
         fi
 
@@ -3794,11 +3832,11 @@ mod_tailscale() {
                 ;;
             2)
                 local en_choice
-                if en_choice=$(whiptail --title "Настройка шлюза" --menu "Действие:" 12 $WT_WIDTH 4 \
-                "1" "Назначить этот сервер шлюзом" \
-                "2" "Отключить трансляцию шлюза" \
-                "3" "Подключиться к удаленному шлюзу" \
-                "4" "Отключиться от шлюза" 3>&1 1>&2 2>&3); then
+                if en_choice=$(smart_menu "Настройка шлюза" "Действие:" 12 $WT_WIDTH 4 \
+                "1" "🌐 Назначить этот сервер шлюзом" \
+                "2" "❌ Отключить трансляцию шлюза" \
+                "3" "🔗 Подключиться к удаленному шлюзу" \
+                "4" "🔙 Отключиться от шлюза"); then
                     case "$en_choice" in
                         1) 
                             echo -e "${C_BLUE}⚙️ Настройка сервера в качестве сетевого шлюза...${C_RESET}"
@@ -3863,9 +3901,9 @@ mod_tailscale() {
                 ;;
             3)
                 local tr_choice
-                if tr_choice=$(whiptail --title "Трансляция локальных сетей" --menu "Действие:" 11 $WT_WIDTH 2 \
-                "1" "Включить трансляцию (Задать подсеть)" \
-                "2" "Отключить трансляцию" 3>&1 1>&2 2>&3); then
+                if tr_choice=$(smart_menu "Трансляция локальных сетей" "Действие:" 11 $WT_WIDTH 2 \
+                "1" "🌐 Включить трансляцию (Задать подсеть)" \
+                "2" "❌ Отключить трансляцию"); then
                     case "$tr_choice" in
                         1)
                             local sub=$(get_interface_subnet "$DEFAULT_WAN_IF")
@@ -3925,7 +3963,7 @@ mod_tailscale() {
                 ;;
             8)
                 local nf_choice
-                if nf_choice=$(whiptail --title "Приоритет сетевых правил" --menu "Действие:" 13 $WT_WIDTH 4 \
+                if nf_choice=$(smart_menu "Приоритет сетевых правил" "Действие:" 13 $WT_WIDTH 4 \
                 "1" "🔒 Приоритет брандмауэра UFW (системный режим)" \
                 "2" "🔗 Приоритет Tailscale (встроенный авто-режим)" \
                 "3" "🔀 Выбрать интерфейсы для сквозного транзита" \
@@ -3978,11 +4016,11 @@ mod_logging_manager() {
     echo -e "${C_CYAN}📝 === 11/21. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
     local log_choice
-    if ! log_choice=$(whiptail --title "Управление логами" --menu "Выберите режим работы системных журналов:" 14 $WT_WIDTH 4 \
-    "1" "Безопасное ограничение (100 МБ / 1 месяц)" \
-    "2" "Указать свой лимит (Custom)" \
-    "3" "Полностью отключить логирование (Stealth)" \
-    "0" "Оставить без изменений" 3>&1 1>&2 2>&3); then
+    if ! log_choice=$(smart_menu "Управление логами" "Выберите режим работы системных журналов:" 14 $WT_WIDTH 4 \
+    "1" "🛡️ Безопасное ограничение (100 МБ / 1 месяц)" \
+    "2" "⚙️ Указать свой лимит (Custom)" \
+    "3" "🚫 Полностью отключить логирование (Stealth)" \
+    "0" "🔙 Оставить без изменений"); then
         MODULE_CANCELED=true
         return 0
     fi
@@ -4170,10 +4208,10 @@ UDEV_EOF
 # 13. Менеджер Swap
 mod_swap_manager() {
     local swap_choice
-    if ! swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 $WT_WIDTH 3 \
+    if ! swap_choice=$(smart_menu "Файл подкачки (Swap)" "Управление виртуальной памятью:" 12 $WT_WIDTH 3 \
     "1" "💾 Создать базовый объем (2 ГБ)" \
     "2" "⚙️ Указать собственный объем" \
-    "3" "❌ Полностью отключить файл подкачки" 3>&1 1>&2 2>&3); then
+    "3" "❌ Полностью отключить файл подкачки"); then
         MODULE_CANCELED=true
         return 0
     fi
@@ -4233,11 +4271,11 @@ mod_desktop_apps() {
     echo -e "${C_CYAN}💻 === 14/21. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
     local gov_choice
-    if gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
+    if gov_choice=$(smart_menu "Управление питанием процессора" "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
     "1" "⚡ Performance (Максимальный)" \
     "2" "🔄 Ondemand / Schedutil (Сбалансированный)" \
     "3" "🍃 Powersave (Эко-режим)" \
-    "0" "🔙 Без изменений" 3>&1 1>&2 2>&3) && [ "$gov_choice" != "0" ]; then
+    "0" "🔙 Без изменений") && [ "$gov_choice" != "0" ]; then
         local selected_gov="ondemand"
         local gov_name="Сбалансированный"
         local avail_govs=""
@@ -4972,7 +5010,7 @@ mod_router_sbc() {
     done
 
     local lan_if=""
-    if ! lan_if=$(whiptail --title "1/3. Внутренний LAN-интерфейс" --menu "Выберите сетевой порт для подключения роутера (например, Google Wi-Fi):" 14 $WT_WIDTH 5 "${lan_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$lan_if" ]; then
+    if ! lan_if=$(smart_menu "1/3. Внутренний LAN-интерфейс" "Выберите сетевой порт для подключения роутера (например, Google Wi-Fi):" 14 $WT_WIDTH 5 "${lan_menu_items[@]}") || [ -z "$lan_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
@@ -4987,7 +5025,7 @@ mod_router_sbc() {
     out_menu_items+=("CUSTOM" "📝 Ввести имя интерфейса вручную")
 
     local out_if=""
-    if ! out_if=$(whiptail --title "2/3. Выходной VPN-канал" --menu "Через какой интерфейс отправлять трафик клиентов из локальной сети ($lan_if)?" 16 $WT_WIDTH 6 "${out_menu_items[@]}" 3>&1 1>&2 2>&3) || [ -z "$out_if" ]; then
+    if ! out_if=$(smart_menu "2/3. Выходной VPN-канал" "Через какой интерфейс отправлять трафик клиентов из локальной сети ($lan_if)?" 16 $WT_WIDTH 6 "${out_menu_items[@]}") || [ -z "$out_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
@@ -5021,10 +5059,10 @@ mod_backup_manager() {
     [ -z "$target_home" ] && target_home="/root"
 
     local b_choice
-    if ! b_choice=$(whiptail --title "Экспорт и импорт настроек" --menu "Выберите действие:" 13 $WT_WIDTH 3 \
+    if ! b_choice=$(smart_menu "Экспорт и импорт настроек" "Выберите действие:" 13 $WT_WIDTH 3 \
     "1" "📤 Сохранить настройки в архив (Экспорт)" \
     "2" "📥 Восстановить настройки из архива (Импорт)" \
-    "0" "🔙 Отмена" 3>&1 1>&2 2>&3) || [ "$b_choice" = "0" ]; then
+    "0" "🔙 Отмена") || [ "$b_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0
     fi
@@ -5960,13 +5998,13 @@ mod_network_cascade_audit() {
         fi
 
         local na_choice=""
-        if ! na_choice=$(whiptail --title "🩺 23/23. Аудит системы 2 и каскадные пары (v3.1)" --menu "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 \
+        if ! na_choice=$(smart_menu "🩺 23/23. Аудит системы 2 и каскадные пары (v3.1)" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 \
         "1" "📸 Срез состояния системы" \
         "2" "🔗 Тест связи между серверами" \
         "3" "🔴 Мониторинг трафика Live" \
         "4" "🚀 Полный комплексный аудит" \
         "5" "💻 Запуск консольного меню" \
-        "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$na_choice" = "0" ]; then
+        "0" "🔙 Вернуться в главное меню") || [ "$na_choice" = "0" ]; then
             break
         fi
 
@@ -6146,8 +6184,8 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! choice=$(whiptail --title "🔧 ГЛАВНОЕ МЕНЮ" \
-    --menu "\n  💻 Системные данные:
+    if ! choice=$(smart_menu "🔧 ГЛАВНОЕ МЕНЮ" \
+    "\n  💻 Системные данные:
   • Хост: $(hostname) ($(get_system_type_short))
   • Часовой пояс: $tz
   • Статус UFW: $ufw_status
@@ -6177,7 +6215,7 @@ while true; do
     "21" "🔍 Аудит системы 1" \
     "22" "🩺 Аудит системы 2 и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
-    "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then
+    "0" "❌ Завершить работу") || [ "$choice" = "0" ]; then
         clear
         echo "Работа скрипта завершена."
         exit 0

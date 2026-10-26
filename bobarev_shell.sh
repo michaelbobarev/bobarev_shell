@@ -16,29 +16,32 @@ install_naive_hysteria_warp_stack() {
     echo -e "  3. ${C_BOLD}Cloudflare WARP${C_RESET} — чистый или замаскированный выход в мировой интернет с IP-адресов Cloudflare."
     echo ""
 
-    local stack_choice=""
-    if ! stack_choice=$(whiptail --title "Каскад 1: NaiveProxy + Hysteria 2 + WARP" --menu "\nВыберите шаг настройки каскада:" 16 $WT_WIDTH 4 \
-    "1" "🔒 Настроить РФ-сервер (NaiveProxy -> Hysteria 2 клиент)" \
-    "2" "🌍 Настроить Зарубежный сервер (Hysteria 2 сервер -> WARP выход)" \
-    "3" "👤 Управление пользователями NaiveProxy" \
-    "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$stack_choice" = "0" ]; then
-        return 0
-    fi
+    while true; do
+        MODULE_CANCELED=false
+        local stack_choice=""
+        if ! stack_choice=$(whiptail --title "Каскад 1: NaiveProxy + Hysteria 2 + WARP" --menu "\nВыберите шаг настройки каскада:" 16 $WT_WIDTH 4 \
+        "1" "🔒 Настроить РФ-сервер (NaiveProxy -> Hysteria 2 клиент)" \
+        "2" "🌍 Настроить Зарубежный сервер (Hysteria 2 сервер -> WARP выход)" \
+        "3" "👤 Управление пользователями NaiveProxy" \
+        "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$stack_choice" = "0" ]; then
+            return 0
+        fi
 
-    clear
-    case "$stack_choice" in
-        1)
-            setup_naive_hysteria_ru_server || true
-            pause_enter
-            ;;
-        2)
-            setup_hysteria_warp_foreign_server || true
-            pause_enter
-            ;;
-        3)
-            manage_naive_users_menu
-            ;;
-    esac
+        clear
+        case "$stack_choice" in
+            1)
+                setup_naive_hysteria_ru_server || true
+                pause_enter
+                ;;
+            2)
+                setup_hysteria_warp_foreign_server || true
+                pause_enter
+                ;;
+            3)
+                manage_naive_users_menu
+                ;;
+        esac
+    done
 }
 
 setup_hysteria_warp_foreign_server() {
@@ -217,7 +220,7 @@ HY2_C_SVC
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.40 (High-Performance Cascade: NaiveProxy + Hysteria 2 + WARP)
+# Версия: 3.8.41 (High-Performance Cascade: NaiveProxy + Hysteria 2 + WARP)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -822,6 +825,7 @@ ${auth_lines}        }
         forward_proxy {
             hide_ip
             hide_via
+            $( [ -f /etc/hysteria/client.yaml ] && echo "            upstream socks5://127.0.0.1:1080" )
         }
     }
 

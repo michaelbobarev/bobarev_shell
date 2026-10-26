@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.32 (Gold Master - High Performance + udp2raw Anti-DPI + No TCP Menu)
+# Версия: 3.8.33 (Gold Master - High Performance + udp2raw Anti-DPI - Audit)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -2618,7 +2618,7 @@ fi
 
 # 1. Часовой пояс и синхронизация времени
 mod_timezone() {
-    echo -e "${C_CYAN}🌐 === 1/20. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
+    echo -e "${C_CYAN}🌐 === 1/21. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Europe/Moscow")
     echo "Текущий часовой пояс: $current_tz"
     local tz=""
@@ -2632,7 +2632,7 @@ mod_timezone() {
 
 # 2. Имя хоста
 mod_hostname() {
-    echo -e "${C_CYAN}📌 === 2/20. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
+    echo -e "${C_CYAN}📌 === 2/21. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
     echo "Текущее имя хоста: $(hostname)"
     
     local default_brand_host="Server-VPS"
@@ -2667,7 +2667,7 @@ mod_hostname() {
 
 # 3. Обновление пакетов
 mod_apt_update() {
-    echo -e "${C_CYAN}📦 === 3/20. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
+    echo -e "${C_CYAN}📦 === 3/21. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
 
     if [ -f /etc/gai.conf ]; then
@@ -2726,7 +2726,7 @@ ZRAM_EOF
 
 # 4. Пользователь и Sudo (с гарантированным приоритетом 99-zzz- в /etc/sudoers.d)
 mod_user_setup() {
-    echo -e "${C_CYAN}👤 === 4/20. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
+    echo -e "${C_CYAN}👤 === 4/21. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
     local active_user=$(get_active_user)
     local username=""
     prompt_default "Имя администратора:" "$active_user" username
@@ -2804,7 +2804,7 @@ mod_user_setup() {
 
 # 5. SSH-ключи
 mod_ssh_key() {
-    echo -e "${C_CYAN}🔑 === 5/20. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN}🔑 === 5/21. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
     local active_user=$(get_active_user)
     local target_user=""
     prompt_default "Для какого пользователя привязать ключ?" "$active_user" target_user
@@ -2869,7 +2869,7 @@ mod_ssh_key() {
 
 # 6. Конфигурация SSH (с поддержкой полной Zero-Trust изоляции на tailscale0)
 mod_ssh_config() {
-    echo -e "${C_CYAN}🔒 === 6/20. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN}🔒 === 6/21. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
 
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
@@ -3042,7 +3042,7 @@ SSH_HARDENING_EOF
 
 # 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6 форвардингом)
 mod_hardening() {
-    echo -e "${C_CYAN}🔒 === 7/20. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
+    echo -e "${C_CYAN}🔒 === 7/21. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
     sed -i -E '/^\s*(net\.core\.(rmem|wmem)_(max|default)|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc)\s*=/d' /etc/sysctl.conf 2>/dev/null || true
     backup_file "/etc/sysctl.d/99-zzz-server-hardening.conf"
@@ -3126,7 +3126,7 @@ HARDENING_EOF
 
 # 8. Firewall UFW (сохраняет правила личного DERP, Каскада NaiveProxy/WARP/WG-Cascade и открывает 41641/udp при наличии Tailscale)
 mod_ufw() {
-    echo -e "${C_CYAN}🧱 === 8/20. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
+    echo -e "${C_CYAN}🧱 === 8/21. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     
     local active_ssh_port="22"
@@ -3309,7 +3309,7 @@ mod_lock_root() {
         return 0
     fi
 
-    echo -e "${C_CYAN}🔐 === 9/20. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
+    echo -e "${C_CYAN}🔐 === 9/21. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
     local root_choice
     if ! root_choice=$(whiptail --title "Системный доступ" --menu "Выберите желаемое действие:" 12 $WT_WIDTH 2 \
@@ -3595,7 +3595,7 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 
 # 11. Управление логированием (Интерактивный менеджер)
 mod_logging_manager() {
-    echo -e "${C_CYAN}📝 === 11/20. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
+    echo -e "${C_CYAN}📝 === 11/21. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
     local log_choice
     if ! log_choice=$(whiptail --title "Управление логами" --menu "Выберите режим работы системных журналов:" 14 $WT_WIDTH 4 \
@@ -3705,7 +3705,7 @@ CONF
 
 # 12. Оптимизация RAM / Flash (с префиксом 99-zzz-)
 mod_ram_flash_opt() {
-    echo -e "${C_CYAN}⚡ === 12/20. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
+    echo -e "${C_CYAN}⚡ === 12/21. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
 
     local target_swappiness=1
@@ -3845,7 +3845,7 @@ mod_swap_manager() {
 
 # 14. Системные утилиты и режим процессора
 mod_desktop_apps() {
-    echo -e "${C_CYAN}💻 === 14/20. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
+    echo -e "${C_CYAN}💻 === 14/21. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
     local gov_choice
     if gov_choice=$(whiptail --title "Управление питанием процессора" --menu "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 \
@@ -3939,7 +3939,7 @@ EOF
 
 # 15. Программный сброс HDMI
 mod_hdmi_reset() {
-    echo -e "${C_CYAN}📺 === 15/20. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
+    echo -e "${C_CYAN}📺 === 15/21. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
     cat << 'HDMI_EOF' > /usr/local/bin/reset-hdmi.sh
 #!/bin/bash
 HDMI_OUTPUT=$(xrandr 2>/dev/null | grep -E "^HDMI-[0-9A-Z-]+ connected" | awk '{print $1}' | head -n 1 || true)
@@ -3969,7 +3969,7 @@ HDMI_EOF
 
 # 16. Диагностика времени загрузки
 mod_boot_diag() {
-    echo -e "${C_CYAN}⏳ === 16/20. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
+    echo -e "${C_CYAN}⏳ === 16/21. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
         echo -e "${C_RED}❌ Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
@@ -4558,7 +4558,7 @@ mod_server_audit() {
 
 # 18. Универсальный режим локального маршрутизатора (с поддержкой SBC-клиента WireGuard/WARP)
 mod_router_sbc() {
-    echo -e "${C_CYAN}📡 === 18/20. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
+    echo -e "${C_CYAN}📡 === 18/21. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     local wan_if="$DEFAULT_WAN_IF"
     
@@ -4624,7 +4624,7 @@ mod_router_sbc() {
 
 # 19. Экспорт и импорт резервной копии конфигураций (включая NaiveProxy, WARP, WG-Cascade и сертификаты)
 mod_backup_manager() {
-    echo -e "${C_CYAN}📦 === 19/20. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
+    echo -e "${C_CYAN}📦 === 19/21. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
     local target_home=$(getent passwd "$target_user" | cut -d: -f6)
     [ -z "$target_home" ] && target_home="/root"
@@ -4678,6 +4678,983 @@ mod_backup_manager() {
     fi
 }
 
+# 21. Универсальный аудит сети, протоколов обхода ТСПУ и каскадных пар (network-audit v3.1)
+install_network_audit_tool() {
+    cat << 'NET_AUDIT_EOF' > /usr/local/bin/bobarev-network-audit.sh
+#!/bin/bash
+# ==============================================================================
+# УНИВЕРСАЛЬНЫЙ СКРИПТ АУДИТА СЕТИ, ПРОТОКОЛОВ ОБХОДА ТСПУ И КАСКАДНЫХ ПАР (v3.1)
+# ------------------------------------------------------------------------------
+# Поддерживает 4 режима работы (через интерактивное меню или флаги CLI):
+#   Режим 1: Автономный срез сервера и "жизни" уже работающего каскада (постфактум).
+#   Режим 2: Активное тестирование ПАРЫ серверов (PMTU, TCP MSS, MTR, порты, iperf3).
+#   Режим 3: МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ ("Черный ящик" / Fail-Safe Live Recorder)
+#            Записывает в реальном времени все новые/активные сессии, пакеты,
+#            дельту ретрансмитов и ошибок. Безотказно финализирует отчет как при
+#            нажатии Ctrl+C / Enter / 'q', так и при внезапном обрыве SSH-канала!
+#   Режим 4: Полный комбо-режим (Режим 1 + Режим 2).
+# ==============================================================================
+
+export LC_ALL=C
+
+HOST_NAME=$(hostname)
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+# Определение домашней директории реально залогиненного пользователя (даже при запуске через sudo)
+if [ -n "$SUDO_USER" ]; then
+    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    USER_HOME="$HOME"
+fi
+
+# Если домашняя папка найдена и доступна на запись — сохраняем туда, иначе в текущую директорию
+if [ -d "$USER_HOME" ] && [ -w "$USER_HOME" ]; then
+    OUT_DIR="$USER_HOME"
+else
+    OUT_DIR="$(pwd)"
+fi
+
+# Значения по умолчанию
+MODE="" # 1 = standalone/post-factum, 2 = pair test, 3 = real-time recorder, 4 = combo (1+2)
+TARGETS=()
+TCP_PORTS="22,80,443,8080,8443"
+UDP_PORTS="53,443,51820,1194"
+IPERF_PORT="5201"
+DO_PCAP=1
+LIVE_DURATION=15
+LIVE_FILTER=""
+MAX_RT_TIME=3600       # Страховочный лимит времени для Режима 3 (в секундах, по умолчанию 1 час)
+RT_SAMPLE_INTERVAL=5   # Интервал опроса сокетов/счетчиков в Режиме 3 (сек)
+
+usage() {
+    cat <<EOF
+Использование: sudo $0 [ОПЦИИ]
+
+Режимы работы (если не указаны, откроется интерактивное меню):
+  -m, --mode MODE           Режим работы:
+                              1 - Автономный срез сервера и "жизни соединения" (постфактум)
+                              2 - Активная проверка каскадной пары (до указанных IP)
+                              3 - Мониторинг в РЕАЛЬНОМ ВРЕМЕНИ (до нажатия Стоп или обрыва SSH)
+                              4 - Полный аудит (Режим 1 + Режим 2)
+
+Опции для Режима 1 и 3 (Срез / Реальное время):
+  -d, --duration SEC        Для Режима 1: длительность записи tcpdump (по умолчанию: $LIVE_DURATION сек)
+                            Для Режима 3: макс. страховочное время записи (по умолчанию: $MAX_RT_TIME сек)
+  -f, --filter "BPF"        Фильтр tcpdump/мониторинга (например, IP второго узла: "host 185.x.x.x")
+
+Опции для Режима 2 (Активная проверка пары):
+  -t, --targets "IP1 IP2"   Список целевых IP для проверки пары
+  -p, --tcp-ports PORTS     TCP-порты через запятую (по умолчанию: $TCP_PORTS)
+  -u, --udp-ports PORTS     UDP-порты через запятую (по умолчанию: $UDP_PORTS)
+  -i, --iperf-port PORT     Порт iperf3 (по умолчанию: $IPERF_PORT)
+
+Общие опции:
+  -o, --out-dir DIR         Директория сохранения отчета (по умолчанию: $OUT_DIR)
+  --no-pcap                 Отключить перехват пакетов tcpdump
+  -h, --help                Показать справку
+
+Примеры запуска:
+  1) Запуск с удобным интерактивным меню:
+     sudo $0
+  2) Включить запись в РЕАЛЬНОМ ВРЕМЕНИ (Режим 3) с фильтром по IP второго сервера:
+     sudo $0 -m 3 -f "host 185.10.20.30"
+  3) Снять данные постфактум на сервере (Режим 1, 20 сек):
+     sudo $0 -m 1 -d 20
+  4) Проверить каскадную пару до зарубежных серверов (Режим 2):
+     sudo $0 -m 2 -t "185.10.20.30 91.20.30.40"
+EOF
+    exit 0
+}
+
+# Разбор аргументов командной строки
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m|--mode)
+            MODE="$2"
+            shift 2
+            ;;
+        -d|--duration)
+            LIVE_DURATION="$2"
+            MAX_RT_TIME="$2"
+            shift 2
+            ;;
+        -f|--filter)
+            LIVE_FILTER="$2"
+            shift 2
+            ;;
+        -t|--targets)
+            for ip in $2; do TARGETS+=("$ip"); done
+            shift 2
+            ;;
+        -p|--tcp-ports)
+            TCP_PORTS="$2"
+            shift 2
+            ;;
+        -u|--udp-ports)
+            UDP_PORTS="$2"
+            shift 2
+            ;;
+        -i|--iperf-port)
+            IPERF_PORT="$2"
+            shift 2
+            ;;
+        -o|--out-dir)
+            OUT_DIR="$2"
+            shift 2
+            ;;
+        --no-pcap)
+            DO_PCAP=0
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            TARGETS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Интерактивное меню, если режим не задан флагом
+if [ -z "$MODE" ]; then
+    if [ -t 0 ]; then
+        echo "=========================================================================="
+        echo " УНИВЕРСАЛЬНЫЙ АУДИТ СЕТИ, ТУННЕЛЕЙ И КАСКАДНЫХ СОЕДИНЕНИЙ v3.1 ($HOST_NAME)"
+        echo "=========================================================================="
+        echo "Выберите режим работы скрипта:"
+        echo ""
+        echo "  [1] Автономный срез сервера и «жизни соединения» (Постфактум)"
+        echo "      -> Снимает текущую картину на сервере: все типы VPN/прокси/туннелей,"
+        echo "         живые TCP/UDP сессии (MSS, PMTU, RTT, CWND, ретрансмиты), conntrack"
+        echo "         и записывает срез пакетов за короткое фиксированное время ($LIVE_DURATION сек)."
+        echo ""
+        echo "  [2] Активная проверка каскадной «пары» серверов (Тест связки РФ <-> Зарубеж)"
+        echo "      -> Активно тестирует маршрут до указанных IP: ищет точный Path MTU и TCP MSS,"
+        echo "         гоняет MTR (ICMP/TCP/UDP), проверяет открытость портов, TLS и скорость iperf3."
+        echo ""
+        echo "  [3] МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ («Черный ящик» / Запись под нагрузкой)"
+        echo "      -> Включает живую запись пакетов, сокетов, колебаний RTT/CWND и потерь."
+        echo "         Вы пользуетесь каскадом сколько нужно. Скрипт БЕЗОТКАЗНО сохранит"
+        echo "         полный отчет и сводку: а) при нажатии СТОП (Enter / q / Ctrl+C),"
+        echo "         б) даже если ваш SSH-канал внезапно оборвется!"
+        echo ""
+        echo "  [4] Полный комбо-аудит (Выполнить Пункт 1 + Пункт 2 последовательно)"
+        echo ""
+        echo "  [0] Выход"
+        echo "--------------------------------------------------------------------------"
+        read -r -p "Ваш выбор [1/2/3/4/0] (по умолчанию 1): " MENU_CHOICE
+        MENU_CHOICE=${MENU_CHOICE:-1}
+
+        case "$MENU_CHOICE" in
+            1)
+                MODE=1
+                echo ""
+                read -r -p "Сколько секунд записывать срез IP-пакетов? [по умолчанию $LIVE_DURATION]: " INPUT_DUR
+                [ -n "$INPUT_DUR" ] && LIVE_DURATION="$INPUT_DUR"
+                read -r -p "Укажите IP второго узла каскада для фильтрации (или Enter, чтобы снимать ВЕСЬ трафик): " INPUT_FLT
+                if [ -n "$INPUT_FLT" ]; then
+                    if [[ "$INPUT_FLT" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        LIVE_FILTER="host $INPUT_FLT"
+                    else
+                        LIVE_FILTER="$INPUT_FLT"
+                    fi
+                fi
+                ;;
+            2)
+                MODE=2
+                if [ ${#TARGETS[@]} -eq 0 ]; then
+                    echo ""
+                    read -r -p "Введите IP целевого сервера(ов) через пробел: " INPUT_IPS
+                    for ip in $INPUT_IPS; do TARGETS+=("$ip"); done
+                fi
+                read -r -p "TCP порты для проверки [по умолчанию $TCP_PORTS]: " INPUT_TCP
+                [ -n "$INPUT_TCP" ] && TCP_PORTS="$INPUT_TCP"
+                read -r -p "UDP порты для проверки [по умолчанию $UDP_PORTS]: " INPUT_UDP
+                [ -n "$INPUT_UDP" ] && UDP_PORTS="$INPUT_UDP"
+                ;;
+            3)
+                MODE=3
+                echo ""
+                read -r -p "Укажите IP второго узла каскада/клиента для фильтра (или Enter, чтобы мониторить ВЕСЬ трафик кроме SSH): " INPUT_FLT
+                if [ -n "$INPUT_FLT" ]; then
+                    if [[ "$INPUT_FLT" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        LIVE_FILTER="host $INPUT_FLT"
+                    else
+                        LIVE_FILTER="$INPUT_FLT"
+                    fi
+                fi
+                read -r -p "Интервал снятия метрик сокетов (сек) [по умолчанию $RT_SAMPLE_INTERVAL]: " INPUT_INT
+                [ -n "$INPUT_INT" ] && RT_SAMPLE_INTERVAL="$INPUT_INT"
+                read -r -p "Максимальный страховочный таймер авто-остановки (сек) [по умолчанию $MAX_RT_TIME (1 час)]: " INPUT_MAX
+                [ -n "$INPUT_MAX" ] && MAX_RT_TIME="$INPUT_MAX"
+                ;;
+            4)
+                MODE=4
+                echo ""
+                read -r -p "Сколько секунд записывать срез IP-пакетов в Режиме 1? [по умолчанию $LIVE_DURATION]: " INPUT_DUR
+                [ -n "$INPUT_DUR" ] && LIVE_DURATION="$INPUT_DUR"
+                if [ ${#TARGETS[@]} -eq 0 ]; then
+                    read -r -p "Введите IP целевого сервера(ов) через пробел для Режима 2: " INPUT_IPS
+                    for ip in $INPUT_IPS; do TARGETS+=("$ip"); done
+                fi
+                ;;
+            0)
+                echo "Выход."
+                exit 0
+                ;;
+            *)
+                echo "[!] Неверный выбор, запускается Режим 1."
+                MODE=1
+                ;;
+        esac
+        echo "=========================================================================="
+    else
+        if [ ${#TARGETS[@]} -gt 0 ]; then
+            MODE=4
+        else
+            MODE=1
+        fi
+    fi
+fi
+
+mkdir -p "$OUT_DIR"
+
+case "$MODE" in
+    1) MODE_TAG="standalone-postfactum" ;;
+    2) MODE_TAG="pair-test" ;;
+    3) MODE_TAG="realtime-recorder" ;;
+    4) MODE_TAG="full-combo" ;;
+    *) MODE_TAG="audit" ;;
+esac
+
+OUTPUT_FILE="${OUT_DIR}/network-debug-${HOST_NAME}-${MODE_TAG}-${TIMESTAMP}.txt"
+
+# Функция безопасного вызова команд
+run_cmd() {
+    local title="$1"
+    shift
+    echo "=== $title ==="
+    if command -v "$1" >/dev/null 2>&1; then
+        "$@"
+    else
+        echo "[!] Утилита '$1' не установлена. Пропуск."
+    fi
+    echo ""
+}
+
+# ==============================================================================
+# ФУНКЦИЯ 1: БАЗОВЫЙ ЛОКАЛЬНЫЙ СРЕЗ СЕТИ (ОБЩИЙ ДЛЯ ВСЕХ РЕЖИМОВ)
+# ==============================================================================
+collect_base_system_info() {
+    echo "##################################################################"
+    echo "# БЛОК 1: ЛОКАЛЬНЫЙ СРЕЗ СЕТИ, СТЕКА TCP/IP И ПРАВИЛ ФАЙРВОЛА"
+    echo "##################################################################"
+    echo ""
+
+    echo "=== [1.0] Время работы сервера (uptime) и нагрузка ==="
+    uptime
+    echo ""
+
+    run_cmd "[1.1] Активные слушающие сокеты и порты (ss -tulpn)" ss -tulpn
+    run_cmd "[1.2] Сводка по сокетам и соединениям (ss -s)" ss -s
+    run_cmd "[1.3] Сетевые интерфейсы, IP, виртуальные туннели и их MTU (ip -d a)" ip -d a
+    run_cmd "[1.4] Статистика пакетов, ошибок, дропов и коллизий на интерфейсах (ip -s -s link)" ip -s -s link
+    run_cmd "[1.5] Основная таблица маршрутизации (ip r)" ip r
+    run_cmd "[1.6] Правила политики маршрутизации (ip rule show)" ip rule show
+    run_cmd "[1.7] Все таблицы маршрутизации, включая таблицы туннелей/fwmark (ip route show table all)" ip route show table all
+    run_cmd "[1.8] Кэш маршрутов и вычисленных PMTU ядра (ip -s route show cache)" ip -s route show cache
+
+    echo "=== [1.9] Ключевые параметры стека ядра (sysctl: BBR, MTU probing, буферы, conntrack) ==="
+    sysctl -a 2>/dev/null | grep -E "net\.ipv4\.(ip_forward|ip_no_pmtu_disc|tcp_mtu_probing|tcp_base_mss|tcp_congestion_control|tcp_available_congestion_control|tcp_ecn|tcp_fastopen|tcp_rmem|tcp_wmem|tcp_window_scaling|tcp_timestamps|tcp_sack|tcp_tw_reuse|tcp_fin_timeout|tcp_keepalive_time|tcp_max_syn_backlog|tcp_syncookies)|net\.core\.(default_qdisc|rmem_max|wmem_max|rmem_default|wmem_default|netdev_max_backlog|somaxconn)|net\.netfilter\.nf_conntrack_(max|count|tcp_timeout_established|udp_timeout|udp_timeout_stream)" | sort
+    echo ""
+
+    run_cmd "[1.10] Дисциплины очередей и шейпинг трафика (tc -s qdisc show)" tc -s qdisc show
+    run_cmd "[1.11] iptables (filter)" iptables -L -v -n --line-numbers
+    run_cmd "[1.12] iptables (nat)" iptables -t nat -L -v -n --line-numbers
+    run_cmd "[1.13] iptables (mangle - проверка правил TCPMSS clamping и маркировки fwmark)" iptables -t mangle -L -v -n --line-numbers
+    run_cmd "[1.14] iptables (raw)" iptables -t raw -L -v -n --line-numbers
+    run_cmd "[1.15] nftables ruleset" nft list ruleset
+}
+
+# ==============================================================================
+# ФУНКЦИЯ 1.B: ГЛУБОКАЯ ИНСПЕКЦИЯ ВСЕХ ТИПОВ ТУННЕЛЕЙ, VPN И ПРОКСИ КАСКАДА
+# ==============================================================================
+collect_all_tunnels_and_proxies() {
+    echo "=== [2.1] Полная ревизия всех протоколов туннелирования, VPN, прокси и сетевых интерфейсов каскада ==="
+
+    echo "--- [A] Виртуальные и туннельные интерфейсы ядра (tun, tap, wg, amnezia, gre, ipip, sit, vxlan, geneve, l2tp, ppp, vti, xfrm, tailscale, zt) ---"
+    ip -d -s link show | grep -B 1 -A 6 -E "tun|tap|wg|awg|gre|gretap|erspan|ipip|sit|vxlan|geneve|l2tp|ppp|vti|xfrm|tailscale|zt|nebula|warp|utun" || echo "Туннельных сетевых интерфейсов на уровне L2/L3 не обнаружено (возможно, используется L4/L7 проксирование без виртуального интерфейса)."
+    echo ""
+
+    echo "--- [B] WireGuard / AmneziaWG / BoringTun (интерфейсы, пиры, ключи, свежие хендшейки, трафик) ---"
+    if command -v wg >/dev/null 2>&1; then
+        WG_OUT=$(wg show all 2>/dev/null)
+        if [ -n "$WG_OUT" ]; then
+            echo "$WG_OUT"
+        else
+            echo "Активных интерфейсов WireGuard не найдено."
+        fi
+    else
+        echo "Утилита wg не установлена."
+    fi
+    if command -v awg >/dev/null 2>&1; then
+        echo "[AmneziaWG (awg show all)]:"
+        awg show all 2>/dev/null
+    fi
+    echo ""
+
+    echo "--- [C] Политики и состояния шифрования ядра XFRM / IPsec / StrongSwan / Libreswan (ip xfrm) ---"
+    echo "[XFRM Policy]:"
+    ip -s xfrm policy 2>/dev/null || true
+    echo "[XFRM State]:"
+    ip -s xfrm state 2>/dev/null || true
+    if command -v ipsec >/dev/null 2>&1; then
+        ipsec statusall 2>/dev/null || true
+    fi
+    if command -v swanctl >/dev/null 2>&1; then
+        swanctl --list-sas 2>/dev/null || true
+    fi
+    echo ""
+
+    echo "--- [D] L3/L2 туннели ядра (IPIP, GRE, SIT, VXLAN, L2TP) ---"
+    ip -s tunnel show 2>/dev/null || true
+    if command -v ip >/dev/null 2>&1; then
+        ip l2tp show tunnel 2>/dev/null || true
+        ip l2tp show session 2>/dev/null || true
+    fi
+    echo ""
+
+    echo "--- [E] Прокси-серверы и средства обхода ТСПУ (Xray, V2Ray, Sing-box, Hysteria2, Tuic, Trojan, Shadowsocks, OpenVPN, Cloak, ShadowTLS, Reality, Gost, Socat, HAProxy, Nginx, Caddy, Chisel, Frp, Rathole, Tor, SSH-туннели, MTProto) ---"
+    echo "[Активные процессы и их аргументы запуска]:"
+    ps -eo pid,user,pcpu,pmem,etime,args | grep -E "xray|v2ray|sing-box|hysteria|tuic|trojan|ss-server|ss-local|ss-redir|ss-tunnel|shadowsocks|v2ray-plugin|xray-plugin|obfs-server|obfs-local|ck-server|ck-client|cloak|shadow-tls|naive|brook|mieru|juicity|openvpn|ocserv|softether|wg-quick|boringtun|amnezia|gost|socat|haproxy|nginx|envoy|caddy|traefik|rathole|frps|frpc|chisel|wstunnel|stunnel|sslh|sniproxy|nebula|tailscaled|zerotier-one|cloudflared|warp-svc|tor|mtproto|mtg|telemt|3proxy|tinyproxy|squid|danted|microsocks|badvpn|udpgw|udp2raw|udpspeeder|kcptun|ipt2socks|tun2socks|redsocks|tpws|nfqws|zapret|byedpi|goodbyedpi|spoofdpi" | grep -v "grep -E" || echo "Ни одного известного процесса прокси/туннеля/DPI-обхода в списке процессов не найдено."
+    echo ""
+
+    echo "--- [F] Системные службы systemd, связанные с VPN / Прокси / Туннелями ---"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl list-units --type=service --state=running --no-pager 2>/dev/null | grep -iE "vpn|wg|wireguard|amnezia|xray|v2ray|sing-box|hysteria|tuic|trojan|shadowsocks|ss-|gost|socat|haproxy|nginx|caddy|envoy|frp|rathole|chisel|stunnel|sslh|cloak|tailscale|zerotier|nebula|warp|tor|3proxy|dante|zapret|docker|containerd" || echo "Соответствующих активных systemd-служб не найдено."
+    fi
+    echo ""
+
+    echo "--- [G] Запущенные Docker / Podman контейнеры ---"
+    if command -v docker >/dev/null 2>&1; then
+        docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "Docker демон недоступен или нет контейнеров."
+    elif command -v podman >/dev/null 2>&1; then
+        podman ps --format "table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || true
+    else
+        echo "Docker / Podman не установлены."
+    fi
+    echo ""
+
+    echo "--- [H] Активные SSH-туннели (Port Forwarding / ProxyJump / SOCKS -D / tun -w) ---"
+    ps -eo pid,user,etime,args | grep -E "ssh .*(-L|-R|-D|-W|-w|notty)" | grep -v "grep" || echo "Активных пробросов портов через SSH не обнаружено."
+    echo ""
+}
+
+# ==============================================================================
+# ФУНКЦИЯ 2: СНЯТИЕ ДАННЫХ О «ЖИЗНИ СОЕДИНЕНИЯ» ПОСТФАКТУМ (РЕЖИМ 1)
+# ==============================================================================
+collect_live_cascade_state() {
+    echo "##################################################################"
+    echo "# БЛОК 2: АНАЛИЗ «ЖИЗНИ СОЕДИНЕНИЯ» И РАБОТАЮЩЕГО КАСКАДА (ПОСТФАКТУМ)"
+    echo "##################################################################"
+    echo ""
+
+    collect_all_tunnels_and_proxies
+
+    echo "=== [2.2] Детальная анатомия ВСЕХ активных TCP-соединений (ss -tinpe) ==="
+    ss -tinpe state established
+    echo ""
+
+    echo "=== [2.3] Активные UDP-потоки и сокеты (ss -uapne) ==="
+    ss -uapne
+    echo ""
+
+    echo "=== [2.4] ТОП-30 IP-адресов по количеству открытых соединений с этим сервером ==="
+    ss -ntu state established | awk 'NR>1 {print $5}' | sed 's/:[^:]*$//' | sort | uniq -c | sort -nr | head -n 30
+    echo ""
+
+    echo "=== [2.5] Глобальные накопительные счетчики сетевого стека за время жизни сервера (nstat -az) ==="
+    if command -v nstat >/dev/null 2>&1; then
+        nstat -az | grep -E "Ip|Icmp|Tcp|Udp|TcpExt"
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -s
+    else
+        cat /proc/net/snmp
+        echo ""
+        cat /proc/net/netstat
+    fi
+    echo ""
+
+    echo "=== [2.6] Таблица отслеживания соединений Netfilter Conntrack ==="
+    if [ -f /proc/sys/net/netfilter/nf_conntrack_count ]; then
+        echo "Заполнено записей conntrack: $(cat /proc/sys/net/netfilter/nf_conntrack_count) из $(cat /proc/sys/net/netfilter/nf_conntrack_max)"
+    fi
+    if command -v conntrack >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
+        echo "--- Статистика conntrack (-S) ---"
+        conntrack -S 2>/dev/null
+        echo ""
+        echo "--- Выборка топ-50 активных потоков conntrack (-L) ---"
+        conntrack -L 2>/dev/null | grep -E "ESTABLISHED|ASSURED" | head -n 50
+    elif [ -f /proc/net/nf_conntrack ]; then
+        echo "--- Выборка топ-50 активных потоков из /proc/net/nf_conntrack ---"
+        grep -E "ESTABLISHED|ASSURED" /proc/net/nf_conntrack | head -n 50
+    else
+        echo "[!] Утилита conntrack и /proc/net/nf_conntrack недоступны."
+    fi
+    echo ""
+
+    if [ "$DO_PCAP" -eq 1 ] && command -v tcpdump >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
+        echo "=== [2.7] Снимок ЖИВОГО движения IP-пакетов на сервере за ${LIVE_DURATION} секунд (tcpdump) ==="
+        SSH_PORT=$( echo "$SSH_CLIENT" | awk '{print $3}' )
+        if [ -n "$LIVE_FILTER" ]; then
+            BPF_EXPR="$LIVE_FILTER"
+        elif [ -n "$SSH_PORT" ]; then
+            BPF_EXPR="not port $SSH_PORT"
+        else
+            BPF_EXPR=""
+        fi
+
+        LIVE_PCAP_LOG=$(mktemp /tmp/live_pcap_XXXXXX.log)
+        if [ -n "$BPF_EXPR" ]; then
+            timeout "$LIVE_DURATION" tcpdump -i any -nn -v -tt -c 500 "$BPF_EXPR" > "$LIVE_PCAP_LOG" 2>&1
+        else
+            timeout "$LIVE_DURATION" tcpdump -i any -nn -v -tt -c 500 > "$LIVE_PCAP_LOG" 2>&1
+        fi
+
+        cat "$LIVE_PCAP_LOG"
+        echo "------------------------------------------------------------------"
+        echo ""
+        analyze_pcap_log "$LIVE_PCAP_LOG" "2.8"
+        rm -f "$LIVE_PCAP_LOG"
+    else
+        echo "=== [2.7] Снимок живого движения IP-пакетов пропущен (требуется root и установленный tcpdump) ==="
+        echo ""
+    fi
+}
+
+analyze_pcap_log() {
+    local pcap_file="$1"
+    local sec_num="$2"
+    echo "=== [$sec_num] Сводная аналитика по перехваченным IP-пакетам ==="
+    echo "--- Распределение пакетов по интерфейсам и направлениям (In / Out) ---"
+    grep -E " In | Out " "$pcap_file" | awk '{print $2, $3}' | sort | uniq -c | sort -nr | head -n 25
+    echo ""
+    echo "--- Топ-25 самых крупных размеров пакетов в потоке ---"
+    grep -oE "length [0-9]+" "$pcap_file" | awk '{print $2}' | sort -nr | uniq -c | head -n 25
+    echo ""
+    echo "--- Обнаруженные согласования TCP MSS в рукопожатиях [SYN / SYN-ACK] ---"
+    grep -E "Flags \[S\]|Flags \[S\.\]" "$pcap_file" | grep -oE "IP [^:]+: .* options \[[^]]+\]" | head -n 40 || echo "Новых TCP SYN рукопожатий не зафиксировано."
+    echo ""
+    echo "--- Пакеты сброса/ошибок: TCP RST [R] и ICMP Unreachable / Fragmentation Needed ---"
+    grep -E "Flags \[R|ICMP .* unreachable|ICMP .* need to frag|mtu [0-9]+" "$pcap_file" | head -n 40 || echo "Пакетов TCP RST или ошибок фрагментации ICMP за время записи не обнаружено."
+    echo ""
+}
+
+# ==============================================================================
+# ФУНКЦИЯ 3: МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ С ЗАЩИТОЙ ОТ ОБРЫВА SSH (РЕЖИМ 3)
+# ==============================================================================
+run_realtime_fail_safe_recorder() {
+    RT_WORK_DIR=$(mktemp -d /tmp/net_rt_recorder_XXXXXX)
+    RT_PCAP_TEXT="${RT_WORK_DIR}/tcpdump_realtime.log"
+    RT_SAMPLES_LOG="${RT_WORK_DIR}/socket_samples.log"
+    RT_NSTAT_BEFORE="${RT_WORK_DIR}/nstat_before.log"
+    RT_NSTAT_AFTER="${RT_WORK_DIR}/nstat_after.log"
+    RT_LINKS_BEFORE="${RT_WORK_DIR}/links_before.log"
+    RT_LINKS_AFTER="${RT_WORK_DIR}/links_after.log"
+
+    FINALIZED=0
+    RT_START_EPOCH=$(date +%s)
+    RT_START_HUMAN=$(date)
+    STOP_REASON="User Stop"
+
+    SSH_PORT=$( echo "$SSH_CLIENT" | awk '{print $3}' )
+    SSH_CLIENT_IP=$( echo "$SSH_CLIENT" | awk '{print $1}' )
+    if [ -n "$LIVE_FILTER" ]; then
+        BPF_EXPR="$LIVE_FILTER"
+    elif [ -n "$SSH_PORT" ] && [ -n "$SSH_CLIENT_IP" ]; then
+        BPF_EXPR="not (host $SSH_CLIENT_IP and port $SSH_PORT)"
+    elif [ -n "$SSH_PORT" ]; then
+        BPF_EXPR="not port $SSH_PORT"
+    else
+        BPF_EXPR=""
+    fi
+
+    finalize_realtime_report() {
+        [ "$FINALIZED" -eq 1 ] && return
+        FINALIZED=1
+
+        trap '' INT TERM HUP QUIT PIPE
+
+        RT_END_EPOCH=$(date +%s)
+        RT_END_HUMAN=$(date)
+        RT_ELAPSED=$((RT_END_EPOCH - RT_START_EPOCH))
+
+        [ -n "$RT_TCPDUMP_PID" ] && kill -INT "$RT_TCPDUMP_PID" 2>/dev/null
+        [ -n "$RT_SAMPLER_PID" ] && kill -TERM "$RT_SAMPLER_PID" 2>/dev/null
+        sleep 1
+        [ -n "$RT_TCPDUMP_PID" ] && kill -9 "$RT_TCPDUMP_PID" 2>/dev/null
+        [ -n "$RT_SAMPLER_PID" ] && kill -9 "$RT_SAMPLER_PID" 2>/dev/null
+
+        if command -v nstat >/dev/null 2>&1; then
+            nstat -az > "$RT_NSTAT_AFTER" 2>/dev/null
+        else
+            cat /proc/net/snmp /proc/net/netstat > "$RT_NSTAT_AFTER" 2>/dev/null
+        fi
+        ip -s -s link > "$RT_LINKS_AFTER" 2>/dev/null
+
+        {
+            echo "##################################################################"
+            echo "# БЛОК 2: ОТЧЕТ МОНИТОРИНГА В РЕАЛЬНОМ ВРЕМЕНИ («ЧЕРНЫЙ ЯЩИК»)   #"
+            echo "##################################################################"
+            echo "  Старт записи:        $RT_START_HUMAN"
+            echo "  Остановка записи:    $RT_END_HUMAN"
+            echo "  Длительность сессии: ${RT_ELAPSED} секунд"
+            echo "  Причина остановки:   $STOP_REASON"
+            echo "  Фильтр перехвата:    ${BPF_EXPR:-ВЕСЬ ТРАФИК}"
+            echo "=================================================================="
+            echo ""
+
+            echo "=== [2.1] Сравнение счетчиков стека ДО и ПОСЛЕ сессии (ДЕЛЬТА за ${RT_ELAPSED} сек) ==="
+            if [ -f "$RT_NSTAT_BEFORE" ] && [ -f "$RT_NSTAT_AFTER" ]; then
+                awk '
+                    NR==FNR { before[$1]=$2; next }
+                    ($1 in before) {
+                        delta = $2 - before[$1];
+                        if (delta > 0 && $1 ~ /Ip|Icmp|Tcp|Udp/) {
+                            printf "  %-38s : +%d (было: %d -> стало: %d)\n", $1, delta, before[$1], $2
+                        }
+                    }
+                ' "$RT_NSTAT_BEFORE" "$RT_NSTAT_AFTER"
+            fi
+            echo ""
+
+            echo "=== [2.2] Состояние интерфейсов и счетчиков дропов ПОСЛЕ завершения теста ==="
+            cat "$RT_LINKS_AFTER"
+            echo ""
+
+            echo "=== [2.3] Срез сокетов и активных туннелей на момент завершения записи ==="
+            collect_all_tunnels_and_proxies
+
+            echo "=== [2.4] Журнал периодического опроса активных соединений во время теста ==="
+            if [ -f "$RT_SAMPLES_LOG" ]; then
+                cat "$RT_SAMPLES_LOG"
+            else
+                echo "Нет записей сэмплера."
+            fi
+            echo ""
+
+            if [ -f "$RT_PCAP_TEXT" ] && [ -s "$RT_PCAP_TEXT" ]; then
+                analyze_pcap_log "$RT_PCAP_TEXT" "2.5"
+
+                echo "=== [2.6] Хронологический лог перехваченных IP-пакетов ==="
+                TOTAL_LINES=$(wc -l < "$RT_PCAP_TEXT")
+                echo "Всего зафиксировано строк в дампе пакетов: $TOTAL_LINES"
+                echo ""
+                if [ "$TOTAL_LINES" -le 3000 ]; then
+                    cat "$RT_PCAP_TEXT"
+                else
+                    echo "--- [НАЧАЛО ЗАПИСИ ПАКЕТОВ (первые 1500 строк)] ---"
+                    head -n 1500 "$RT_PCAP_TEXT"
+                    echo ""
+                    echo "... [пропущено $((TOTAL_LINES - 3000)) промежуточных строк] ..."
+                    echo ""
+                    echo "--- [КОНЕЦ ЗАПИСИ ПАКЕТОВ ПЕРЕД ОСТАНОВКОЙ (последние 1500 строк)] ---"
+                    tail -n 1500 "$RT_PCAP_TEXT"
+                fi
+            else
+                echo "=== [2.5] Лог tcpdump пуст или перехват был отключен ==="
+            fi
+            echo ""
+            echo "=================================================================="
+            echo " ЗАПИСЬ В РЕАЛЬНОМ ВРЕМЕНИ УСПЕШНО СОХРАНЕНА: $(date)"
+            echo "=================================================================="
+        } >> "$OUTPUT_FILE" 2>&1
+
+        rm -rf "$RT_WORK_DIR"
+
+        echo "" >&2
+        echo "==========================================================================" >&2
+        echo "[+] ЗАПИСЬ ОСТАНОВЛЕНА ($STOP_REASON). Длительность: ${RT_ELAPSED} сек." >&2
+        echo "[+] Полный отчет реального времени надежно сохранен в файл:" >&2
+        echo "    $OUTPUT_FILE" >&2
+        echo "==========================================================================" >&2
+        exit 0
+    }
+
+    trap 'STOP_REASON="Ручная остановка пользователем (SIGINT / Ctrl+C)"; finalize_realtime_report' INT QUIT
+    trap 'STOP_REASON="Сигнал завершения процесса (SIGTERM)"; finalize_realtime_report' TERM
+    trap 'STOP_REASON="Обрыв SSH-канала управления (SIGHUP Fail-Safe)"; finalize_realtime_report' HUP
+    trap 'STOP_REASON="Разрыв потока терминала (SIGPIPE Fail-Safe)"; finalize_realtime_report' PIPE
+    trap 'STOP_REASON="Завершение скрипта (EXIT)"; finalize_realtime_report' EXIT
+
+    {
+        echo "=================================================================="
+        echo " SERVER NETWORK & CASCADE DIAGNOSTIC REPORT (v3.1 - REAL-TIME MODE)"
+        echo " Date:     $RT_START_HUMAN"
+        echo " Hostname: $HOST_NAME"
+        echo " Kernel:   $(uname -a)"
+        echo " Mode:     3 (Real-Time Fail-Safe Recorder)"
+        echo " Filter:   ${BPF_EXPR:-ALL (excluding current SSH)}"
+        echo "=================================================================="
+        echo ""
+        collect_base_system_info
+    } > "$OUTPUT_FILE" 2>&1
+
+    if command -v nstat >/dev/null 2>&1; then
+        nstat -az > "$RT_NSTAT_BEFORE" 2>/dev/null
+    else
+        cat /proc/net/snmp /proc/net/netstat > "$RT_NSTAT_BEFORE" 2>/dev/null
+    fi
+    ip -s -s link > "$RT_LINKS_BEFORE" 2>/dev/null
+
+    RT_TCPDUMP_PID=""
+    if [ "$DO_PCAP" -eq 1 ] && command -v tcpdump >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
+        if [ -n "$BPF_EXPR" ]; then
+            tcpdump -i any -nn -v -tt -l "$BPF_EXPR" > "$RT_PCAP_TEXT" 2>&1 &
+        else
+            tcpdump -i any -nn -v -tt -l > "$RT_PCAP_TEXT" 2>&1 &
+        fi
+        RT_TCPDUMP_PID=$!
+    fi
+
+    (
+        SAMPLE_NUM=0
+        while true; do
+            SAMPLE_NUM=$((SAMPLE_NUM + 1))
+            {
+                echo ">>> [СЭМПЛ #${SAMPLE_NUM} | Время: $(date +%H:%M:%S) (+$(( $(date +%s) - RT_START_EPOCH ))s)] <<<"
+                echo "[Активные TCP-соединения с ненулевой очередью или трафиком]:"
+                if [ -n "$LIVE_FILTER" ]; then
+                    CLEAN_IP=$(echo "$LIVE_FILTER" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -n 1)
+                    if [ -n "$CLEAN_IP" ]; then
+                        ss -tin state established | grep -A 1 "$CLEAN_IP" || echo "  (нет активных TCP-соединений с $CLEAN_IP в эту секунду)"
+                    else
+                        ss -tin state established | head -n 30
+                    fi
+                else
+                    if [ -n "$SSH_PORT" ]; then
+                        ss -tin state established | grep -v -B 0 -A 1 ":$SSH_PORT " | head -n 40
+                    else
+                        ss -tin state established | head -n 40
+                    fi
+                fi
+                echo ""
+                echo "[Сводка сокетов (ss -s) и conntrack]:"
+                ss -s | grep -E "Total:|TCP:|UDP:"
+                if [ -f /proc/sys/net/netfilter/nf_conntrack_count ]; then
+                    echo "Conntrack active: $(cat /proc/sys/net/netfilter/nf_conntrack_count)"
+                fi
+                echo "------------------------------------------------------------------"
+            } >> "$RT_SAMPLES_LOG" 2>&1
+            sleep "$RT_SAMPLE_INTERVAL"
+        done
+    ) &
+    RT_SAMPLER_PID=$!
+
+    echo ""
+    echo "=========================================================================="
+    echo " [!] РЕЖИМ МОНИТОРИНГА В РЕАЛЬНОМ ВРЕМЕНИ АКТИВИРОВАН!"
+    echo "--------------------------------------------------------------------------"
+    echo "  * Файл отчета:        $OUTPUT_FILE"
+    echo "  * Фильтр пакетов:     ${BPF_EXPR:-весь трафик}"
+    echo "  * Интервал сэмплов:   каждые ${RT_SAMPLE_INTERVAL} сек."
+    echo "  * Авто-таймаут:       ${MAX_RT_TIME} сек."
+    echo "--------------------------------------------------------------------------"
+    echo "  ТЕПЕРЬ ВЫ МОЖЕТЕ ПОЛЬЗОВАТЬСЯ КАСКАДОМ / ТЕСТИРОВАТЬ СОЕДИНЕНИЕ."
+    echo ""
+    echo "  Как остановить запись и сохранить отчет:"
+    echo "    Способ Б (Штатный):  Нажмите [ENTER], введите 'q' или нажмите [Ctrl+C]"
+    echo "    Способ А (Аварийный): Обрыв SSH-канала перехватится автоматически!"
+    echo "=========================================================================="
+
+    ELAPSED_WAIT=0
+    while [ "$ELAPSED_WAIT" -lt "$MAX_RT_TIME" ]; do
+        if [ -t 0 ]; then
+            if read -r -t 2 USER_CMD; then
+                STOP_REASON="Пользователь нажал Enter / ввел команду остановки ('$USER_CMD')"
+                finalize_realtime_report
+            fi
+            READ_STATUS=$?
+            if [ "$READ_STATUS" -eq 1 ]; then
+                STOP_REASON="Обнаружено закрытие входного потока SSH (EOF на stdin)"
+                finalize_realtime_report
+            fi
+        else
+            sleep 2
+        fi
+        ELAPSED_WAIT=$((ELAPSED_WAIT + 2))
+        if [ $((ELAPSED_WAIT % 10)) -eq 0 ]; then
+            PKT_CNT=0
+            [ -f "$RT_PCAP_TEXT" ] && PKT_CNT=$(wc -l < "$RT_PCAP_TEXT")
+            echo -ne "\r[*] Идет запись: ${ELAPSED_WAIT} сек. | Перехвачено строк пакетов: ${PKT_CNT} ... (Нажмите Enter или Ctrl+C для СТОП) "
+        fi
+    done
+
+    STOP_REASON="Достигнут максимальный страховочный таймер (${MAX_RT_TIME} сек)"
+    finalize_realtime_report
+}
+
+# ==============================================================================
+# ФУНКЦИЯ 4: АКТИВНОЕ ТЕСТИРОВАНИЕ КАСКАДНОЙ ПАРЫ СЕРВЕРОВ (РЕЖИМ 2)
+# ==============================================================================
+collect_active_pair_tests() {
+    if [ ${#TARGETS[@]} -eq 0 ]; then
+        echo "##################################################################"
+        echo "# БЛОК 3: АКТИВНОЕ ТЕСТИРОВАНИЕ ПАРЫ ПРОПУЩЕНО (НЕ УКАЗАНЫ IP)   #"
+        echo "##################################################################"
+        echo ""
+        return
+    fi
+
+    echo "##################################################################"
+    echo "# БЛОК 3: АКТИВНАЯ ПРОВЕРКА КАСКАДНОЙ ПАРЫ ДО ЦЕЛЕВЫХ СЕРВЕРОВ"
+    echo "##################################################################"
+    echo ""
+
+    IFS=',' read -r -a T_PORTS <<< "$TCP_PORTS"
+    IFS=',' read -r -a U_PORTS <<< "$UDP_PORTS"
+
+    for TARGET in "${TARGETS[@]}"; do
+        echo "=================================================================="
+        echo " >>> АНАЛИЗ КАСКАДНОЙ ПАРЫ: $HOST_NAME  <===>  $TARGET"
+        echo "=================================================================="
+        echo ""
+
+        echo "--- [3.1] Маршрут ядра и кэш PMTU до $TARGET ---"
+        ip -d route get "$TARGET"
+        echo ""
+
+        echo "--- [3.2] Проверка ICMP Ping ---"
+        ping -c 10 -i 0.2 -W 2 "$TARGET"
+        echo ""
+
+        echo "--- [3.3] Поиск реального Path MTU (PMTU Discovery с флагом DF) ---"
+        FOUND_MTU=0
+        for PAYLOAD in 1472 1464 1452 1422 1392 1372 1332 1252; do
+            MTU_VAL=$((PAYLOAD + 28))
+            if ping -c 2 -M do -s "$PAYLOAD" -W 1 "$TARGET" >/dev/null 2>&1; then
+                echo "  [+] УСПЕХ: Payload ${PAYLOAD} байт -> Path MTU >= ${MTU_VAL} (TCP MSS <= $((MTU_VAL - 40)))"
+                if [ "$FOUND_MTU" -eq 0 ]; then
+                    FOUND_MTU=$MTU_VAL
+                fi
+                break
+            else
+                echo "  [-] БЛОК/ФРАГМЕНТАЦИЯ: Payload ${PAYLOAD} байт (MTU ${MTU_VAL}) НЕ проходит"
+            fi
+        done
+        echo ""
+
+        echo "--- [3.4] Трассировка маршрута (MTR / Traceroute) ---"
+        if command -v mtr >/dev/null 2>&1; then
+            mtr -r -w -c 10 -n "$TARGET"
+        elif command -v traceroute >/dev/null 2>&1; then
+            traceroute -n -I -q 2 -w 2 "$TARGET"
+        else
+            echo "[!] Не найдены mtr или traceroute."
+        fi
+        echo ""
+
+        echo "--- [3.5] Проверка открытости TCP и UDP портов ---"
+        for P in "${T_PORTS[@]}"; do
+            if timeout 2 bash -c "</dev/tcp/$TARGET/$P" 2>/dev/null; then
+                echo "  [TCP $P] ОТКРЫТ"
+            else
+                echo "  [TCP $P] НЕДОСТУПЕН/ЗАКРЫТ"
+            fi
+        done
+        echo ""
+
+        echo "--- [3.7] Проверка TLS Handshake и HTTP/HTTPS (порт 443) ---"
+        if command -v curl >/dev/null 2>&1; then
+            curl -I -k -s -S --connect-timeout 3 -m 5 \
+                -w "\n[Метрики Curl] DNS: %{time_namelookup}s | TCP: %{time_connect}s | TLS: %{time_appconnect}s | Total: %{time_total}s\n" \
+                "https://${TARGET}:443" 2>&1
+        else
+            echo "[!] Утилита curl не установлена."
+        fi
+        echo ""
+
+        echo "--- [3.8] Тестирование пропускной способности (iperf3 на порт $IPERF_PORT) ---"
+        if command -v iperf3 >/dev/null 2>&1; then
+            iperf3 -c "$TARGET" -p "$IPERF_PORT" -P 2 -t 3 --connect-timeout 2000 2>&1 || echo "  [!] iperf3 сервер недоступен."
+        else
+            echo "[!] Утилита iperf3 не установлена."
+        fi
+        echo ""
+    done
+}
+
+# ==============================================================================
+# ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМОВ
+# ==============================================================================
+
+if [ "$MODE" = "3" ]; then
+    run_realtime_fail_safe_recorder
+    exit 0
+fi
+
+echo "[*] Хост: $HOST_NAME | Выбран режим: $MODE ($MODE_TAG)"
+echo "[*] Папка сохранения отчетов: $OUT_DIR"
+echo "[*] Файл отчета: $OUTPUT_FILE"
+
+{
+    echo "=================================================================="
+    echo " SERVER NETWORK & CASCADE DIAGNOSTIC REPORT (v3.1)"
+    echo " Date:     $(date)"
+    echo " Hostname: $HOST_NAME"
+    echo " Kernel:   $(uname -a)"
+    echo " Mode:     $MODE ($MODE_TAG)"
+    if [ "$MODE" = "1" ] || [ "$MODE" = "4" ]; then
+        echo " Live Capture Duration: ${LIVE_DURATION}s | Filter: ${LIVE_FILTER:-ALL}"
+    fi
+    if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
+        echo " Target Pair IPs:       ${TARGETS[*]:-None}"
+    fi
+    echo "=================================================================="
+    echo ""
+
+    if [ "$EUID" -ne 0 ]; then
+        echo "[ВНИМАНИЕ] Скрипт запущен БЕЗ прав root (sudo)!"
+        echo ""
+    fi
+
+    collect_base_system_info
+
+    case "$MODE" in
+        1)
+            collect_live_cascade_state
+            ;;
+        2)
+            collect_active_pair_tests
+            ;;
+        4)
+            collect_live_cascade_state
+            collect_active_pair_tests
+            ;;
+    esac
+
+    echo "=================================================================="
+    echo " ДИАГНОСТИКА ЗАВЕРШЕНА: $(date)"
+    echo "=================================================================="
+
+} > "$OUTPUT_FILE" 2>&1
+
+echo "[+] Готово! Отчет сохранен в файл:"
+echo "    $OUTPUT_FILE"
+NET_AUDIT_EOF
+    chmod +x /usr/local/bin/bobarev-network-audit.sh
+    ln -sf /usr/local/bin/bobarev-network-audit.sh /usr/local/bin/network-audit 2>/dev/null || true
+}
+
+mod_network_cascade_audit() {
+    install_network_audit_tool
+    while true; do
+        MODULE_CANCELED=false
+        local default_peer_ip=""
+        if [ -f /etc/default/bobarev-cascade ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            if [ -n "${FOREIGN_WG_ENDPOINT:-}" ]; then
+                default_peer_ip=$(echo "$FOREIGN_WG_ENDPOINT" | cut -d: -f1)
+            elif [ -n "${EXIT_TS_IP:-}" ]; then
+                default_peer_ip="$EXIT_TS_IP"
+            fi
+        fi
+
+        local na_choice=""
+        if ! na_choice=$(whiptail --title "🩺 21/21. Глубокий аудит сети и каскадных пар (v3.1)" --menu "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 \
+        "1" "📸 Режим 1: Автономный срез сервера и жизни каскада (Постфактум)" \
+        "2" "🔗 Режим 2: Активная проверка каскадной пары (PMTU, MSS, MTR, порты)" \
+        "3" "🔴 Режим 3: Мониторинг в РЕАЛЬНОМ ВРЕМЕНИ («Черный ящик» под нагрузкой)" \
+        "4" "🚀 Режим 4: Полный комбо-аудит (Режим 1 + Режим 2 последовательно)" \
+        "5" "💻 Запустить классическое консольное меню network-audit" \
+        "0" "🔙 Вернуться в главное меню" 3>&1 1>&2 2>&3) || [ "$na_choice" = "0" ]; then
+            break
+        fi
+
+        clear
+        case "$na_choice" in
+            1)
+                local dur="15"
+                prompt_default "Сколько секунд записывать срез живых IP-пакетов (tcpdump)?" "15" dur
+                if [ "$MODULE_CANCELED" = true ]; then continue; fi
+                dur="${dur//[^0-9]/}"
+                [ -z "$dur" ] && dur="15"
+
+                local flt=""
+                prompt_default "IP второго узла для фильтрации (оставьте пустым для записи ВСЕГО трафика):" "$default_peer_ip" flt
+                if [ "$MODULE_CANCELED" = true ]; then continue; fi
+
+                if [ -n "$flt" ]; then
+                    if [[ "$flt" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        flt="host $flt"
+                    fi
+                    /usr/local/bin/bobarev-network-audit.sh -m 1 -d "$dur" -f "$flt" || true
+                else
+                    /usr/local/bin/bobarev-network-audit.sh -m 1 -d "$dur" || true
+                fi
+                pause_enter
+                ;;
+            2)
+                local target_ips=""
+                prompt_default "Введите IP целевого сервера(ов) через пробел для проверки пары:" "$default_peer_ip" target_ips
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$target_ips" ]; then continue; fi
+
+                local t_ports="22,80,443,8080,8443,51888"
+                prompt_default "TCP-порты для проверки открытости (через запятую):" "$t_ports" t_ports
+                if [ "$MODULE_CANCELED" = true ]; then continue; fi
+
+                local u_ports="53,443,51820,51888,1194"
+                prompt_default "UDP-порты для проверки (через запятую):" "$u_ports" u_ports
+                if [ "$MODULE_CANCELED" = true ]; then continue; fi
+
+                /usr/local/bin/bobarev-network-audit.sh -m 2 -t "$target_ips" -p "$t_ports" -u "$u_ports" || true
+                pause_enter
+                ;;
+            3)
+                local flt_rt=""
+                prompt_default "IP второго узла/клиента для фильтрации (пусто — весь трафик кроме SSH):" "$default_peer_ip" flt_rt
+                if [ "$MODULE_CANCELED" = true ]; then continue; fi
+
+                local max_rt="3600"
+                prompt_default "Максимальный страховочный таймер авто-остановки (сек):" "3600" max_rt
+                if [ "$MODULE_CANCELED" = true ]; then continue; fi
+                max_rt="${max_rt//[^0-9]/}"
+                [ -z "$max_rt" ] && max_rt="3600"
+
+                if [ -n "$flt_rt" ]; then
+                    if [[ "$flt_rt" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        flt_rt="host $flt_rt"
+                    fi
+                    /usr/local/bin/bobarev-network-audit.sh -m 3 -d "$max_rt" -f "$flt_rt" || true
+                else
+                    /usr/local/bin/bobarev-network-audit.sh -m 3 -d "$max_rt" || true
+                fi
+                pause_enter
+                ;;
+            4)
+                local dur_c="15"
+                prompt_default "Сколько секунд записывать срез IP-пакетов в Режиме 1?" "15" dur_c
+                if [ "$MODULE_CANCELED" = true ]; then continue; fi
+                dur_c="${dur_c//[^0-9]/}"
+                [ -z "$dur_c" ] && dur_c="15"
+
+                local target_ips_c=""
+                prompt_default "Введите IP целевого сервера(ов) через пробел для Режима 2:" "$default_peer_ip" target_ips_c
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$target_ips_c" ]; then continue; fi
+
+                /usr/local/bin/bobarev-network-audit.sh -m 4 -d "$dur_c" -t "$target_ips_c" || true
+                pause_enter
+                ;;
+            5)
+                /usr/local/bin/bobarev-network-audit.sh || true
+                pause_enter
+                ;;
+        esac
+    done
+}
+
 run_full_auto_setup() {
     echo "🚀 ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
     local local_aborted=false
@@ -4703,6 +5680,12 @@ if [ "${1:-}" != "" ]; then
             mod_server_audit
             exit 0
             ;;
+        --net-audit|-n)
+            install_network_audit_tool
+            shift
+            /usr/local/bin/bobarev-network-audit.sh "$@"
+            exit 0
+            ;;
         --update|-u)
             mod_apt_update
             exit 0
@@ -4716,10 +5699,11 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.32 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.33 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
+            echo "  --net-audit   Глубокий аудит сети, ТСПУ и каскадных пар (Модуль 21)"
             echo "  --update, -u  Обновление пакетов, приоритет IPv4 и настройка zRAM (Модуль 3)"
             echo "  --backup, -b  Экспорт или импорт настроек сервера (Модуль 19)"
             echo "  --auto        Последовательная настройка сервера целиком (Шаги 1-12)"
@@ -4793,6 +5777,7 @@ while true; do
     "18" "📡 Режим локального маршрутизатора" \
     "19" "📦 Экспорт / Импорт настроек" \
     "20" "🚀 Прямой скоростной каскад (NaiveProxy -> WG -> WARP)" \
+    "21" "🩺 Глубокий аудит сети и каскадных пар (network-audit)" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" 3>&1 1>&2 2>&3) || [ "$choice" = "0" ]; then
         clear
@@ -4824,6 +5809,7 @@ while true; do
         18) mod_router_sbc; pause_enter ;;
         19) mod_backup_manager; pause_enter ;;
         20) mod_direct_wg_cascade ;;
+        21) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

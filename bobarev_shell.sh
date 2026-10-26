@@ -220,7 +220,7 @@ HY2_C_SVC
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.43 (Fully Structured & Polished Master) (High-Performance Modular Master - Clean Structure)
+# Версия: 3.8.44 (Hysteria 2 Upstream Fix - Foreign IP Guaranteed)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -791,12 +791,19 @@ render_naive_caddyfile() {
     local auth_lines=""
     while IFS=: read -r u h; do
         [ -z "$u" ] || [ -z "$h" ] && continue
-        auth_lines+="            ${u} ${h}"$'\n'
+        auth_lines+="            ${u} ${h}"$'
+'
     done < "$NAIVE_USERS_FILE"
 
     if [ -z "$auth_lines" ]; then
         local dummy_hash=$(printf '%s\n' "disabled_placeholder" | htpasswd -niBC 12 "__disabled__" | cut -d: -f2)
-        auth_lines="            __disabled__ ${dummy_hash}"$'\n'
+        auth_lines="            __disabled__ ${dummy_hash}"$'
+'
+    fi
+
+    local hy_upstream=""
+    if [ -f /etc/hysteria/client.yaml ]; then
+        hy_upstream="            upstream socks5://127.0.0.1:1080"
     fi
 
     cat << EOF > "$CADDYFILE"
@@ -813,19 +820,19 @@ render_naive_caddyfile() {
     }
 }
 
-:443, ${dom} {
-    tls ${email}
+:443, \${dom} {
+    tls \${email}
 
     @naive_proxy method CONNECT
     route @naive_proxy {
         request_header Authorization "{http.request.header.Proxy-Authorization}"
         basic_auth bcrypt {
-${auth_lines}        }
+\${auth_lines}        }
         request_header -Authorization
         forward_proxy {
             hide_ip
             hide_via
-            $( [ -f /etc/hysteria/client.yaml ] && echo "            upstream socks5://127.0.0.1:1080" )
+\${hy_upstream}
         }
     }
 
@@ -843,42 +850,6 @@ ${auth_lines}        }
 }
 EOF
     chmod 600 "$CADDYFILE"
-
-    cat << 'SVC_EOF' > "$CADDY_SERVICE"
-[Unit]
-Description=Bobarev Shell NaiveProxy (Caddy 2)
-After=network.target network-online.target
-Requires=network-online.target
-
-[Service]
-Type=notify
-User=root
-Group=root
-ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
-ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
-TimeoutStopSec=5s
-LimitNOFILE=1048576
-LimitNPROC=512
-PrivateTmp=true
-ProtectSystem=full
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-SVC_EOF
-
-    systemctl daemon-reload
-    systemctl enable caddy.service >/dev/null 2>&1 || true
-    if systemctl is-active --quiet caddy.service; then
-        systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service
-    else
-        systemctl restart caddy.service
-    fi
-}
 
 add_or_update_naive_user() {
     local u_name="$1"

@@ -4171,9 +4171,9 @@ UDEV_EOF
 mod_swap_manager() {
     local swap_choice
     if ! swap_choice=$(whiptail --title "Файл подкачки (Swap)" --menu "Управление виртуальной памятью:" 12 $WT_WIDTH 3 \
-    "1" "Создать базовый объем (2 Гигабайта)" \
-    "2" "Указать собственный объем" \
-    "3" "Полностью отключить файл подкачки" 3>&1 1>&2 2>&3); then
+    "1" "💾 Создать базовый объем (2 ГБ)" \
+    "2" "⚙️ Указать собственный объем" \
+    "3" "❌ Полностью отключить файл подкачки" 3>&1 1>&2 2>&3); then
         MODULE_CANCELED=true
         return 0
     fi
@@ -4185,9 +4185,14 @@ mod_swap_manager() {
             if [ "$swap_choice" = "2" ]; then
                 prompt_default "Желаемый объем памяти (например: 2G, 4G, 1024M):" "4G" swap_size
                 [ "$MODULE_CANCELED" = true ] && return 0
+                if [[ ! "$swap_size" =~ ^[0-9]+[GgMm]$ ]]; then
+                    echo -e "${C_RED}❌ Ошибка: Неверный формат объема. Используйте G или M (например, 2G или 2048M).${C_RESET}"
+                    pause_enter
+                    return 1
+                fi
             fi
-            silent_run swapoff /swap.img
-            silent_run swapoff /swapfile
+            silent_run swapoff /swap.img 2>/dev/null
+            silent_run swapoff /swapfile 2>/dev/null
             rm -f /swap.img /swapfile
 
             local root_fs=$(df -T / 2>/dev/null | awk 'NR==2 {print $2}' || echo "unknown")
@@ -4214,8 +4219,8 @@ mod_swap_manager() {
             echo -e "${C_GREEN}✅ Файл подкачки размером $swap_size успешно инициализирован!${C_RESET}"
             ;;
         3)
-            silent_run swapoff /swapfile
-            silent_run swapoff /swap.img
+            silent_run swapoff /swapfile 2>/dev/null
+            silent_run swapoff /swap.img 2>/dev/null
             sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
             rm -f /swapfile /swap.img
             echo -e "${C_GREEN}✅ Дисковый файл подкачки отключен.${C_RESET}"

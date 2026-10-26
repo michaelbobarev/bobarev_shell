@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.49 (Hysteria2 Foreign Server Binary Busy & Token Evaluation Fix)
+# Версия: 3.8.50 (Robust Python Base64 Token & No-Wrap Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -4166,7 +4166,10 @@ setup_hysteria_warp_foreign_server() {
     chmod +x /usr/local/bin/hysteria
 
     mkdir -p /etc/hysteria
-    openssl req -x509 -nodes -days 3650 -newkey rsa:2048         -keyout /etc/hysteria/server.key         -out /etc/hysteria/server.crt         -subj "/CN=bing.com" >/dev/null 2>&1 || true
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/hysteria/server.key \
+        -out /etc/hysteria/server.crt \
+        -subj "/CN=bing.com" >/dev/null 2>&1 || true
 
     cat << EOF > /etc/hysteria/config.yaml
 listen: :${h_port}
@@ -4221,7 +4224,7 @@ H_SVC
 
     local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || hostname -I | awk '{print $1}')
     local raw_token="${ext_ip}|${h_port}|${h_pass}"
-    local bridge_token=$(printf '%s' "$raw_token" | base64 -w0 2>/dev/null || printf '%s' "$raw_token" | base64 | tr -d '\n\r ')
+    local bridge_token=$(python3 -c 'import sys, base64; print(base64.b64decode.__globals__["__builtins__"]["__import__"]("base64").b64encode(sys.argv[1].encode("utf-8")).decode("utf-8"))' "$raw_token" 2>/dev/null || printf '%s' "$raw_token" | base64 | tr -d '\n\r ')
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_hy2_warp"
@@ -4232,7 +4235,7 @@ EOF
     chmod 600 /etc/default/bobarev-cascade
 
     echo -e "${C_GREEN}✅ Зарубежный сервер настроен (Hysteria 2 -> WARP выход активен)!${C_RESET}"
-    echo -e "${C_CYAN}🔑 Токен подключения для Российского сервера 1:${C_RESET}"
+    echo -e "${C_CYAN}🔑 Токен подключения для Российского сервера 1 (скопируйте в одну строку без разрывов):${C_RESET}"
     echo -e "${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}\n"
 }
 
@@ -4246,21 +4249,21 @@ setup_naive_hysteria_ru_server() {
 
     local decoded=""
     decoded=$(python3 -c '
-import sys, base64
+import sys, base64, re
 try:
-    raw = "".join(sys.argv[1].split())
-    pad = len(raw) % 4
+    s = "".join(sys.argv[1].split())
+    s = re.sub(r"[^A-Za-z0-9+/=]", "", s)
+    pad = len(s) % 4
     if pad:
-        raw += "=" * (4 - pad)
-    print(base64.b64decode(raw.encode("utf-8")).decode("utf-8", errors="ignore").strip())
-except Exception:
+        s += "=" * (4 - pad)
+    print(base64.b64decode(s.encode("utf-8")).decode("utf-8", errors="ignore").strip())
+except Exception as e:
     print("")
 ' "$token_in" 2>/dev/null || echo "")
 
-    [ -z "$decoded" ] && decoded=$(printf '%s' "$token_in" | base64 -d 2>/dev/null || echo "")
     local s2_ip="" s2_port="" s2_pass=""
     IFS="|" read -r s2_ip s2_port s2_pass <<< "$decoded"
-    [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ] && { echo -e "${C_RED}❌ Неверный токен!${C_RESET}"; return 1; }
+    [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ] && { echo -e "${C_RED}❌ Неверный токен! Проверьте, что скопировали токен целиком без лишних пробелов и переносов строк.${C_RESET}"; return 1; }
 
     local n_dom=""
     prompt_default "Введите ваш домен (A-запись DNS на этот РФ-сервер):" "ru.yourdomain.com" n_dom

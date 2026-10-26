@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.46 (Dual Cascade Menu: WG+udp2raw & Hysteria2)
+# Версия: 3.8.47 (Hysteria 2 Binary Busy Fix & Token Evaluation Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -4159,6 +4159,7 @@ setup_hysteria_warp_foreign_server() {
     [ "$MODULE_CANCELED" = true ] && return 0
 
     echo -e "${C_BLUE}⬇️ Установка бинарника Hysteria 2...${C_RESET}"
+    silent_run systemctl stop hysteria-server.service
     local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ] && arch="arm64" || arch="amd64"
     wget -q --tries=3 --timeout=30 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -O /usr/local/bin/hysteria || true
@@ -4171,10 +4172,10 @@ setup_hysteria_warp_foreign_server() {
         -subj "/CN=bing.com" >/dev/null 2>&1 || true
 
     cat << EOF > /etc/hysteria/config.yaml
-listen: :\${h_port}
+listen: :${h_port}
 auth:
   type: password
-  password: \${h_pass}
+  password: ${h_pass}
 tls:
   cert: /etc/hysteria/server.crt
   key: /etc/hysteria/server.key
@@ -4216,28 +4217,30 @@ H_SVC
     iptables -A FORWARD -i warp -o lo -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
     if command -v ufw &>/dev/null; then
-        silent_run ufw allow "\${h_port}/udp" comment 'Hysteria 2 Bridge Port'
+        silent_run ufw allow "${h_port}/udp" comment 'Hysteria 2 Bridge Port'
         ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
         silent_run ufw reload
     fi
 
     local ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' || hostname -I | awk '{print $1}')
-    local raw_token="\${ext_ip}|\${h_port}|\${h_pass}"
-    local bridge_token=$(printf '%s' "\$raw_token" | base64 -w0 2>/dev/null || printf '%s' "\$raw_token" | base64 | tr -d '\n\r ')
+    local raw_token="${ext_ip}|${h_port}|${h_pass}"
+    local bridge_token=$(printf '%s' "$raw_token" | base64 -w0 2>/dev/null || printf '%s' "$raw_token" | base64 | tr -d '
+
+ ')
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_hy2_warp"
-HY2_PORT="\${h_port}"
-HY2_PASS="\${h_pass}"
-HY2_TOKEN="\${bridge_token}"
+HY2_PORT="${h_port}"
+HY2_PASS="${h_pass}"
+HY2_TOKEN="${bridge_token}"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
     echo -e "${C_GREEN}✅ Зарубежный сервер настроен (Hysteria 2 -> WARP выход активен)!${C_RESET}"
     echo -e "${C_CYAN}🔑 Токен подключения для Российского сервера 1:${C_RESET}"
-    echo -e "${C_BOLD}${C_GREEN}\${bridge_token}${C_RESET}\n"
+    echo -e "${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}
+"
 }
-
 setup_naive_hysteria_ru_server() {
     echo -e "${C_CYAN}🔒 === НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА (NAIVEPROXY -> HYSTERIA 2) ===${C_RESET}"
     ensure_go_and_build_caddy_naive || return 1

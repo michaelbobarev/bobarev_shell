@@ -2285,9 +2285,9 @@ manage_cascade_hysteria_menu() {
         fi
 
         local c_choice
-        if ! c_choice=$(whiptail --title "Каскад 2: NaiveProxy + Hysteria + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 5 \
-        "1" "🔒 Сервер 1 (Вход РФ): NaiveProxy -> Hysteria" \
-        "2" "🌍 Сервер 2 (Выход Зарубеж): Hysteria -> WARP" \
+        if ! c_choice=$(whiptail --title "🚀 Каскад 2: NaiveProxy + Hysteria + WARP" --menu "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 5 \
+        "1" "🌍 Сервер 2 (Выход Зарубеж): Hysteria -> WARP" \
+        "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> Hysteria" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки для Shadowrocket" \
         "0" "🔙 Вернуться назад" 3>&1 1>&2 2>&3) || [ "$c_choice" = "0" ]; then
@@ -2296,8 +2296,8 @@ manage_cascade_hysteria_menu() {
 
         clear
         case "$c_choice" in
-            1) setup_cascade_hysteria_server1_ru || true; pause_enter ;;
-            2) setup_cascade_hysteria_server2_foreign || true; pause_enter ;;
+            1) setup_cascade_hysteria_server2_foreign || true; pause_enter ;;
+            2) setup_cascade_hysteria_server1_ru || true; pause_enter ;;
             3) manage_naive_users_menu ;;
             4) print_naive_shadowrocket_links; pause_enter ;;
         esac

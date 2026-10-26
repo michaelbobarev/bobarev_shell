@@ -220,7 +220,7 @@ HY2_C_SVC
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.41 (High-Performance Cascade: NaiveProxy + Hysteria 2 + WARP)
+# Версия: 3.8.43 (Fully Structured & Polished Master) (High-Performance Modular Master - Clean Structure)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'

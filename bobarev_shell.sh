@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.39 (Professional Stealth & Audit Suite)
+# Версия: 3.8.40 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1634,7 +1634,7 @@ configure_udp2raw_service() {
 
     # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
     # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a --fix-gro --sock-buf 67108864"
+    local extra_flags="-a --fix-gro --sock-buf 10240 --force-sock-buf"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]
@@ -1666,7 +1666,14 @@ EOF
     systemctl daemon-reload
     systemctl reset-failed bobarev-udp2raw.service 2>/dev/null || true
     systemctl enable --now bobarev-udp2raw.service >/dev/null 2>&1 || true
-    systemctl restart bobarev-udp2raw.service
+    systemctl restart bobarev-udp2raw.service || true
+    sleep 3
+    if ! systemctl is-active --quiet bobarev-udp2raw.service; then
+        echo -e "${C_RED}❌ Служба udp2raw НЕ запустилась! Последние строки журнала:${C_RESET}"
+        journalctl -u bobarev-udp2raw.service -n 15 --no-pager 2>/dev/null | sed "s/\x1b\[[0-9;]*m//g" || true
+        return 1
+    fi
+    echo -e "${C_GREEN}✅ Служба udp2raw запущена (режим: $obfs_mode).${C_RESET}"
 }
 
 setup_direct_wg_server2_foreign() {

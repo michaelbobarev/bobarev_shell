@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.1-rc1 (3.8.37 base + Hysteria 2 TLS cascade)
+# Версия: 3.9.1 (Full Shell - Hysteria Cascade Routing Fix)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -571,11 +571,6 @@ render_naive_caddyfile() {
     chmod 600 "$NAIVE_USERS_FILE"
     install_naive_camouflage_site
 
-    local hy2_upstream=""
-    if [ "${CASCADE_ROLE:-}" = "ru_hy2" ]; then
-        hy2_upstream="            upstream socks5://127.0.0.1:1080"
-    fi
-
     local auth_lines=""
     while IFS=: read -r u h; do
         [ -z "$u" ] || [ -z "$h" ] && continue
@@ -586,6 +581,9 @@ render_naive_caddyfile() {
         local dummy_hash=$(printf '%s\n' "disabled_placeholder" | htpasswd -niBC 12 "__disabled__" | cut -d: -f2)
         auth_lines="            __disabled__ ${dummy_hash}"$'\n'
     fi
+
+    local hy_up=""
+    [ -f /etc/hysteria/client.yaml ] && hy_up="            upstream socks5://127.0.0.1:1080"
 
     cat << EOF > "$CADDYFILE"
 {
@@ -613,7 +611,7 @@ ${auth_lines}        }
         forward_proxy {
             hide_ip
             hide_via
-${hy2_upstream}
+${hy_up}
         }
     }
 
@@ -631,10 +629,7 @@ ${hy2_upstream}
 }
 EOF
     chmod 600 "$CADDYFILE"
-    if ! "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile; then
-        echo "Ошибка проверки Caddyfile: служба не перезагружена." >&2
-        return 1
-    fi
+    "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile || return 1
 
     cat << 'SVC_EOF' > "$CADDY_SERVICE"
 [Unit]
@@ -2087,7 +2082,7 @@ mod_direct_wg_cascade() {
         fi
 
         local dc_choice
-        if ! dc_choice=$(whiptail --title "🚀 Каскад 1: NaiveProxy + Wireguard + WARP" --menu "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> Выход Зарубеж:" 19 $WT_WIDTH 7 \
+        if ! dc_choice=$(whiptail --title "🚀 Прямой скоростной каскад (Без Tailscale)" --menu "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> Выход Зарубеж:" 19 $WT_WIDTH 7 \
         "1" "🌍 Шаг 1 (На Зарубежном Сервере 2): Поднять WG-Мост + Anti-DPI" \
         "2" "🚀 Шаг 2 (На Российском Сервере 1): Подключить NaiveProxy -> WG-Мост" \
         "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
@@ -4106,6 +4101,331 @@ mod_boot_diag() {
 }
 
 # 17. Полный аудит сервера (с проверкой ретранслятора DERP и обоих типов каскада)
+
+# ==============================================================================
+# МОДУЛЬ 21: КАСКАД 1 (NAIVEPROXY + HYSTERIA 2 + CLOUDFLARE WARP)
+# ==============================================================================
+# Каскад 2: новая реализация; остальные модули сохранены.
+hy2_dependencies() {
+    if ! command -v python3 >/dev/null || ! python3 -c 'import yaml' 2>/dev/null; then
+        apt-get update && apt-get install -y python3 python3-yaml || return 1
+    fi
+    command -v curl >/dev/null && command -v openssl >/dev/null || {
+        apt-get install -y curl openssl || return 1
+    }
+}
+
+hy2_backup() {
+    local d
+    d=$(mktemp -d /root/bobarev-hy2-backup-XXXXXXXX) || return 1
+    chmod 700 "$d"
+    local p
+    for p in /etc/hysteria /etc/caddy /etc/default/bobarev-cascade; do
+        [ ! -e "$p" ] || cp -a --parents "$p" "$d/" || return 1
+    done
+    ip -4 rule show > "$d/ip-rules.txt"
+    echo "Резервная копия (содержит секреты): $d"
+}
+
+hy2_binary() {
+    # Не обновляем работающий бинарник автоматически.
+    if [ -x /usr/local/bin/hysteria ]; then
+        /usr/local/bin/hysteria version >/dev/null 2>&1 && return 0
+    fi
+    local arch tmp
+    case "$(uname -m)" in
+        x86_64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) echo 'Неподдерживаемая архитектура'; return 1 ;;
+    esac
+    tmp=$(mktemp) || return 1
+    if ! curl -fL --retry 3 --connect-timeout 15 --max-time 180 \
+        "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}" -o "$tmp"; then
+        rm -f "$tmp"; return 1
+    fi
+    chmod 700 "$tmp"
+    if ! "$tmp" version >/dev/null 2>&1; then rm -f "$tmp"; return 1; fi
+    install -m 0755 "$tmp" /usr/local/bin/hysteria || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+}
+
+hy2_routing() {
+    ip -4 addr show dev warp | grep -q '172.16.0.2/' || return 1
+    ip -4 route show table 51820 | grep -q '^default dev warp' || return 1
+    cat > /usr/local/sbin/bobarev-hy2-warp-routing <<'HY_ROUTE'
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+check() {
+    local p=$1 pat=$2 line
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        printf '%s\n' "$line" | grep -Eq "$pat" || { echo "Конфликт правил: $line" >&2; exit 1; }
+    done < <(ip -4 rule show | awk -v p="$p:" '$1==p')
+}
+check 6100 '^6100:[[:space:]]+from 172\.16\.0\.2(/32)? lookup 51820[[:space:]]*$'
+check 6101 '^6101:[[:space:]]+from 172\.16\.0\.2(/32)? prohibit[[:space:]]*$'
+if ! ip -4 rule show | grep -q '^6101:'; then
+    ip -4 rule add prohibit priority 6101 from 172.16.0.2/32
+fi
+if ! ip -4 rule show | grep -q '^6100:'; then
+    ip -4 rule add priority 6100 from 172.16.0.2/32 lookup 51820
+fi
+HY_ROUTE
+    chmod 750 /usr/local/sbin/bobarev-hy2-warp-routing
+    cat > /etc/systemd/system/bobarev-hy2-warp-routing.service <<'HY_UNIT'
+[Unit]
+Description=Bobarev Hysteria source routing to WARP
+Wants=network-online.target
+After=network-online.target
+Before=hysteria-server.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bobarev-hy2-warp-routing
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+HY_UNIT
+    mkdir -p /etc/systemd/system/hysteria-server.service.d
+    cat > /etc/systemd/system/hysteria-server.service.d/20-warp-routing.conf <<'HY_UNIT'
+[Unit]
+Requires=bobarev-hy2-warp-routing.service
+Wants=wg-quick@warp.service
+After=bobarev-hy2-warp-routing.service wg-quick@warp.service
+HY_UNIT
+    systemctl daemon-reload || return 1
+    systemctl enable wg-quick@warp.service bobarev-hy2-warp-routing.service || return 1
+    systemctl restart bobarev-hy2-warp-routing.service || return 1
+}
+
+hy2_trace() {
+    local out
+    out=$(curl --noproxy '' "$@" --connect-timeout 10 --max-time 30 -fsS \
+        https://www.cloudflare.com/cdn-cgi/trace) || return 1
+    printf '%s\n' "$out" | grep -E '^(ip|warp|loc|colo)='
+    printf '%s\n' "$out" | grep -qx 'warp=on'
+}
+
+setup_hysteria_warp_foreign_server() {
+    hy2_dependencies || return 1
+    hy2_backup || return 1
+    if ! systemctl is-active --quiet wg-quick@warp.service; then
+        echo 'Нужен WARP. Запускается существующий модуль его настройки.'
+        ensure_warp_installed_and_configured || return 1
+    fi
+    hy2_binary || return 1
+    mkdir -p /etc/hysteria
+    chmod 700 /etc/hysteria
+    python3 - <<'HY_PY' || return 1
+import os,json,yaml,getpass
+p='/etc/hysteria/config.yaml'
+c=yaml.safe_load(open(p)) if os.path.exists(p) else {}
+if not isinstance(c,dict): raise SystemExit('Некорректный серверный конфиг')
+wanted=[{'name':'warp','type':'direct','direct':{'mode':4,'bindIPv4':'172.16.0.2'}}]
+if c.get('acl') or (c.get('outbounds') and c['outbounds']!=wanted):
+    raise SystemExit('Пользовательский ACL/outbounds: требуется ручная проверка')
+if not c:
+    with open('/dev/tty','r+') as tty:
+        tty.write('UDP-порт Hysteria [36533]: '); tty.flush()
+        port=tty.readline().strip() or '36533'
+    if not port.isdigit() or not 1<=int(port)<=65535: raise SystemExit('Некорректный порт')
+    password=getpass.getpass('Новый пароль Hysteria (не пустой): ')
+    if not password: raise SystemExit('Пустой пароль')
+    c={'listen':':'+port,'auth':{'type':'password','password':password},
+       'tls':{'cert':'/etc/hysteria/server.crt','key':'/etc/hysteria/server.key'},
+       'masquerade':{'type':'proxy','proxy':{'url':'https://bing.com','rewriteHost':True}}}
+c['outbounds']=wanted
+with open(p+'.new','w') as f:json.dump(c,f,indent=2);f.write('\n')
+os.chmod(p+'.new',0o600);os.replace(p+'.new',p)
+HY_PY
+    if [ ! -s /etc/hysteria/server.crt ] || [ ! -s /etc/hysteria/server.key ]; then
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt \
+          -subj '/CN=bobarev-hysteria' >/dev/null 2>&1 || return 1
+    fi
+    chmod 600 /etc/hysteria/server.key /etc/hysteria/config.yaml
+    hy2_routing || return 1
+    cat > /etc/systemd/system/hysteria-server.service <<'HY_UNIT'
+[Unit]
+Description=Bobarev Hysteria 2 Server
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+UMask=0077
+[Install]
+WantedBy=multi-user.target
+HY_UNIT
+    systemctl daemon-reload || return 1
+    systemctl enable hysteria-server.service || return 1
+    systemctl restart hysteria-server.service || return 1
+    sleep 3
+    systemctl is-active --quiet hysteria-server.service || return 1
+    local port
+    port=$(python3 -c 'import yaml; print(str(yaml.safe_load(open("/etc/hysteria/config.yaml"))["listen"]).rsplit(":",1)[1])') || return 1
+    if command -v ufw >/dev/null; then ufw allow "${port}/udp" comment 'Hysteria 2 Bridge Port' || return 1; fi
+    hy2_trace -4 --interface 172.16.0.2 || return 1
+    echo 'Укажите публичный адрес зарубежного VPS, НЕ выходной адрес WARP.'
+    python3 - <<'HY_PY' || return 1
+import yaml,json,base64,ipaddress
+with open('/dev/tty','r+') as tty:
+    tty.write('Публичный IPv4 зарубежного VPS: ');tty.flush();host=tty.readline().strip()
+ipaddress.IPv4Address(host)
+c=yaml.safe_load(open('/etc/hysteria/config.yaml'))
+token={'v':1,'host':host,'port':int(str(c['listen']).rsplit(':',1)[1]),'password':c['auth']['password']}
+print('Секретный токен для РФ-сервера (Base64 НЕ шифрование):')
+print(base64.b64encode(json.dumps(token).encode()).decode())
+HY_PY
+    echo 'Зарубежная сторона настроена. Полная цепочка проверяется отдельно с телефона.'
+}
+
+hy2_patch_caddy() {
+    local backup
+    backup=$(mktemp) || return 1
+    cp -a "$CADDYFILE" "$backup" || return 1
+    if ! python3 - "$CADDYFILE" <<'HY_PY'
+import sys,re,os
+p=sys.argv[1];s=open(p).read()
+m=list(re.finditer(r'(?m)^[ \t]*forward_proxy[ \t]*\{[ \t]*$',s))
+if len(m)!=1: raise SystemExit('Нужен ровно один forward_proxy блок')
+if re.search(r'(?m)^\s*(acl|ports)\b',s): raise SystemExit('ACL/ports несовместимы с upstream: ручная проверка')
+u=list(re.finditer(r'(?m)^[ \t]*upstream[ \t]+[^\n]*',s))
+if u:
+    if len(u)!=1 or u[0].group().strip()!='upstream socks5://127.0.0.1:1080':
+        raise SystemExit('Пользовательский upstream: отказ от перезаписи')
+    if u[0].start()<m[0].end(): raise SystemExit('upstream расположен до блока forward_proxy')
+else:
+    pos=m[0].end();s=s[:pos]+'\n            upstream socks5://127.0.0.1:1080'+s[pos:]
+with open(p+'.new','w') as f:f.write(s)
+os.chmod(p+'.new',0o600);os.replace(p+'.new',p)
+HY_PY
+    then rm -f "$backup"; return 1; fi
+    if ! "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile; then
+        cp -a "$backup" "$CADDYFILE"; rm -f "$backup"; return 1
+    fi
+    rm -f "$backup"
+    systemctl enable caddy.service || return 1
+    if systemctl is-active --quiet caddy.service; then
+        systemctl reload caddy.service || return 1
+    else systemctl start caddy.service || return 1; fi
+}
+
+setup_naive_hysteria_ru_server() {
+    hy2_dependencies || return 1
+    hy2_backup || return 1
+    hy2_binary || return 1
+    if [ ! -x "$CADDY_BIN" ]; then ensure_go_and_build_caddy_naive || return 1; fi
+    mkdir -p /etc/hysteria
+    chmod 700 /etc/hysteria
+    python3 - <<'HY_PY' || return 1
+import yaml,json,os,getpass,base64,ipaddress
+p='/etc/hysteria/client.yaml'
+c=yaml.safe_load(open(p)) if os.path.exists(p) else {}
+if not isinstance(c,dict): raise SystemExit('Некорректный клиентский конфиг')
+valid=bool(c.get('server') and c.get('auth') and '${' not in str(c.get('server')) and '${' not in str(c.get('auth')))
+if not valid:
+    token=getpass.getpass('Токен с зарубежного VPS (Enter — ввод вручную): ').strip()
+    if token:
+        raw=base64.b64decode(''.join(token.split()),validate=True).decode()
+        try:
+            d=json.loads(raw);host=d['host'];port=d['port'];password=d['password']
+        except json.JSONDecodeError:
+            host,port,password=raw.split('|',2)
+    else:
+        with open('/dev/tty','r+') as tty:
+            tty.write('IPv4 зарубежного VPS: ');tty.flush();host=tty.readline().strip()
+            tty.write('UDP-порт [36533]: ');tty.flush();port=tty.readline().strip() or '36533'
+        password=getpass.getpass('Текущий пароль зарубежного Hysteria: ')
+    ipaddress.IPv4Address(host)
+    port=int(port)
+    if not 1<=port<=65535 or not isinstance(password,str) or not password:raise SystemExit('Некорректные параметры')
+    c['server']=f'{host}:{port}';c['auth']=password
+    c.setdefault('tls',{})['insecure']=True
+c.setdefault('socks5',{})['listen']='127.0.0.1:1080'
+with open(p+'.new','w') as f:json.dump(c,f,indent=2);f.write('\n')
+os.chmod(p+'.new',0o600);os.replace(p+'.new',p)
+HY_PY
+    cat > /etc/systemd/system/hysteria-client.service <<'HY_UNIT'
+[Unit]
+Description=Bobarev Hysteria 2 Client
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hysteria client -c /etc/hysteria/client.yaml
+Restart=on-failure
+RestartSec=5
+UMask=0077
+[Install]
+WantedBy=multi-user.target
+HY_UNIT
+    systemctl daemon-reload || return 1
+    systemctl enable hysteria-client.service || return 1
+    systemctl reset-failed hysteria-client.service || true
+    systemctl restart hysteria-client.service || return 1
+    sleep 3
+    hy2_trace --socks5-hostname 127.0.0.1:1080 || {
+        journalctl -u hysteria-client.service -n 30 --no-pager
+        return 1
+    }
+    if [ ! -s "$CADDYFILE" ]; then
+        local n_dom n_email n_user n_pass
+        prompt_clean 'Домен NaiveProxy (A-запись на РФ):' n_dom
+        [ "$MODULE_CANCELED" = true ] && return 1
+        [[ "$n_dom" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || return 1
+        prompt_default 'Email TLS:' "admin@$n_dom" n_email
+        [ "$MODULE_CANCELED" = true ] && return 1
+        [[ "$n_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]] || return 1
+        prompt_default 'Имя пользователя NaiveProxy:' 'user1' n_user
+        [[ "$n_user" =~ ^[a-zA-Z0-9_-]+$ ]] || return 1
+        read -rsp 'Новый пароль NaiveProxy: ' n_pass; echo
+        [ -n "$n_pass" ] || return 1
+        add_or_update_naive_user "$n_user" "$n_pass" || return 1
+        mkdir -p /etc/default
+        # Сохраняем существующие настройки других каскадов.
+        touch /etc/default/bobarev-cascade
+        sed -i '/^NAIVE_DOMAIN=/d; /^NAIVE_EMAIL=/d' /etc/default/bobarev-cascade
+        printf 'NAIVE_DOMAIN="%s"\nNAIVE_EMAIL="%s"\n' "$n_dom" "$n_email" >> /etc/default/bobarev-cascade
+        chmod 600 /etc/default/bobarev-cascade
+        render_naive_caddyfile || return 1
+        command -v ufw >/dev/null && { ufw allow 80/tcp; ufw allow 443/tcp; }
+    fi
+    hy2_patch_caddy || return 1
+    echo 'РФ: SOCKS -> Hysteria -> WARP подтверждён; Caddy применён.'
+    echo 'Проверьте с телефона trace: warp=on. DNS и IPv6 всего телефона отдельно не проверены.'
+    echo 'Самоподписанный TLS/insecure сохранён; это НЕ усиление проверки сертификата.'
+}
+
+install_naive_hysteria_warp_stack() {
+    local choice
+    while true; do
+        MODULE_CANCELED=false
+        if ! choice=$(whiptail --title 'Каскад 2: NaiveProxy -> Hysteria -> WARP' \
+            --menu 'Новая установка или закрепление существующей. Сначала зарубежный VPS.' \
+            18 "$WT_WIDTH" 5 \
+            1 'РФ: установить/исправить Hysteria и Caddy' \
+            2 'Зарубежный: Hysteria -> WARP + постоянные правила' \
+            3 'Управление пользователями NaiveProxy' \
+            4 'Диагностика без изменения конфигов' \
+            0 'Назад' 3>&1 1>&2 2>&3); then return 0; fi
+        case "$choice" in
+            0) return 0 ;;
+            1) if ! setup_naive_hysteria_ru_server; then echo 'ОШИБКА РФ: настройка не завершена. См. вывод и резервную копию.'; fi; pause_enter ;;
+            2) if ! setup_hysteria_warp_foreign_server; then echo 'ОШИБКА зарубежного узла: настройка не завершена. См. вывод и резервную копию.'; fi; pause_enter ;;
+            3) manage_naive_users_menu ;;
+            4) systemctl status hysteria-client.service hysteria-server.service bobarev-hy2-warp-routing.service --no-pager || true
+               ip -4 rule show; ip -4 route show table 51820 || true
+               pause_enter ;;
+        esac
+    done
+}
+
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -5782,286 +6102,6 @@ run_full_auto_setup() {
     MODULE_CANCELED=false
 }
 
-
-# ==============================================================================
-# CASCADE 2 — isolated state; based on 3.8.37, no legacy token compatibility.
-# ==============================================================================
-HY2_DIR=/etc/bobarev-hy2
-hy2_error() { echo "ОШИБКА: $*" >&2; return 1; }
-hy2_ask() {
-    prompt_default "$1" "$2" "$3"
-    [ "$MODULE_CANCELED" = false ]
-}
-hy2_prepare() {
-    command -v python3 >/dev/null && command -v curl >/dev/null && command -v openssl >/dev/null || {
-        apt-get update && apt-get install -y python3 curl openssl || return 1
-    }
-    install -d -m 700 "$HY2_DIR" || return 1
-    local b="$HY2_DIR/backups/$(date +%Y%m%d-%H%M%S)-$$"
-    install -d -m 700 "$b" || return 1
-    local f
-    for f in /etc/default/bobarev-cascade "$CADDYFILE" "$HY2_DIR/state.json" "$HY2_DIR/server.yaml" "$HY2_DIR/client.yaml" /etc/systemd/system/bobarev-hy2-{server,client}.service; do
-        [ ! -f "$f" ] || cp --parents "$f" "$b/" || return 1
-    done
-    echo "Резервная копия: $b"
-}
-hy2_install_binary() {
-    local arch tmp tag
-    case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) hy2_error 'Поддерживаются только amd64 и arm64'; return 1;; esac
-    # Resolve release once, do not overwrite the working executable on failed download.
-    tag=$(curl -fsSL --retry 3 https://api.github.com/repos/apernet/hysteria/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])') || return 1
-    [[ "$tag" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
-    tmp=$(mktemp) || return 1
-    if ! curl -fL --retry 3 --connect-timeout 15 --max-time 180 "https://github.com/apernet/hysteria/releases/download/$tag/hysteria-linux-$arch" -o "$tmp"; then rm -f "$tmp"; return 1; fi
-    chmod 700 "$tmp"
-    if ! "$tmp" version; then rm -f "$tmp"; return 1; fi
-    install -m 755 "$tmp" /usr/local/bin/bobarev-hysteria || { rm -f "$tmp"; return 1; }
-    rm -f "$tmp"
-    printf '%s\n' "$tag" > "$HY2_DIR/binary-version"
-}
-hy2_write_config() {
-    python3 - "$HY2_DIR" <<'PY_HY_CONFIG'
-import json,sys,os,tempfile
-from pathlib import Path
-p=Path(sys.argv[1]); d=json.loads((p/'state.json').read_text()); q=json.dumps
-if d['role']=='server':
-    c={'listen':':'+str(d['port']),'auth':{'type':'password','password':d['password']},
-       'outbounds':[{'name':'exit','type':'direct','direct':{'mode':'4','bindDevice': d['warp_device'] if d['exit']=='warp' else d['wan']}}]}
-    if d['cert_mode']=='acme':
-        c['acme']={'domains':[d['domain']],'email':d['email'],'ca':'letsencrypt','dir':str(p/'acme'),'type':'http'}
-    else:
-        c['tls']={'cert':d['cert'],'key':d['key'],'sniGuard':'strict'}
-    name='server.yaml'
-else:
-    c={'server':d['domain']+':'+str(d['port']),'auth':d['password'],
-       'tls':{'sni':d['domain'],'insecure':False},'socks5':{'listen':'127.0.0.1:1080'}}
-    name='client.yaml'
-f=p/name; tmp=f.with_suffix('.new'); tmp.write_text(q(c,ensure_ascii=False,indent=2)+'\n'); tmp.chmod(0o600); tmp.replace(f)
-PY_HY_CONFIG
-}
-hy2_units() {
-    install -d /usr/local/libexec || return 1
-    cat > /usr/local/libexec/bobarev-hy2-route <<'HY_ROUTE'
-#!/usr/bin/env python3
-import json,subprocess
-from pathlib import Path
-d=json.loads(Path('/etc/bobarev-hy2/state.json').read_text())
-if d.get('role')=='server' and d['exit']=='warp':
-    dev=d['warp_device']
-    subprocess.run(['ip','link','show','dev',dev],check=True)
-    rows=subprocess.check_output(['ip','-4','rule','show'],text=True).splitlines()
-    own=[r for r in rows if r.startswith('6012:')]
-    if own:
-        if not all(('oif '+dev+' ') in r and 'lookup 51820' in r for r in own):
-            raise SystemExit('Priority 6012 already used. Refusing to overwrite unrelated rule.')
-    else:
-        subprocess.run(['ip','-4','rule','add','priority','6012','oif',dev,'lookup','51820'],check=True)
-    routes=subprocess.check_output(['ip','-4','route','show','table','51820'],text=True)
-    if not any(r.startswith('default ') and ('dev '+dev) in r for r in routes.splitlines()):
-        raise SystemExit('No WARP default route in table 51820')
-HY_ROUTE
-    chmod 755 /usr/local/libexec/bobarev-hy2-route
-    local role="$1"
-    cat > "/etc/systemd/system/bobarev-hy2-${role}.service" <<EOF
-[Unit]
-Description=Bobarev Hysteria 2 ${role}
-Wants=network-online.target
-After=network-online.target wg-quick@warp.service
-StartLimitIntervalSec=0
-[Service]
-Type=simple
-UMask=0077
-ExecStartPre=/usr/local/libexec/bobarev-hy2-route
-ExecStart=/usr/local/bin/bobarev-hysteria ${role} -c ${HY2_DIR}/${role}.yaml
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=1048576
-NoNewPrivileges=true
-PrivateTmp=true
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload || return 1
-    systemctl enable "bobarev-hy2-${role}.service" || return 1
-    systemctl restart "bobarev-hy2-${role}.service" || return 1
-    sleep 3
-    systemctl is-active --quiet "bobarev-hy2-${role}.service" || { journalctl -u "bobarev-hy2-${role}" -n 30 --no-pager; return 1; }
-}
-hy2_server() {
-    local domain='' email='' port=36533 cert_mode='' cert='' key='' wan='' pass='' mode=direct
-    hy2_ask 'Домен Hysteria: A-запись на зарубежный сервер, DNS only' '' domain || return 0
-    [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}$ ]] || { hy2_error 'Некорректный домен'; return 1; }
-    hy2_ask 'UDP-порт Hysteria (не занятый Caddy HTTP/3)' 36533 port || return 0
-    [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port>=1 && 10#$port<=65535)) || { hy2_error 'Порт 1..65535'; return 1; }
-    port=$((10#$port))
-    hy2_ask 'Email для ACME' "admin@$domain" email || return 0
-    cert_mode=$(whiptail --title 'Сертификат Hysteria' --menu 'ACME: нужен свободный TCP/80 и доступ к нему извне. Готовый сертификат: продление обеспечивает его владелец.' 15 "$WT_WIDTH" 2 1 'Встроенный ACME (автопродление)' 2 'Готовые fullchain.pem и privkey.pem' 3>&1 1>&2 2>&3) || return 0
-    if [ "$cert_mode" = 1 ]; then
-        cert_mode=acme
-        if ss -H -ltn 'sport = :80' | grep -q .; then hy2_error 'TCP/80 занят. Выберите готовый сертификат; службы автоматически не останавливаются.'; return 1; fi
-    else
-        cert_mode=files
-        hy2_ask 'Абсолютный путь к fullchain.pem' '' cert || return 0
-        hy2_ask 'Абсолютный путь к privkey.pem' '' key || return 0
-        [ -r "$cert" ] && [ -r "$key" ] || { hy2_error 'Сертификат или ключ недоступны'; return 1; }
-        openssl x509 -in "$cert" -noout -checkhost "$domain" || return 1
-        openssl x509 -in "$cert" -noout -checkend 86400 || return 1
-        local pub1 pub2
-        pub1=$(openssl x509 -in "$cert" -pubkey -noout) || return 1
-        pub2=$(openssl pkey -in "$key" -pubout -passin pass:) || return 1
-        [ "$pub1" = "$pub2" ] || { hy2_error 'Ключ не соответствует сертификату'; return 1; }
-    fi
-    hy2_prepare || return 1
-    getent ahostsv4 "$domain" || { hy2_error 'Не найдена A-запись'; return 1; }
-    echo 'Проверьте: выше указан IP ИМЕННО зарубежного VPS, не IP WARP. Неверную AAAA-запись удалите.'
-    prompt_yn 'A/AAAA указывают на этот VPS, домен DNS only, порты открыты у провайдера?' false || return 0
-    wan=$(get_wan_if)
-    [[ "$wan" =~ ^[a-zA-Z0-9_.:-]+$ ]] || { hy2_error 'Не определён WAN'; return 1; }
-    if prompt_yn 'Выход через Cloudflare WARP? (Нет = чистый IP VPS)' true; then
-        ensure_warp_installed_and_configured || return 1
-        systemctl is-active --quiet wg-quick@warp || return 1
-        mode=warp
-    fi
-    pass=$(openssl rand -hex 24) || return 1
-    hy2_install_binary || return 1
-    python3 - "$HY2_DIR" "$domain" "$port" "$pass" "$email" "$cert_mode" "$cert" "$key" "$mode" "$wan" <<'PY_HY_STATE'
-import json,sys
-from pathlib import Path
-p,domain,port,password,email,cm,cert,key,mode,wan=sys.argv[1:]
-d=dict(role='server',domain=domain,port=int(port),password=password,email=email,cert_mode=cm,cert=cert,key=key,exit=mode,wan=wan,warp_device='warp')
-f=Path(p)/'state.json'; f.write_text(json.dumps(d)); f.chmod(0o600)
-PY_HY_STATE
-    hy2_write_config || return 1
-    if command -v ufw >/dev/null; then
-        ufw allow "$port/udp" comment 'Bobarev HY2' || return 1
-        [ "$cert_mode" != acme ] || ufw allow 80/tcp comment 'HY2 ACME HTTP-01' || return 1
-    fi
-    hy2_units server || return 1
-    echo 'Служба запущена; это НЕ подтверждение получения сертификата и работы всего каскада. Выполните диагностику.'
-    hy2_token
-}
-hy2_token() {
-    python3 - "$HY2_DIR/state.json" <<'PY_HY_TOKEN'
-import json,base64,sys
-d=json.load(open(sys.argv[1])); assert d['role']=='server', 'Токен доступен только на зарубежном сервере'
-t={k:d[k] for k in ('domain','port','password')}; t['version']=1
-print('СЕКРЕТНЫЙ токен (Base64 не шифрует пароль):')
-print(base64.urlsafe_b64encode(json.dumps(t).encode()).decode())
-PY_HY_TOKEN
-}
-hy2_client() {
-    local token='' domain='' email='' user='' password=''
-    hy2_ask 'Токен с зарубежного сервера (новый JSON-формат)' '' token || return 0
-    hy2_prepare || return 1
-    python3 - "$HY2_DIR" "$token" <<'PY_HY_DECODE'
-import json,base64,sys,re
-from pathlib import Path
-try:
- s=''.join(sys.argv[2].split()); d=json.loads(base64.b64decode(s,altchars=b'-_',validate=True))
- assert d['version']==1 and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}',d['domain'])
- assert type(d['port']) is int and 1<=d['port']<=65535
- assert re.fullmatch(r'[a-f0-9]{48}',d['password'])
- d={k:d[k] for k in ('domain','port','password')}; d['role']='client'
- f=Path(sys.argv[1])/'client-pending.json'; f.write_text(json.dumps(d)); f.chmod(0o600)
-except Exception:
- raise SystemExit('Неверный токен. Требуется токен нового Каскада 2, не старый IP|port|password.')
-PY_HY_DECODE
-    [ "$?" -eq 0 ] || return 1
-    hy2_ask 'Домен NaiveProxy: A-запись на российский VPS' '' domain || return 0
-    [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] || return 1
-    hy2_ask 'Email NaiveProxy' "admin@$domain" email || return 0
-    [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]] || return 1
-    if is_wg_cascade_active; then hy2_error 'Активен WG-каскад. Сначала остановите Каскад 1 (сохраните его конфиг).'; return 1; fi
-    if ss -H -ltn 'sport = :1080' | grep -q . && ! systemctl is-active --quiet bobarev-hy2-client; then hy2_error 'TCP/1080 занят другой службой'; return 1; fi
-    ensure_go_and_build_caddy_naive || return 1
-    hy2_install_binary || return 1
-    if [ ! -s "$NAIVE_PASS_FILE" ]; then
-        hy2_ask 'Имя первого пользователя NaiveProxy' user1 user || return 0
-        [[ "$user" =~ ^[a-zA-Z0-9_-]+$ ]] || return 1
-        password=$(openssl rand -hex 16) || return 1
-        add_or_update_naive_user "$user" "$password" || return 1
-    fi
-    mv "$HY2_DIR/client-pending.json" "$HY2_DIR/state.json" || return 1
-    hy2_write_config || return 1
-    hy2_units client || return 1
-    install -d -m 755 /etc/default
-    # Validated strings only; shell-compatible legacy state needed by Naive user functions.
-    printf 'CASCADE_ROLE="ru_hy2"\nNAIVE_DOMAIN="%s"\nNAIVE_EMAIL="%s"\n' "$domain" "$email" > /etc/default/bobarev-cascade
-    chmod 600 /etc/default/bobarev-cascade
-    render_naive_caddyfile || return 1
-    if curl --fail --silent --show-error --max-time 25 --proxy socks5h://127.0.0.1:1080 https://www.cloudflare.com/cdn-cgi/trace; then
-        echo 'SOCKS5 -> Hysteria работает. Проверка NaiveProxy с клиентского устройства ещё необходима.'
-    else
-        hy2_error 'Конфигурация сохранена, но end-to-end SOCKS5 тест НЕ прошёл. Смотрите диагностику.'
-        return 1
-    fi
-    print_naive_shadowrocket_links
-}
-hy2_toggle() {
-    [ -f "$HY2_DIR/state.json" ] || return 1
-    local role mode
-    role=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["role"])' "$HY2_DIR/state.json") || return 1
-    [ "$role" = server ] || { hy2_error 'Переключайте выход на зарубежном сервере'; return 1; }
-    mode=$(whiptail --title 'Выход Hysteria' --menu 'Не меняет глобальный default route VPS' 13 "$WT_WIDTH" 2 direct 'Чистый IP VPS' warp 'Cloudflare WARP' 3>&1 1>&2 2>&3) || return 0
-    if [ "$mode" = warp ]; then ensure_warp_installed_and_configured || return 1; fi
-    hy2_prepare || return 1
-    python3 - "$HY2_DIR/state.json" "$mode" <<'PY_HY_MODE'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1]); d=json.loads(p.read_text()); d['exit']=sys.argv[2]; p.write_text(json.dumps(d)); p.chmod(0o600)
-PY_HY_MODE
-    hy2_write_config && hy2_units server
-}
-hy2_diagnostics() {
-    systemctl --no-pager --full status bobarev-hy2-server bobarev-hy2-client caddy || true
-    journalctl -u bobarev-hy2-server -u bobarev-hy2-client -n 60 --no-pager || true
-    ip -4 rule show
-    ip -4 route show table 51820 || true
-    ss -lntup | grep -E '1080|hysteria|caddy' || true
-    if systemctl is-active --quiet bobarev-hy2-client; then
-        curl --fail --show-error --max-time 25 --proxy socks5h://127.0.0.1:1080 https://www.cloudflare.com/cdn-cgi/trace || true
-    fi
-    echo 'В режиме WARP ожидается warp=on/plus. Логи могут содержать IP/домены; перед публикацией проверьте их.'
-}
-mod_hy2_cascade() {
-    local choice status
-    while true; do
-        MODULE_CANCELED=false
-        status='Не активен'
-        if systemctl is-active --quiet bobarev-hy2-server; then status='Зарубежный сервер активен'; fi
-        if systemctl is-active --quiet bobarev-hy2-client; then status='РФ-клиент активен'; fi
-        choice=$(whiptail --title 'Каскад 2: NaiveProxy + Hysteria 2 + WARP' --menu "Статус: $status\nКлиент -> NaiveProxy -> Hysteria 2 -> WARP / IP VPS" 22 "$WT_WIDTH" 9 \
-          1 'Шаг 1: зарубежный сервер + сертификат ACME / PEM' \
-          2 'Шаг 2: российский сервер NaiveProxy -> Hysteria' \
-          3 'Пользователи NaiveProxy: добавить / удалить' \
-          4 'Показать ссылки Shadowrocket' \
-          5 'Переключить выход: чистый IP / Cloudflare WARP' \
-          6 'Показать токен (на зарубежном сервере)' \
-          7 'Остановить / отключить Hysteria, без удаления данных' \
-          8 'Диагностика, логи и проверка выхода' \
-          9 'Запустить настроенную службу Hysteria' \
-          0 'Назад' 3>&1 1>&2 2>&3) || return 0
-        clear
-        case "$choice" in
-          0) return 0;;
-          1) hy2_server || echo 'Настройка не завершена. См. ошибку выше.';;
-          2) hy2_client || echo 'Настройка не завершена. См. ошибку выше.';;
-          3) manage_naive_users_menu;;
-          4) print_naive_shadowrocket_links;;
-          5) hy2_toggle || echo 'Переключение не завершено.';;
-          6) hy2_token || true;;
-          7) if prompt_yn 'Остановить обе службы HY2? NaiveProxy потеряет upstream (без прямого fallback). WARP и WG не трогаются.' false; then
-                 systemctl disable --now bobarev-hy2-server.service bobarev-hy2-client.service 2>/dev/null || true
-             fi;;
-          8) hy2_diagnostics;;
-          9) local role
-             role=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["role"])' "$HY2_DIR/state.json") || { pause_enter; continue; }
-             case "$role" in server|client) hy2_units "$role" || true;; esac;;
-        esac
-        pause_enter
-    done
-}
-
 # ------------------------------------------------------------------------------
 # ОБРАБОТКА CLI-АРГУМЕНТОВ БЫСТРОГО ЗАПУСКА
 # ------------------------------------------------------------------------------
@@ -6090,11 +6130,11 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.9.1-rc1 (base 3.8.37)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.34 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
-            echo "  --net-audit   Глубокий аудит сети, ТСПУ и каскадных пар (Модуль 22)"
+            echo "  --net-audit   Глубокий аудит сети, ТСПУ и каскадных пар (Модуль 21)"
             echo "  --update, -u  Обновление пакетов, приоритет IPv4 и настройка zRAM (Модуль 3)"
             echo "  --backup, -b  Экспорт или импорт настроек сервера (Модуль 19)"
             echo "  --auto        Последовательная настройка сервера целиком (Шаги 1-12)"
@@ -6167,7 +6207,7 @@ while true; do
     "17" "🔍 Интеллектуальный аудит системы" \
     "18" "📡 Режим локального маршрутизатора" \
     "19" "📦 Экспорт / Импорт настроек" \
-    "20" "🚀 Каскад 1: NaiveProxy + Wireguard + WARP" \
+    "20" "🚀 Каскад 1: NaiveProxy + WG + udp2raw + WARP" \
     "21" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
     "22" "🩺 Глубокий аудит сети и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
@@ -6201,7 +6241,7 @@ while true; do
         18) mod_router_sbc; pause_enter ;;
         19) mod_backup_manager; pause_enter ;;
         20) mod_direct_wg_cascade ;;
-        21) mod_hy2_cascade ;;
+        21) install_naive_hysteria_warp_stack ;;
         22) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac

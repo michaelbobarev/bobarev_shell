@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.48 (Professional Stealth & Audit Suite)
+# Версия: 3.8.49 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -809,7 +809,9 @@ apply_naive_tcp_tuning_profile() {
 # Bobarev Shell: Aggressive Anti-HoL Blocking Profile (Low-Latency / High-Loss)
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_mtu_probing = 0
+net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 1
 net.ipv4.tcp_early_retrans = 3
 net.ipv4.tcp_sack = 1
@@ -840,7 +842,9 @@ TUNE_EOF
 # Bobarev Shell: Balanced High-Throughput Profile for NaiveProxy + WG + udp2raw Cascade
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_mtu_probing = 0
+net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 0
 net.ipv4.tcp_early_retrans = 3
 net.ipv4.tcp_sack = 1
@@ -935,7 +939,8 @@ if [ -f /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf ]; then
 else
     sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_mtu_probing=0 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_autocorking=0 >/dev/null 2>&1 || true
 fi
 
 sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null 2>&1 || true
@@ -1640,7 +1645,7 @@ configure_udp2raw_service() {
 
     # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
     # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a --fix-gro"
+    local extra_flags="-a"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]

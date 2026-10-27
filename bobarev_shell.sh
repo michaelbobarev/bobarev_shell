@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.53 (Professional Stealth & Audit Suite)
+# Версия: 3.8.54 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -2659,6 +2659,7 @@ render_xray_client_config() {
   ],
   "outbounds": [
     {
+      "tag": "proxy",
       "protocol": "vless",
       "settings": {
         "vnext": [
@@ -2684,6 +2685,27 @@ render_xray_client_config() {
           "publicKey": "${s2_pub}",
           "shortId": "${s2_short_id}",
           "spiderX": ""
+        },
+        "sockopt": {
+          "dialerProxy": "fragment",
+          "tcpNoDelay": true
+        }
+      }
+    },
+    {
+      "tag": "fragment",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "AsIs",
+        "fragment": {
+          "packets": "1-3",
+          "length": "100-200",
+          "interval": "10-20"
+        }
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tcpNoDelay": true
         }
       }
     }
@@ -2746,6 +2768,7 @@ setup_cascade_xray_server2_foreign() {
 
     if command -v ufw &>/dev/null; then
         silent_run ufw allow "${x_port}/tcp" comment 'Xray REALITY TCP'
+        silent_run ufw reload
     fi
 
     local wan_dev=$(get_wan_if)
@@ -2836,11 +2859,16 @@ setup_cascade_xray_server1_ru() {
     ensure_go_and_build_caddy_naive || return 1
 
     echo -e "${C_BLUE}🧹 Очистка конфликтующих служб и старых маршрутов...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service bobarev-xray.service
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade 2>/dev/null || true
     ip link del dev wg-cascade 2>/dev/null || true
     ip route flush table 51888 2>/dev/null || true
+    while ip rule del priority 100 2>/dev/null; do :; done
+    while ip rule del priority 101 2>/dev/null; do :; done
+    while ip rule del priority 102 2>/dev/null; do :; done
+    while ip rule del priority 103 2>/dev/null; do :; done
+    while ip rule del priority 104 2>/dev/null; do :; done
     while ip rule del priority 30000 2>/dev/null; do :; done
     while ip rule del lookup 51888 2>/dev/null; do :; done
     clean_duplicate_cascade_iptables
@@ -2914,7 +2942,7 @@ manage_cascade_xray_menu() {
         local c_choice
         if ! smart_menu "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" "
 Текущая роль: $c_state
-Выберите действие:" 19 $WT_WIDTH 7 "c_choice"         "1" "🌍 Сервер 2 (Выход Зарубеж): Xray REALITY -> WARP / Чистый IP"         "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> Xray REALITY"         "3" "👤 Управление пользователями NaiveProxy"         "4" "📋 Показать ссылки для Shadowrocket"         "5" "🔑 Показать Токен Xray REALITY (на Сервере 2)"         "6" "🛑 Остановить службы Xray"         "0" "🔙 Вернуться назад" || [ "$c_choice" = "0" ]; then
+Выберите действие:" 19 $WT_WIDTH 7 "c_choice"         "1" "🌍 Сервер 2 (Выход Зарубеж): Xray REALITY -> WARP / Чистый IP"         "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> Xray REALITY"         "3" "👤 Управление пользователями NaiveProxy"         "4" "📋 Показать ссылки для Shadowrocket"         "5" "🔄 Переключить выход на Сервере 2: Чистый IP <-> Cloudflare WARP"         "6" "🔑 Показать Токен Xray REALITY (на Сервере 2)"         "7" "🛑 Остановить службы Xray"         "0" "🔙 Вернуться назад" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -2924,7 +2952,8 @@ manage_cascade_xray_menu() {
             2) setup_cascade_xray_server1_ru || true; pause_enter ;;
             3) manage_naive_users_menu ;;
             4) print_naive_shadowrocket_links; pause_enter ;;
-            5)
+            5) toggle_foreign_warp_menu; pause_enter ;;
+            6)
                 if [ -f /etc/default/bobarev-cascade ]; then
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
@@ -2939,7 +2968,7 @@ manage_cascade_xray_menu() {
                 fi
                 pause_enter
                 ;;
-            6)
+            7)
                 if prompt_yn "Остановить и отключить службы Xray на этом сервере?" "false"; then
                     silent_run systemctl stop bobarev-xray.service
                     silent_run systemctl disable bobarev-xray.service
@@ -6767,7 +6796,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.53 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.54 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

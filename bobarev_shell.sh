@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.45 (Professional Stealth & Audit Suite)
+# Версия: 3.8.45_optimized (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -764,7 +764,7 @@ manage_naive_users_menu() {
                 prompt_default "Введите имя пользователя NaiveProxy:" "user1" new_u
                 if [ "$MODULE_CANCELED" = false ] && [ -n "$new_u" ]; then
                     new_u=$(echo "$new_u" | tr -dc 'a-zA-Z0-9_-')
-                    local def_p=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "NaivePass2026")
+                    local def_p=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
                     local new_p=""
                     prompt_default "Введите пароль для $new_u:" "$def_p" new_p
                     if [ "$MODULE_CANCELED" = false ] && [ -n "$new_p" ]; then
@@ -985,12 +985,12 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     while ip rule del priority 100 2>/dev/null; do :; done
     [ -n "$PUB_IP" ] && while ip rule del from "$PUB_IP" lookup main 2>/dev/null; do :; done
     ip route replace default dev wg-cascade table 51888 2>/dev/null || true
-    ip link set dev wg-cascade mtu 1200 txqueuelen 10000 2>/dev/null || true
+    ip link set dev wg-cascade mtu 1300 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -I POSTROUTING 1 -o wg-cascade -j MASQUERADE 2>/dev/null || true
-    iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-    iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-    iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+    iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+    iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+    iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
 fi
 RU_SH_EOF
     chmod +x /usr/local/bin/bobarev-cascade-ru.sh
@@ -1045,7 +1045,7 @@ setup_cascade_server1_ru() {
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
     n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
 
-    local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "NaivePass2026")
+    local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
     local n_pass=""
     prompt_default "Пароль для пользователя $n_user (минимум 8 символов):" "$rand_pass" n_pass
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
@@ -1186,7 +1186,7 @@ PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || ipta
 PostUp = iptables -C FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
 PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
-PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160
+PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260
 PostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
 PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
@@ -1512,7 +1512,7 @@ apply_foreign_exit_mode() {
         echo -e "${C_BLUE}🌍 Включение режима ПРЯМОГО ВЫХОДА (Чистый IP зарубежного сервера без WARP)...${C_RESET}"
         silent_run systemctl stop wg-quick@warp.service
         silent_run systemctl disable wg-quick@warp.service
-        ip link set dev wg-cascade mtu 1200 txqueuelen 10000 2>/dev/null || true
+        ip link set dev wg-cascade mtu 1300 txqueuelen 10000 2>/dev/null || true
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
 
         iptables -C FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o "$wan_dev" -j ACCEPT
@@ -1522,9 +1522,9 @@ apply_foreign_exit_mode() {
         apply_wan_exit_nat "$wan_dev" "true"
 
         # Для прямого WG-моста: MSS 1200; для Tailscale (с учетом заголовка Disco): MSS 1140
-        iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
@@ -1538,7 +1538,7 @@ apply_foreign_exit_mode() {
     else
         echo -e "${C_BLUE}☁️ Включение режима CLOUDFLARE WARP на выходе Зарубежного сервера...${C_RESET}"
         ensure_warp_installed_and_configured
-        ip link set dev wg-cascade mtu 1200 txqueuelen 10000 2>/dev/null || true
+        ip link set dev wg-cascade mtu 1300 txqueuelen 10000 2>/dev/null || true
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
         ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
         ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
@@ -1549,9 +1549,9 @@ apply_foreign_exit_mode() {
         iptables -C FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
         iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
 
-        iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
@@ -1656,7 +1656,7 @@ CPUSchedulingPolicy=rr
 CPUSchedulingPriority=50
 LimitNOFILE=1048576
 LimitMEMLOCK=infinity
-ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode xor --auth-mode simple ${extra_flags}
+ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode none --auth-mode none ${extra_flags}
 Restart=always
 RestartSec=3
 
@@ -1697,16 +1697,16 @@ setup_direct_wg_server2_foreign() {
 
     local obfs_choice=""
     if ! smart_menu "2/3. Защита заголовков WireGuard от ТСПУ" "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 "obfs_choice" \
-    "1" "🛡️ UDP-XOR Маскировка (Рекомендуется — обходит DPI без потери скорости)" \
-    "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
+    "1" "🛡️ FakeTCP Маскировка (Рекомендуется — обходит шейпинг ТСПУ для UDP)" \
+    "2" "🔒 UDP-XOR Маскировка (Если FakeTCP режется)" \
     "3" "⚡ Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"; then
         return 0
     fi
 
-    local obfs_mode="udp"
+    local obfs_mode="faketcp"
     case "$obfs_choice" in
-        1) obfs_mode="udp" ;;
-        2) obfs_mode="faketcp" ;;
+        1) obfs_mode="faketcp" ;;
+        2) obfs_mode="udp" ;;
         3) obfs_mode="none" ;;
     esac
 
@@ -1741,7 +1741,7 @@ setup_direct_wg_server2_foreign() {
     local s1_priv_1=$(wg genkey); local s1_pub_1=$(echo "$s1_priv_1" | wg pubkey); local psk_1=$(wg genpsk)
     local s1_priv_2=$(wg genkey); local s1_pub_2=$(echo "$s1_priv_2" | wg pubkey); local psk_2=$(wg genpsk)
     local s1_priv_3=$(wg genkey); local s1_pub_3=$(echo "$s1_priv_3" | wg pubkey); local psk_3=$(wg genpsk)
-    local obfs_key=$(openssl rand -hex 8 2>/dev/null || echo "bobarev2026key")
+    local obfs_key=$(openssl rand -hex 8 2>/dev/null || echo "mysecretkey2026")
 
     local wg_listen_port="$ext_port"
     if [ "$obfs_mode" != "none" ]; then
@@ -1762,23 +1762,23 @@ PostUp = ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 || true"
 Address = 10.200.200.1/24
 ListenPort = $wg_listen_port
 PrivateKey = $s2_priv
-MTU = 1200
+MTU = 1300
 Table = off
-PostUp = ip link set dev wg-cascade mtu 1200 txqueuelen 10000 || true
+PostUp = ip link set dev wg-cascade mtu 1300 txqueuelen 10000 || true
 PostUp = tc qdisc replace dev wg-cascade root fq limit 30000 flow_limit 10000 2>/dev/null || true
 PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 ${warp_rule_postup}
-PostUp = iptables -t mangle -C FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
-PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
-PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
+PostUp = iptables -t mangle -C FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 || true
+PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 || true
+PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 || true
 PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o $wan_dev -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i $wan_dev -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
 
 [Peer]
 # RU Entry Server #1 (10.200.200.2)
@@ -1925,7 +1925,7 @@ except Exception:
         decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\n\r' || echo "")
     fi
 
-    local s2_ip="" s2_port="" s2_pub="" s1_priv="" psk="" obfs_mode="none" obfs_key="bobarev2026key" s1_tun_ip="10.200.200.2"
+    local s2_ip="" s2_port="" s2_pub="" s1_priv="" psk="" obfs_mode="none" obfs_key="mysecretkey2026" s1_tun_ip="10.200.200.2"
     IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key s1_tun_ip <<< "$decoded"
     s2_ip=$(printf '%s' "$s2_ip" | tr -d '[:space:]')
     s2_port=$(printf '%s' "$s2_port" | tr -dc '0-9')
@@ -1966,7 +1966,7 @@ except Exception:
         if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
         n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
 
-        local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "NaivePass2026")
+        local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
         local n_pass=""
         prompt_default "Пароль для пользователя $n_user:" "$rand_pass" n_pass
         if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
@@ -2026,9 +2026,9 @@ except Exception:
 [Interface]
 Address = ${s1_tun_ip}/24
 PrivateKey = $s1_priv
-MTU = 1200
+MTU = 1300
 Table = 51888
-PostUp = ip link set dev wg-cascade mtu 1200 txqueuelen 10000 || true
+PostUp = ip link set dev wg-cascade mtu 1300 txqueuelen 10000 || true
 PostUp = tc qdisc replace dev wg-cascade root fq limit 30000 flow_limit 10000 2>/dev/null || true
 PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
 PostUp = ip route flush table 51888 2>/dev/null || true
@@ -2044,18 +2044,18 @@ PostUp = ip rule add sport $ssh_p lookup main priority 104 || true
 PostUp = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostUp = ip rule add lookup 51888 priority 30000 || true
 PostUp = iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE || true
-PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
-PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
-PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 || true
+PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 || true
+PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 || true
+PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 || true
 PostDown = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostDown = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
 PostDown = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
 PostDown = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
 PostDown = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-PostDown = iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1160 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+PostDown = iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
+PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260 2>/dev/null || true
 
 [Peer]
 # Foreign Server 2 (WG -> Exit)
@@ -2131,7 +2131,7 @@ setup_cascade_hysteria_server2_foreign() {
     if [ "$MODULE_CANCELED" = true ] || [ -z "$h_port" ]; then return 0; fi
     h_port="${h_port//[^0-9]/}"
 
-    local h_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "HysteriaPass2026")
+    local h_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "SecretPass2026")
     local h_pass_input=""
     prompt_default "2/3. Пароль для моста Hysteria 2:" "$h_pass" h_pass_input
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
@@ -2309,7 +2309,7 @@ setup_cascade_hysteria_server1_ru() {
         if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
         n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
 
-        local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "NaivePass2026")
+        local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
         local n_pass=""
         prompt_default "Пароль для пользователя $n_user:" "$rand_pass" n_pass
         if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi

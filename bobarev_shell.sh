@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.45_optimized (Professional Stealth & Audit Suite)
+# Версия: 3.8.46 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1666,7 +1666,7 @@ EOF
 
     local wan_if=$(get_wan_if)
     if [ -n "$wan_if" ] && command -v ethtool &>/dev/null; then
-        ethtool -K "$wan_if" gro off gso off tso off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
+        ethtool -K "$wan_if" gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
     fi
 
     systemctl daemon-reload
@@ -1697,16 +1697,16 @@ setup_direct_wg_server2_foreign() {
 
     local obfs_choice=""
     if ! smart_menu "2/3. Защита заголовков WireGuard от ТСПУ" "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 "obfs_choice" \
-    "1" "🛡️ FakeTCP Маскировка (Рекомендуется — обходит шейпинг ТСПУ для UDP)" \
-    "2" "🔒 UDP-XOR Маскировка (Если FakeTCP режется)" \
+    "1" "🛡️ UDP-XOR Маскировка (Рекомендуется — обходит DPI без потери скорости)" \
+    "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
     "3" "⚡ Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"; then
         return 0
     fi
 
-    local obfs_mode="faketcp"
+    local obfs_mode="udp"
     case "$obfs_choice" in
-        1) obfs_mode="faketcp" ;;
-        2) obfs_mode="udp" ;;
+        1) obfs_mode="udp" ;;
+        2) obfs_mode="faketcp" ;;
         3) obfs_mode="none" ;;
     esac
 
@@ -1859,7 +1859,7 @@ WG_BRIDGE_TOKEN_3="$bridge_token_3"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1200, MSS 1160, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1300, MSS 1260, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
     echo -e "\n${C_CYAN}🔑 === ИНДИВИДУАЛЬНЫЕ ТОКЕНЫ ДЛЯ ПОДКЛЮЧЕНИЯ РОССИЙСКИХ СЕРВЕРОВ ===${C_RESET}"
     echo -e "${C_YELLOW}💡 Используйте свой отдельный токен для каждого РФ-сервера, чтобы они работали одновременно без конфликта IP!${C_RESET}"
     echo -e "\n  • ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
@@ -2102,7 +2102,7 @@ EOF
     fi
     disable_ufw_strict_rpfilter
 
-    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1200, MSS 1160 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1300, MSS 1260 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
     echo -e "${C_BLUE}⚡ Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
     for i in {1..10}; do
         ping -c 1 -W 1 10.200.200.1 >/dev/null 2>&1 || true
@@ -2927,7 +2927,7 @@ NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|
 if [ -n "$NETDEV" ]; then
     if systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null || [ -f /etc/systemd/system/bobarev-udp2raw.service ]; then
         # Для сырых сокетов udp2raw (PF_PACKET) склейка UDP GRO в ядре вызывает дропы пакетов > MTU на virtio_net
-        ethtool -K "$NETDEV" gro off gso off tso off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
+        ethtool -K "$NETDEV" gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
     else
         ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
     fi

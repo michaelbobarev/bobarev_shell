@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.46 (Professional Stealth & Audit Suite)
+# Версия: 3.8.47 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1666,7 +1666,7 @@ EOF
 
     local wan_if=$(get_wan_if)
     if [ -n "$wan_if" ] && command -v ethtool &>/dev/null; then
-        ethtool -K "$wan_if" gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
+        ethtool -K "$wan_if" rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
     fi
 
     systemctl daemon-reload
@@ -1697,16 +1697,16 @@ setup_direct_wg_server2_foreign() {
 
     local obfs_choice=""
     if ! smart_menu "2/3. Защита заголовков WireGuard от ТСПУ" "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 "obfs_choice" \
-    "1" "🛡️ UDP-XOR Маскировка (Рекомендуется — обходит DPI без потери скорости)" \
-    "2" "🔒 FakeTCP Маскировка (Если хостер блокирует UDP целиком)" \
+    "1" "🔒 FakeTCP Маскировка (Рекомендуется — полностью мимикрирует под TCP-поток)" \
+    "2" "🛡️ UDP-XOR Маскировка (Резервный вариант)" \
     "3" "⚡ Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"; then
         return 0
     fi
 
-    local obfs_mode="udp"
+    local obfs_mode="faketcp"
     case "$obfs_choice" in
-        1) obfs_mode="udp" ;;
-        2) obfs_mode="faketcp" ;;
+        1) obfs_mode="faketcp" ;;
+        2) obfs_mode="udp" ;;
         3) obfs_mode="none" ;;
     esac
 
@@ -2927,7 +2927,7 @@ NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|
 if [ -n "$NETDEV" ]; then
     if systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null || [ -f /etc/systemd/system/bobarev-udp2raw.service ]; then
         # Для сырых сокетов udp2raw (PF_PACKET) склейка UDP GRO в ядре вызывает дропы пакетов > MTU на virtio_net
-        ethtool -K "$NETDEV" gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
+        ethtool -K "$NETDEV" rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
     else
         ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
     fi
@@ -6292,7 +6292,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.45 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.47 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

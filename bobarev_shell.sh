@@ -6879,8 +6879,9 @@ while true; do
         18) mod_backup_manager; pause_enter ;;
         19) mod_direct_wg_cascade ;;
         20) manage_cascade_hysteria_menu ;;
-        21) mod_server_audit; pause_enter ;;
-        22) mod_network_cascade_audit ;;
+        21) manage_cascade_xray_menu ;;
+        22) mod_server_audit; pause_enter ;;
+        23) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

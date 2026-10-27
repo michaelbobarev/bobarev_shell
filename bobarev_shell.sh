@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.42 (Professional Stealth & Audit Suite - Routing Leak Fix)
+# Версия: 3.8.41 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -2027,6 +2027,10 @@ PostUp = ip route flush table 51888 2>/dev/null || true
 PostUp = ip route replace default dev wg-cascade table 51888 || true
 PostUp = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
 PostUp = ip rule add to $s2_ip lookup main priority 101 || true
+PostUp = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
+PostUp = ip rule add sport 443 lookup main priority 102 || true
+PostUp = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
+PostUp = ip rule add sport 80 lookup main priority 103 || true
 PostUp = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
 PostUp = ip rule add sport $ssh_p lookup main priority 104 || true
 PostUp = ip rule del lookup 51888 priority 30000 2>/dev/null || true
@@ -2037,6 +2041,8 @@ PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST S
 PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 || true
 PostDown = ip rule del lookup 51888 priority 30000 2>/dev/null || true
 PostDown = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
+PostDown = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
+PostDown = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
 PostDown = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200 2>/dev/null || true

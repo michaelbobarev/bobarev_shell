@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.54 (Professional Stealth & Audit Suite)
+# Версия: 3.8.55 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -620,6 +620,7 @@ ${auth_lines}        }
         forward_proxy {
             hide_ip
             hide_via
+            flush_interval -1
 $( [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ] && echo "            upstream socks5://127.0.0.1:1080" )
 $( [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && echo "            upstream socks5://127.0.0.1:10808" )
         }
@@ -807,11 +808,12 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell: Aggressive Anti-HoL Blocking Profile (Low-Latency / High-Loss)
+# Bobarev Shell v3.8.55: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 0
+net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 1
 net.ipv4.tcp_early_retrans = 3
@@ -823,29 +825,38 @@ net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
-net.core.rmem_default = 4194304
-net.core.wmem_default = 4194304
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
 net.core.optmem_max = 2097152
 net.core.netdev_max_backlog = 30000
-net.core.somaxconn = 16384
+net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 131072 262144 524288
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 131072 33554432
-net.ipv4.tcp_wmem = 4096 65536 33554432
+net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 5
 net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 14400
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell: Balanced High-Throughput Profile for NaiveProxy + WG + udp2raw Cascade
+# Bobarev Shell v3.8.55: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_mtu_probing = 0
+net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 0
 net.ipv4.tcp_early_retrans = 3
@@ -857,19 +868,27 @@ net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
-net.core.rmem_default = 4194304
-net.core.wmem_default = 4194304
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
 net.core.optmem_max = 2097152
 net.core.netdev_max_backlog = 30000
-net.core.somaxconn = 16384
+net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 131072 262144 524288
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 131072 33554432
-net.ipv4.tcp_wmem = 4096 65536 33554432
+net.ipv4.tcp_rmem = 4096 131072 67108864
+net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 5
 net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 14400
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
 net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
 net.core.default_qdisc = fq
@@ -941,7 +960,9 @@ if [ -f /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf ]; then
 else
     sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_mtu_probing=0 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_base_mss=1024 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_no_metrics_save=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_autocorking=0 >/dev/null 2>&1 || true
 fi
 WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
@@ -3433,7 +3454,8 @@ if [ -n "$NETDEV" ]; then
         # Для сырых сокетов udp2raw (PF_PACKET) склейка UDP GRO и аппаратный оффлоад TCP вызывают сбои инкапсуляции и дропы пакетов > MTU на virtio_net
         ethtool -K "$NETDEV" tso off gso off gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
     else
-        ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off 2>/dev/null || true
+        ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off tso on gso on gro on 2>/dev/null || true
+        ethtool -G "$NETDEV" rx 1024 tx 1024 2>/dev/null || true
     fi
 fi
 ETHTOOL_SCRIPT_EOF
@@ -6796,7 +6818,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.54 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.55 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

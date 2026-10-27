@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.52 (Professional Stealth & Audit Suite)
+# Версия: 3.8.51 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1644,7 +1644,7 @@ configure_udp2raw_service() {
 
     # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
     # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a --sock-buf 16777216 --seq-mode 4"
+    local extra_flags="-a --sock-buf 10240 --seq-mode 4"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]
@@ -6296,7 +6296,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.52 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.51 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

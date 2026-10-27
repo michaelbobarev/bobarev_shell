@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.44 (Professional Stealth & Audit Suite)
+# Версия: 3.8.45 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1859,7 +1859,7 @@ WG_BRIDGE_TOKEN_3="$bridge_token_3"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1280, MSS 1200, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1200, MSS 1160, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
     echo -e "\n${C_CYAN}🔑 === ИНДИВИДУАЛЬНЫЕ ТОКЕНЫ ДЛЯ ПОДКЛЮЧЕНИЯ РОССИЙСКИХ СЕРВЕРОВ ===${C_RESET}"
     echo -e "${C_YELLOW}💡 Используйте свой отдельный токен для каждого РФ-сервера, чтобы они работали одновременно без конфликта IP!${C_RESET}"
     echo -e "\n  • ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
@@ -2102,7 +2102,7 @@ EOF
     fi
     disable_ufw_strict_rpfilter
 
-    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1280, MSS 1200 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1200, MSS 1160 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
     echo -e "${C_BLUE}⚡ Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
     for i in {1..10}; do
         ping -c 1 -W 1 10.200.200.1 >/dev/null 2>&1 || true
@@ -6292,7 +6292,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.44 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.45 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

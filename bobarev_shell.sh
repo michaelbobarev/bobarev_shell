@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.55 (Professional Stealth & Audit Suite)
+# Версия: 3.8.56 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -620,7 +620,6 @@ ${auth_lines}        }
         forward_proxy {
             hide_ip
             hide_via
-            flush_interval -1
 $( [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ] && echo "            upstream socks5://127.0.0.1:1080" )
 $( [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && echo "            upstream socks5://127.0.0.1:10808" )
         }
@@ -671,9 +670,15 @@ SVC_EOF
     systemctl daemon-reload
     systemctl enable caddy.service >/dev/null 2>&1 || true
     if systemctl is-active --quiet caddy.service; then
-        systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service
+        systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service || true
     else
-        systemctl restart caddy.service
+        systemctl restart caddy.service || true
+    fi
+    sleep 1
+    if ! systemctl is-active --quiet caddy.service; then
+        echo -e "${C_RED}❌ Ошибка запуска caddy.service! Проверка синтаксиса Caddyfile:${C_RESET}"
+        /usr/local/bin/caddy validate --config "$CADDYFILE" 2>&1 || true
+        journalctl -u caddy.service -n 10 --no-pager 2>/dev/null || true
     fi
 }
 
@@ -6818,7 +6823,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.55 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.56 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

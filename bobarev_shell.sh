@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.49 (Professional Stealth & Audit Suite)
+# Версия: 3.8.51 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -814,6 +814,7 @@ net.ipv4.tcp_base_mss = 1024
 net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 1
 net.ipv4.tcp_early_retrans = 3
+net.ipv4.tcp_reordering = 30
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
@@ -821,16 +822,16 @@ net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
-net.core.rmem_default = 2097152
-net.core.wmem_default = 2097152
-net.core.optmem_max = 262144
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+net.core.optmem_max = 2097152
 net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
-net.ipv4.tcp_mem = 65536 131072 262144
-net.ipv4.udp_mem = 65536 131072 262144
-net.ipv4.udp_rmem_min = 65536
-net.ipv4.udp_wmem_min = 65536
+net.ipv4.tcp_mem = 131072 262144 524288
+net.ipv4.udp_mem = 131072 262144 524288
+net.ipv4.udp_rmem_min = 131072
+net.ipv4.udp_wmem_min = 131072
 net.ipv4.tcp_rmem = 4096 131072 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
 net.netfilter.nf_conntrack_max = 262144
@@ -847,6 +848,7 @@ net.ipv4.tcp_base_mss = 1024
 net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 0
 net.ipv4.tcp_early_retrans = 3
+net.ipv4.tcp_reordering = 30
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
@@ -854,16 +856,16 @@ net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
-net.core.rmem_default = 2097152
-net.core.wmem_default = 2097152
-net.core.optmem_max = 262144
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+net.core.optmem_max = 2097152
 net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 16384
 net.ipv4.tcp_max_syn_backlog = 16384
-net.ipv4.tcp_mem = 65536 131072 262144
-net.ipv4.udp_mem = 65536 131072 262144
-net.ipv4.udp_rmem_min = 65536
-net.ipv4.udp_wmem_min = 65536
+net.ipv4.tcp_mem = 131072 262144 524288
+net.ipv4.udp_mem = 131072 262144 524288
+net.ipv4.udp_rmem_min = 131072
+net.ipv4.udp_wmem_min = 131072
 net.ipv4.tcp_rmem = 4096 131072 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
 net.netfilter.nf_conntrack_max = 262144
@@ -875,7 +877,6 @@ TUNE_EOF
     fi
 
     sysctl -p /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
-    sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null 2>&1 || true
     tune_fq_qdisc_interfaces
     ip tcp_metrics flush all >/dev/null 2>&1 || true
 
@@ -942,8 +943,6 @@ else
     sysctl -w net.ipv4.tcp_mtu_probing=0 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_autocorking=0 >/dev/null 2>&1 || true
 fi
-
-sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null 2>&1 || true
 WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$WAN_IF" ] && command -v tc &>/dev/null; then
     tc qdisc replace dev "$WAN_IF" root fq limit 30000 flow_limit 10000 2>/dev/null || true
@@ -1645,7 +1644,7 @@ configure_udp2raw_service() {
 
     # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
     # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a"
+    local extra_flags="-a --sock-buf 10240 --seq-mode 4"
 
     cat << EOF > "$UDP2RAW_SERVICE"
 [Unit]
@@ -6297,7 +6296,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.49 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.51 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

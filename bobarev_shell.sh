@@ -667,7 +667,7 @@ RestartSec=5s
 WantedBy=multi-user.target
 SVC_EOF
 
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
     systemctl enable caddy.service >/dev/null 2>&1 || true
     if systemctl is-active --quiet caddy.service; then
         systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service || true
@@ -1040,7 +1040,7 @@ ExecStart=/usr/local/bin/bobarev-cascade-ru.sh
 [Install]
 WantedBy=multi-user.target
 RU_SVC_EOF
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
     silent_run systemctl enable --now bobarev-cascade-ru.service
 }
 
@@ -1236,8 +1236,8 @@ EOF
     fi
 
     ensure_wg_kernel_modules
-    systemctl daemon-reload
-    systemctl enable --now wg-quick@warp
+    silent_run systemctl daemon-reload
+    silent_run systemctl enable --now wg-quick@warp
     systemctl restart wg-quick@warp || true
 }
 
@@ -1333,7 +1333,7 @@ manage_cascade_naive_ts_warp() {
                     silent_run systemctl stop caddy.service bobarev-cascade-ru.service wg-quick@warp.service wg-quick@wg-cascade.service
                     silent_run tailscale set --exit-node=
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /etc/wireguard/wg-cascade.conf
-                    systemctl daemon-reload
+                    silent_run systemctl daemon-reload
                     echo -e "${C_GREEN}✅ Службы каскада остановлены и отключены.${C_RESET}"
                 fi
                 pause_enter
@@ -1664,7 +1664,7 @@ configure_udp2raw_service() {
         silent_run systemctl disable bobarev-udp2raw.service
         clean_udp2raw_iptables
         rm -f "$UDP2RAW_SERVICE"
-        systemctl daemon-reload
+        silent_run systemctl daemon-reload
         return 0
     fi
 
@@ -1709,7 +1709,7 @@ EOF
         ethtool -K "$wan_if" tso off gso off gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
     fi
 
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
     systemctl reset-failed bobarev-udp2raw.service 2>/dev/null || true
     systemctl enable --now bobarev-udp2raw.service >/dev/null 2>&1 || true
     systemctl restart bobarev-udp2raw.service || true
@@ -1841,7 +1841,7 @@ EOF
     chmod 600 /etc/wireguard/wg-cascade.conf
 
     ensure_wg_kernel_modules
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
     systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
     systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
     if ! systemctl restart wg-quick@wg-cascade.service; then
@@ -2108,7 +2108,7 @@ EOF
     chmod 600 /etc/wireguard/wg-cascade.conf
 
     ensure_wg_kernel_modules
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
     systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
     systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
     if ! systemctl restart wg-quick@wg-cascade.service; then
@@ -2268,8 +2268,8 @@ RestartSec=3
 WantedBy=multi-user.target
 SVC_EOF
 
-    systemctl daemon-reload
-    systemctl enable --now hysteria-server.service
+    silent_run systemctl daemon-reload
+    silent_run systemctl enable --now hysteria-server.service
     systemctl restart hysteria-server.service || true
     sleep 2
 
@@ -2417,8 +2417,8 @@ RestartSec=3
 WantedBy=multi-user.target
 SVC_EOF
 
-    systemctl daemon-reload
-    systemctl enable --now hysteria-client.service
+    silent_run systemctl daemon-reload
+    silent_run systemctl enable --now hysteria-client.service
     systemctl restart hysteria-client.service || true
     sleep 2
 
@@ -2582,7 +2582,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 SVC_EOF
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
 }
 
 render_xray_server_config() {
@@ -2782,7 +2782,7 @@ setup_cascade_xray_server2_foreign() {
     render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "$exit_mode"
     write_xray_service
 
-    systemctl enable --now bobarev-xray.service
+    silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
     sleep 2
 
@@ -2905,7 +2905,7 @@ setup_cascade_xray_server1_ru() {
     render_xray_client_config "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni"
     write_xray_service
 
-    systemctl enable --now bobarev-xray.service
+    silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
     sleep 2
 
@@ -3109,7 +3109,7 @@ mod_direct_wg_cascade() {
                     while ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null; do :; done
                     clean_duplicate_cascade_iptables
                     rm -f /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
-                    systemctl daemon-reload
+                    silent_run systemctl daemon-reload
                     echo -e "${C_GREEN}✅ Прямой мост wg-cascade, хвосты интерфейса и служба udp2raw полностью зачищены.${C_RESET}"
                 fi
                 pause_enter
@@ -3308,8 +3308,8 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-                systemctl daemon-reload
-                systemctl enable --now derper.service
+                silent_run systemctl daemon-reload
+                silent_run systemctl enable --now derper.service
                 systemctl restart derper.service || true
 
                 if command -v ufw &>/dev/null; then
@@ -3346,7 +3346,7 @@ EOF
                     silent_run systemctl stop derper.service
                     silent_run systemctl disable derper.service
                     rm -f /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service /etc/default/bobarev-derp
-                    systemctl daemon-reload
+                    silent_run systemctl daemon-reload
                     if command -v ufw &>/dev/null; then
                         silent_run ufw delete allow 443/tcp
                         silent_run ufw delete allow 3478/udp
@@ -3478,7 +3478,7 @@ ExecStart=/usr/local/bin/tailscale-gro.sh
 [Install]
 WantedBy=multi-user.target
 ETHTOOL_SVC_EOF
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
     silent_run systemctl enable --now tailscale-gro.service
 
     if dpkg -l 2>/dev/null | grep -qw iptables-persistent; then
@@ -3540,7 +3540,7 @@ ensure_tailscale_installed() {
 After=network-online.target NetworkManager-wait-online.service systemd-networkd-wait-online.service
 Wants=network-online.target
 TS_OVERRIDE
-        systemctl daemon-reload
+        silent_run systemctl daemon-reload
 
         mkdir -p /etc/sysctl.d
         tee /etc/sysctl.d/99-tailscale-forward.conf > /dev/null << 'TS_EOF'
@@ -3800,7 +3800,7 @@ UNATTENDED_EOF
     fi
 
     apt-get autoremove -yq && apt-get clean
-    systemctl enable unattended-upgrades
+    silent_run systemctl enable unattended-upgrades
 
     if [ -n "$zram_pkg" ] && [ -f /etc/default/zramswap ]; then
         cat << 'ZRAM_EOF' > /etc/default/zramswap
@@ -4794,7 +4794,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 BOOT_CLEAN_SVC_EOF
 
-        systemctl daemon-reload
+        silent_run systemctl daemon-reload
         silent_run systemctl enable clean-logs-boot.service
         /usr/local/bin/disable-logging.sh
         echo -e "${C_GREEN}✅ Полное отключение системного журналирования успешно настроено.${C_RESET}"
@@ -4890,7 +4890,7 @@ UDEV_EOF
         fi
     done
 
-    systemctl daemon-reload
+    silent_run systemctl daemon-reload
     silent_run mount -a
 }
 
@@ -5778,7 +5778,7 @@ mod_backup_manager() {
 
         if prompt_yn "Восстановить системные настройки из архива $import_path и перезапустить службы?" "false"; then
             tar -xzf "$import_path" -C / 2>/dev/null
-            systemctl daemon-reload 2>/dev/null || true
+            silent_run systemctl daemon-reload 2>/dev/null || true
             sysctl --system >/dev/null 2>&1 || true
             [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
             [ -x /usr/local/bin/bobarev-cascade-ru.sh ] && /usr/local/bin/bobarev-cascade-ru.sh

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.60 (Professional Stealth & Audit Suite)
+# Версия: 3.8.61 (Full Dual-Stack & IPv6 Resilience Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -2430,8 +2430,17 @@ SVC_EOF
     if [ -z "$pub_ip" ]; then
         pub_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
     fi
+    local pub_ipv6=""
+    pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    if [ -z "$pub_ipv6" ]; then
+        pub_ipv6=$(curl -6 -s --max-time 4 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
+    fi
 
     local bridge_token=$(printf '%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" | base64 -w0 2>/dev/null || printf '%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" | base64 | tr -d '\n\r ')
+    local bridge_token_v6=""
+    if [ -n "$pub_ipv6" ]; then
+        bridge_token_v6=$(printf '%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" | base64 -w0 2>/dev/null || printf '%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" | base64 | tr -d '\n\r ')
+    fi
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_hysteria_exit"
@@ -2439,13 +2448,21 @@ FOREIGN_EXIT_MODE="$exit_mode"
 HYSTERIA_PORT="$h_port"
 HYSTERIA_PASS="$h_pass"
 HYSTERIA_TOKEN="$bridge_token"
+HYSTERIA_TOKEN_V6="$bridge_token_v6"
 SERVER_PUB_IP="$pub_ip"
+SERVER_PUB_IPV6="$pub_ipv6"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
     echo -e "\n${C_GREEN}✅ Сервер 2 (Hysteria 2 [порт: $h_port/udp, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "\n${C_CYAN}🔑 ТОКЕН ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
-    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}\n"
+    echo -e "\n${C_CYAN}🔑 ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
+    echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
+    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}"
+    if [ -n "$bridge_token_v6" ]; then
+        echo -e "\n  • ${C_BOLD}Резервный токен (IPv6 — обход блокировки IPv4):${C_RESET}"
+        echo -e "    ${C_BOLD}${C_CYAN}${bridge_token_v6}${C_RESET}"
+    fi
+    echo ""
 }
 
 setup_cascade_hysteria_server1_ru() {
@@ -2517,8 +2534,12 @@ setup_cascade_hysteria_server1_ru() {
     fi
 
     mkdir -p /etc/hysteria
+    local h_server_target="${s2_ip}:${s2_port}"
+    if [[ "$s2_ip" =~ : ]]; then
+        h_server_target="[${s2_ip}]:${s2_port}"
+    fi
     cat << EOF > /etc/hysteria/client.yaml
-server: ${s2_ip}:${s2_port}
+server: ${h_server_target}
 auth: "${s2_pass}"
 
 tls:
@@ -2637,8 +2658,13 @@ manage_cascade_hysteria_menu() {
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${HYSTERIA_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN}🔑 Токен Hysteria 2 для подключения Сервера 1 (РФ):${C_RESET}\n"
+                        echo -e "${C_CYAN}🔑 Токены Hysteria 2 для подключения Сервера 1 (РФ):${C_RESET}\n"
+                        echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
                         echo -e "    ${C_BOLD}${C_GREEN}${HYSTERIA_TOKEN}${C_RESET}\n"
+                        if [ -n "${HYSTERIA_TOKEN_V6:-}" ]; then
+                            echo -e "  • ${C_BOLD}Резервный токен (IPv6):${C_RESET}"
+                            echo -e "    ${C_BOLD}${C_CYAN}${HYSTERIA_TOKEN_V6}${C_RESET}\n"
+                        fi
                     else
                         echo -e "${C_YELLOW}⚠️ Токен Hysteria 2 еще не создан на этом сервере.${C_RESET}"
                     fi
@@ -2943,10 +2969,17 @@ setup_cascade_xray_server2_foreign() {
     if [ -z "$pub_ip" ]; then
         pub_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
     fi
+    local pub_ipv6=""
+    pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    if [ -z "$pub_ipv6" ]; then
+        pub_ipv6=$(curl -6 -s --max-time 4 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
+    fi
 
-    local bridge_token=$(printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 | tr -d '
-
- ')
+    local bridge_token=$(printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 | tr -d '\n\r ')
+    local bridge_token_v6=""
+    if [ -n "$pub_ipv6" ]; then
+        bridge_token_v6=$(printf '%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 | tr -d '\n\r ')
+    fi
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_xray_exit"
@@ -2958,16 +2991,21 @@ XRAY_PUB="$x_pub"
 XRAY_SHORT_ID="$x_short_id"
 XRAY_SNI="$x_sni"
 XRAY_TOKEN="$bridge_token"
+XRAY_TOKEN_V6="$bridge_token_v6"
 SERVER_PUB_IP="$pub_ip"
+SERVER_PUB_IPV6="$pub_ipv6"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "
-${C_GREEN}✅ Сервер 2 (Xray VLESS-REALITY [порт: $x_port/tcp, SNI: $x_sni, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "
-${C_CYAN}🔑 ТОКЕН ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
-    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}
-"
+    echo -e "\n${C_GREEN}✅ Сервер 2 (Xray VLESS-REALITY [порт: $x_port/tcp, SNI: $x_sni, выход: $exit_mode]) успешно запущен!${C_RESET}"
+    echo -e "\n${C_CYAN}🔑 ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
+    echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
+    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}"
+    if [ -n "$bridge_token_v6" ]; then
+        echo -e "\n  • ${C_BOLD}Резервный токен (IPv6 — обход блокировки IPv4):${C_RESET}"
+        echo -e "    ${C_BOLD}${C_CYAN}${bridge_token_v6}${C_RESET}"
+    fi
+    echo ""
 }
 
 setup_cascade_xray_server1_ru() {
@@ -3131,10 +3169,13 @@ manage_cascade_xray_menu() {
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${XRAY_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN}🔑 Токен Xray REALITY для подключения Сервера 1 (РФ):${C_RESET}
-"
-                        echo -e "    ${C_BOLD}${C_GREEN}${XRAY_TOKEN}${C_RESET}
-"
+                        echo -e "${C_CYAN}🔑 Токены Xray REALITY для подключения Сервера 1 (РФ):${C_RESET}\n"
+                        echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
+                        echo -e "    ${C_BOLD}${C_GREEN}${XRAY_TOKEN}${C_RESET}\n"
+                        if [ -n "${XRAY_TOKEN_V6:-}" ]; then
+                            echo -e "  • ${C_BOLD}Резервный токен (IPv6):${C_RESET}"
+                            echo -e "    ${C_BOLD}${C_CYAN}${XRAY_TOKEN_V6}${C_RESET}\n"
+                        fi
                     else
                         echo -e "${C_YELLOW}⚠️ Токен Xray REALITY еще не создан на этом сервере.${C_RESET}"
                     fi
@@ -7005,7 +7046,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.60 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.61 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

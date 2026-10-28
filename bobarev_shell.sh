@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.64 (Full Dual-Stack & IPv6 Resilience Suite)
+# Версия: 3.8.65 (Full Dual-Stack & IPv6 Resilience Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1063,7 +1063,7 @@ setup_standalone_naive() {
         local u_cnt=0
         [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || echo 0)
 
-        local sc_choice
+        local sc_choice=""
         if [ "$is_configured" = true ]; then
             if ! smart_menu "🌐 Автономный NaiveProxy (1 сервер)" "\nСтатус: $c_state\nАктивных пользователей: $u_cnt\nВыберите действие:" 16 $WT_WIDTH 5 "sc_choice" \
             "1" "📋 Показать ссылки Shadowrocket" \
@@ -1074,7 +1074,13 @@ setup_standalone_naive() {
                 break
             fi
         else
-            sc_choice="3"
+            if ! smart_menu "🌐 Автономный NaiveProxy (1 сервер)" "\nСтатус: $c_state\n\nNaiveProxy работает на одном сервере с прямым выходом в интернет.\nВыберите действие:" 14 $WT_WIDTH 2 "sc_choice" \
+            "1" "🚀 Настроить автономный NaiveProxy с нуля" \
+            "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+                break
+            fi
+            # Map choice 1 to setup logic
+            [ "$sc_choice" = "1" ] && sc_choice="3"
         fi
 
         clear
@@ -1088,9 +1094,17 @@ setup_standalone_naive() {
                 ;;
             3)
                 echo -e "${C_CYAN}🌐 === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
-                if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
+
+                # Если на порту 443 запущены предыдущие каскадные службы скрипта (Hysteria, Xray, DERP), остановим их перед проверкой
+                if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
+                    echo -e "${C_YELLOW}⚠️ Освобождение портов 80/443 от предыдущих каскадных служб (Hysteria/Xray/DERP)...${C_RESET}"
+                    silent_run systemctl stop hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
+                    silent_run systemctl disable hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
+                fi
+
+                if ! check_required_ports_free "ru" "80" "443"; then
                     pause_enter
-                    continue
+                    if [ "$is_configured" = false ]; then break; else continue; fi
                 fi
                 enable_routing_optimizations || true
 
@@ -1105,30 +1119,32 @@ setup_standalone_naive() {
 
                 local n_dom=""
                 prompt_default "1/3. Введите ваш домен, направленный по DNS (A-запись без прокси Cloudflare) на этот сервер:" "${saved_dom:-yourdomain.com}" n_dom
-                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then continue; fi
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then
+                    if [ "$is_configured" = false ]; then break; else continue; fi
+                fi
 
                 local n_email=""
                 prompt_default "2/3. Введите ваш Email для автоматического выпуска SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
-                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then continue; fi
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then
+                    if [ "$is_configured" = false ]; then break; else continue; fi
+                fi
 
                 local n_user=""
                 prompt_default "3/3. Введите имя пользователя для подключения в Shadowrocket:" "user1" n_user
-                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then continue; fi
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then
+                    if [ "$is_configured" = false ]; then break; else continue; fi
+                fi
                 n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
 
                 local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
                 local n_pass=""
                 prompt_default "Пароль для пользователя $n_user (минимум 8 символов):" "$rand_pass" n_pass
-                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then continue; fi
-
-                if is_derp_active; then
-                    echo -e "${C_YELLOW}⚠️ Внимание: служба личного DERP на порту 443 остановлена, так как порт 443 передается NaiveProxy (Caddy).${C_RESET}"
-                    silent_run systemctl stop derper.service
-                    silent_run systemctl disable derper.service
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then
+                    if [ "$is_configured" = false ]; then break; else continue; fi
                 fi
 
-                silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-                silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
+                silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
+                silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
                 silent_run wg-quick down wg-cascade 2>/dev/null || true
                 ip link del dev wg-cascade 2>/dev/null || true
                 ip route flush table 51888 2>/dev/null || true
@@ -1139,7 +1155,7 @@ setup_standalone_naive() {
                     silent_run tailscale set --exit-node=
                 fi
 
-                ensure_go_and_build_caddy_naive || { pause_enter; continue; }
+                ensure_go_and_build_caddy_naive || { pause_enter; if [ "$is_configured" = false ]; then break; else continue; fi; }
 
                 local wan_dev=$(get_wan_if)
                 local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
@@ -1183,7 +1199,6 @@ EOF
         esac
     done
 }
-
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
@@ -1507,7 +1522,7 @@ check_required_ports_free() {
             continue
         fi
         local line=""
-        line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|udp2raw)"' | head -n 1 || echo "")
+        line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|udp2raw|hysteria|xray|derper)"' | head -n 1 || echo "")
         if [ -n "$line" ]; then
             # Если на порту 51889 или порту из /etc/wireguard/wg-cascade.conf висит ядерный сокет без users:(...), это наш wg-cascade
             if ! echo "$line" | grep -q "users:(" && { [ "$p" = "51889" ] || grep -qE "^ListenPort[[:space:]]*=[[:space:]]*${p}\b" /etc/wireguard/wg-cascade.conf 2>/dev/null; }; then
@@ -7060,7 +7075,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.64 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.65 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -7174,7 +7189,7 @@ while true; do
         19) mod_direct_wg_cascade ;;
         20) manage_cascade_hysteria_menu ;;
         21) manage_cascade_xray_menu ;;
-        22) setup_standalone_naive; pause_enter ;;
+        22) setup_standalone_naive ;;
         23) mod_server_audit; pause_enter ;;
         24) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;

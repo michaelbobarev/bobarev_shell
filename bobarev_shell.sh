@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.57 (Professional Stealth & Audit Suite)
+# Версия: 3.8.58 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1045,86 +1045,143 @@ RU_SVC_EOF
 }
 
 
+
 setup_standalone_naive() {
-    echo -e "${C_CYAN}🌐 === АВТОНОМНЫЙ NAIVEPROXY (ПРЯМОЙ ВЫХОД, 1 СЕРВЕР) ===${C_RESET}"
-    if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
-        return 0
-    fi
-    enable_routing_optimizations || true
+    while true; do
+        MODULE_CANCELED=false
+        local is_configured=false
+        local c_state="Не настроен"
+        if [ -f "$CADDYFILE" ] && [ -f /etc/default/bobarev-cascade ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            if [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
+                is_configured=true
+                c_state="Активен (Домен: ${NAIVE_DOMAIN:-N/A})"
+            fi
+        fi
 
-    local saved_dom=""
-    local saved_email=""
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        saved_dom="${NAIVE_DOMAIN:-}"
-        saved_email="${NAIVE_EMAIL:-}"
-    fi
+        local u_cnt=0
+        [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || echo 0)
 
-    local n_dom=""
-    prompt_default "1/3. Введите ваш домен, направленный по DNS (A-запись без прокси Cloudflare) на этот сервер:" "${saved_dom:-yourdomain.com}" n_dom
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
+        local sc_choice
+        if [ "$is_configured" = true ]; then
+            if ! smart_menu "🌐 Автономный NaiveProxy (1 сервер)" "\nСтатус: $c_state\nАктивных пользователей: $u_cnt\nВыберите действие:" 17 $WT_WIDTH 5 "sc_choice" \
+            "1" "📋 Показать ссылки для Shadowrocket" \
+            "2" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
+            "3" "⚙️ Перенастроить с нуля (Домен / Email)" \
+            "4" "🛑 Остановить и удалить NaiveProxy" \
+            "0" "🔙 Вернуться назад" || [ "$sc_choice" = "0" ]; then
+                break
+            fi
+        else
+            sc_choice="3" # Если еще не настроен, сразу идем на конфигурирование
+        fi
 
-    local n_email=""
-    prompt_default "2/3. Введите ваш Email для автоматического выпуска SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then return 0; fi
+        clear
+        case "$sc_choice" in
+            1)
+                print_naive_shadowrocket_links
+                pause_enter
+                ;;
+            2)
+                manage_naive_users_menu
+                ;;
+            3)
+                echo -e "${C_CYAN}🌐 === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
+                if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
+                    pause_enter
+                    continue
+                fi
+                enable_routing_optimizations || true
 
-    local n_user=""
-    prompt_default "3/3. Введите имя пользователя для подключения в Shadowrocket:" "user1" n_user
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
-    n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
+                local saved_dom=""
+                local saved_email=""
+                if [ -f /etc/default/bobarev-cascade ]; then
+                    # shellcheck disable=SC1091
+                    source /etc/default/bobarev-cascade
+                    saved_dom="${NAIVE_DOMAIN:-}"
+                    saved_email="${NAIVE_EMAIL:-}"
+                fi
 
-    local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
-    local n_pass=""
-    prompt_default "Пароль для пользователя $n_user (минимум 8 символов):" "$rand_pass" n_pass
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
+                local n_dom=""
+                prompt_default "1/3. Введите ваш домен, направленный по DNS (A-запись без прокси Cloudflare) на этот сервер:" "${saved_dom:-yourdomain.com}" n_dom
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then continue; fi
 
-    if is_derp_active; then
-        echo -e "${C_YELLOW}⚠️ Внимание: служба личного DERP на порту 443 остановлена, так как порт 443 передается NaiveProxy (Caddy).${C_RESET}"
-        silent_run systemctl stop derper.service
-        silent_run systemctl disable derper.service
-    fi
+                local n_email=""
+                prompt_default "2/3. Введите ваш Email для автоматического выпуска SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then continue; fi
 
-    # Очищаем старые каскадные службы и маршруты
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run wg-quick down wg-cascade 2>/dev/null || true
-    ip link del dev wg-cascade 2>/dev/null || true
-    ip route flush table 51888 2>/dev/null || true
-    while ip rule del priority 100 2>/dev/null; do :; done
-    while ip rule del priority 30000 2>/dev/null; do :; done
-    clean_duplicate_cascade_iptables
-    if command -v tailscale &>/dev/null; then
-        silent_run tailscale set --exit-node=
-    fi
+                local n_user=""
+                prompt_default "3/3. Введите имя пользователя для подключения в Shadowrocket:" "user1" n_user
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then continue; fi
+                n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
 
-    ensure_go_and_build_caddy_naive || return 1
+                local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
+                local n_pass=""
+                prompt_default "Пароль для пользователя $n_user (минимум 8 символов):" "$rand_pass" n_pass
+                if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then continue; fi
 
-    local wan_dev=$(get_wan_if)
-    local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+                if is_derp_active; then
+                    echo -e "${C_YELLOW}⚠️ Внимание: служба личного DERP на порту 443 остановлена, так как порт 443 передается NaiveProxy (Caddy).${C_RESET}"
+                    silent_run systemctl stop derper.service
+                    silent_run systemctl disable derper.service
+                fi
 
-    cat << EOF > /etc/default/bobarev-cascade
+                silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
+                silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
+                silent_run wg-quick down wg-cascade 2>/dev/null || true
+                ip link del dev wg-cascade 2>/dev/null || true
+                ip route flush table 51888 2>/dev/null || true
+                while ip rule del priority 100 2>/dev/null; do :; done
+                while ip rule del priority 30000 2>/dev/null; do :; done
+                clean_duplicate_cascade_iptables
+                if command -v tailscale &>/dev/null; then
+                    silent_run tailscale set --exit-node=
+                fi
+
+                ensure_go_and_build_caddy_naive || { pause_enter; continue; }
+
+                local wan_dev=$(get_wan_if)
+                local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+
+                cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="standalone_naive"
 NAIVE_DOMAIN="$n_dom"
 NAIVE_EMAIL="$n_email"
 SERVER_PUB_IP="$pub_ip"
 TCP_TUNE_PROFILE="balanced"
 EOF
-    chmod 600 /etc/default/bobarev-cascade
+                chmod 600 /etc/default/bobarev-cascade
 
-    apply_naive_tcp_tuning_profile "balanced"
-    add_or_update_naive_user "$n_user" "$n_pass"
-    render_naive_caddyfile
+                apply_naive_tcp_tuning_profile "balanced"
+                add_or_update_naive_user "$n_user" "$n_pass"
+                render_naive_caddyfile
 
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
-        silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
-        silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
-        echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
-    fi
+                if command -v ufw &>/dev/null; then
+                    silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
+                    silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
+                    silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
+                    echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
+                fi
 
-    echo -e "${C_GREEN}✅ Автономный NaiveProxy (Прямой выход в интернет с этого VPS) успешно настроен и запущен!${C_RESET}"
-    print_naive_shadowrocket_links
+                echo -e "${C_GREEN}✅ Автономный NaiveProxy (Прямой выход в интернет с этого VPS) успешно настроен и запущен!${C_RESET}"
+                print_naive_shadowrocket_links
+                pause_enter
+                ;;
+            4)
+                if prompt_yn "Остановить и удалить службы NaiveProxy (Caddy) на этом сервере?" "false"; then
+                    silent_run systemctl stop caddy.service
+                    silent_run systemctl disable caddy.service
+                    rm -f /etc/caddy/Caddyfile
+                    rm -f /etc/default/bobarev-cascade
+                    rm -rf "$NAIVE_DIR" "$WEBROOT" "$LOG_DIR"
+                    silent_run systemctl daemon-reload
+                    echo -e "${C_GREEN}✅ Служба NaiveProxy полностью остановлена и удалена.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
 }
 
 
@@ -3741,38 +3798,46 @@ backup_file() {
 }
 
 
+
 check_system_resources() {
     echo -e "${C_CYAN}🔍 Проверка системных ресурсов...${C_RESET}"
     local free_disk=$(df / --output=avail | tail -1 | tr -d ' ')
     local free_mem=$(free -m 2>/dev/null | awk '/^Mem:/ {print $4}' || echo "0")
+    local total_swap=$(free -m 2>/dev/null | awk '/^Swap:/ {print $2}' || echo "0")
     local all_ok=true
 
     if [ "$free_disk" -lt 1048576 ]; then
         echo -e "${C_RED}❌ Ошибка: Недостаточно места на диске (минимум 1ГБ требуется для сборки Caddy).${C_RESET}"
         return 1
-    fi
-    if [ "$free_mem" -lt 512 ]; then
-        echo -e "${C_YELLOW}⚠️ Внимание: Малый объем свободной ОЗУ ($free_mem МБ).${C_RESET}"
-        echo -e "${C_BLUE}ℹ️ Сборка может упасть. Попытка автоматически создать временный Swap-файл...${C_RESET}"
+    }
 
-        if prompt_yn "Создать временный Swap-файл (2 ГБ) для обеспечения стабильной сборки?" "true"; then
-            echo -e "${C_BLUE}⚙️ Создание Swap...${C_RESET}"
+    # Если уже активен Swap (например, >= 512MB) или свободной ОЗУ >= 512МБ, то все в норме и не нужно спрашивать повторно
+    if [ "$free_mem" -lt 512 ] && [ "${total_swap:-0}" -lt 512 ] && ! swapon --show 2>/dev/null | grep -qE "swapfile|swap"; then
+        echo -e "${C_YELLOW}⚠️ Внимание: Малый объем свободной ОЗУ ($free_mem МБ) и отсутствует Swap.${C_RESET}"
+        echo -e "${C_BLUE}ℹ️ Для стабильной сборки Caddy рекомендуется создать Swap-файл (2 ГБ).${C_RESET}"
+
+        if prompt_yn "Создать постоянный Swap-файл (2 ГБ) для обеспечения стабильной работы и сборки?" "true"; then
+            echo -e "${C_BLUE}⚙️ Создание Swap-файла...${C_RESET}"
+            silent_run swapoff /swapfile 2>/dev/null || true
+            rm -f /swapfile
             silent_run fallocate -l 2G /swapfile || silent_run dd if=/dev/zero of=/swapfile bs=1M count=2048
             silent_run chmod 600 /swapfile
             silent_run mkswap /swapfile
             silent_run swapon /swapfile
-            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null 2>&1 || true
-            echo -e "${C_GREEN}✅ Swap-файл успешно активирован.${C_RESET}"
+            if ! grep -q "/swapfile" /etc/fstab; then
+                echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null 2>&1 || true
+            fi
+            echo -e "${C_GREEN}✅ Swap-файл (2 ГБ) успешно создан и активирован.${C_RESET}"
         else
             echo -e "${C_RED}⚠️ Сборка может завершиться ошибкой Out of Memory!${C_RESET}"
             all_ok=false
         fi
-    fi
-    if [ "$all_ok" = true ]; then
-        echo -e "${C_GREEN}✅ Ресурсы в норме.${C_RESET}"
+    else
+        echo -e "${C_GREEN}✅ Ресурсы в норме (ОЗУ / Swap активен).${C_RESET}"
     fi
     return 0
 }
+
 pause_enter() {
     if [ "$MODULE_CANCELED" = true ]; then
         return 0
@@ -6907,7 +6972,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.57 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.58 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

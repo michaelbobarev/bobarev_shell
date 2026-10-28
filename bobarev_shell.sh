@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.61 (Full Dual-Stack & IPv6 Resilience Suite)
+# Версия: 3.8.62 (Full Dual-Stack & IPv6 Resilience Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1417,7 +1417,7 @@ EOF
 manage_cascade_naive_ts_warp() {
     while true; do
         MODULE_CANCELED=false
-        local c_state="Не настроен"
+        local c_state="Не активен"
         if is_naive_active; then
             # shellcheck disable=SC1091
             [ -f /etc/default/bobarev-cascade ] && source /etc/default/bobarev-cascade
@@ -1437,8 +1437,8 @@ manage_cascade_naive_ts_warp() {
         fi
 
         local c_choice
-        if ! smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 "c_choice" \
-        "1" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> Tailscale" \
+        if ! smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 "c_choice" \
+        "1" "🚀 Сервер 1 (РФ): NaiveProxy -> Tailscale" \
         "2" "🌍 Сервер 2 (Зарубеж): Tailscale -> Выход" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
@@ -2624,21 +2624,21 @@ EOF
 manage_cascade_hysteria_menu() {
     while true; do
         MODULE_CANCELED=false
-        local c_state="Не настроен"
+        local c_state="Не активен"
         if systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
             if is_warp_active; then
-                c_state="Сервер 2 (Зарубеж: Hysteria 2 -> Cloudflare WARP)"
+                c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Cloudflare WARP)"
             else
-                c_state="Сервер 2 (Зарубеж: Hysteria 2 -> Чистый IP сервера)"
+                c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Чистый IP сервера)"
             fi
         elif systemctl is-active --quiet hysteria-client.service 2>/dev/null; then
-            c_state="Сервер 1 (РФ: NaiveProxy -> Hysteria 2 Client)"
+            c_state="Активен Сервер 1 (РФ: NaiveProxy -> Hysteria 2 Client)"
         fi
 
         local c_choice
-        if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 7 "c_choice" \
+        if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 18 $WT_WIDTH 7 "c_choice" \
         "1" "🌍 Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
-        "2" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
+        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
         "5" "🔑 Показать токен подключения" \
@@ -3127,27 +3127,27 @@ ${C_GREEN}✅ Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход З
 manage_cascade_xray_menu() {
     while true; do
         MODULE_CANCELED=false
-        local c_state="Не настроен"
+        local c_state="Не активен"
         if systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
             if [ -f /etc/default/bobarev-cascade ]; then
                 # shellcheck disable=SC1091
                 source /etc/default/bobarev-cascade
                 if [ "${CASCADE_ROLE:-}" = "foreign_xray_exit" ]; then
                     if is_warp_active; then
-                        c_state="Сервер 2 (Зарубеж: Xray REALITY -> Cloudflare WARP)"
+                        c_state="Активен Сервер 2 (Зарубеж: Xray REALITY -> Cloudflare WARP)"
                     else
-                        c_state="Сервер 2 (Зарубеж: Xray REALITY -> Чистый IP сервера)"
+                        c_state="Активен Сервер 2 (Зарубеж: Xray REALITY -> Чистый IP сервера)"
                     fi
                 elif [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ]; then
-                    c_state="Сервер 1 (РФ: NaiveProxy -> Xray REALITY Client)"
+                    c_state="Активен Сервер 1 (РФ: NaiveProxy -> Xray REALITY Client)"
                 fi
             fi
         fi
 
         local c_choice
-        if ! smart_menu "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
+        if ! smart_menu "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
         "1" "🌍 Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
-        "2" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
+        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
         "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
@@ -3224,7 +3224,7 @@ mod_direct_wg_cascade() {
         local dc_choice
         if ! smart_menu "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" "\nСтатус моста: $d_status\nВыберите действие:" 18 $WT_WIDTH 7 "dc_choice" \
         "1" "🌍 Сервер 2 (Зарубеж): WG-мост + Anti-DPI" \
-        "2" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> WG-мост" \
+        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> WG-мост" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
         "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
@@ -7046,7 +7046,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.61 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.62 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

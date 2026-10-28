@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.59 (Professional Stealth & Audit Suite)
+# Версия: 3.8.60 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -757,8 +757,8 @@ manage_naive_users_menu() {
 
         local u_choice
         if ! smart_menu "Управление пользователями NaiveProxy" "\nАктивных пользователей: $u_cnt\nВыберите действие:" 15 $WT_WIDTH 4 "u_choice" \
-        "1" "➕ Добавить пользователя / Сменить пароль" \
-        "2" "🗑️ Удалить пользователя (выбор из списка)" \
+        "1" "➕ Добавить или изменить пользователя" \
+        "2" "🗑️ Удалить пользователя из списка" \
         "3" "📋 Показать ссылки всех пользователей" \
         "0" "🔙 Вернуться назад" || [ "$u_choice" = "0" ]; then
             break
@@ -1065,16 +1065,16 @@ setup_standalone_naive() {
 
         local sc_choice
         if [ "$is_configured" = true ]; then
-            if ! smart_menu "🌐 Автономный NaiveProxy (1 сервер)" "\nСтатус: $c_state\nАктивных пользователей: $u_cnt\nВыберите действие:" 17 $WT_WIDTH 5 "sc_choice" \
-            "1" "📋 Показать ссылки для Shadowrocket" \
-            "2" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
-            "3" "⚙️  Перенастроить с нуля (Домен / Email)" \
+            if ! smart_menu "🌐 Автономный NaiveProxy (1 сервер)" "\nСтатус: $c_state\nАктивных пользователей: $u_cnt\nВыберите действие:" 16 $WT_WIDTH 5 "sc_choice" \
+            "1" "📋 Показать ссылки Shadowrocket" \
+            "2" "👤 Управление пользователями" \
+            "3" "🔧 Перенастроить сервер с нуля" \
             "4" "🛑 Остановить и удалить NaiveProxy" \
-            "0" "🔙 Вернуться назад" || [ "$sc_choice" = "0" ]; then
+            "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
         else
-            sc_choice="3" # Если еще не настроен, сразу идем на конфигурирование
+            sc_choice="3"
         fi
 
         clear
@@ -1438,13 +1438,13 @@ manage_cascade_naive_ts_warp() {
 
         local c_choice
         if ! smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 "c_choice" \
-        "1" "🔒 Сервер 1 (Вход РФ): NaiveProxy (Caddy) -> Tailscale" \
-        "2" "🌍 Сервер 2 (Выход Зарубеж): Tailscale -> WARP / Чистый IP" \
-        "3" "👤 Управление пользователями NaiveProxy (Добавить / Удалить)" \
-        "4" "📋 Показать ссылки для Shadowrocket" \
-        "5" "🔄 Переключить выход на Сервере 2: Чистый IP <-> Cloudflare WARP" \
-        "6" "🛑 Остановить и удалить компоненты каскада" \
-        "0" "🔙 Вернуться назад" || [ "$c_choice" = "0" ]; then
+        "1" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> Tailscale" \
+        "2" "🌍 Сервер 2 (Зарубеж): Tailscale -> Выход" \
+        "3" "👤 Управление пользователями NaiveProxy" \
+        "4" "📋 Показать ссылки Shadowrocket" \
+        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
+        "6" "🛑 Остановить компоненты каскада" \
+        "0" "🔙 Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -2615,14 +2615,14 @@ manage_cascade_hysteria_menu() {
         fi
 
         local c_choice
-        if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" "🌍 Сервер 2 (Выход Зарубеж): Hysteria 2 -> WARP / Чистый IP" \
-        "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> Hysteria 2" \
+        if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 18 $WT_WIDTH 7 "c_choice" \
+        "1" "🌍 Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
+        "2" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
         "3" "👤 Управление пользователями NaiveProxy" \
-        "4" "📋 Показать ссылки для Shadowrocket" \
-        "5" "🔑 Показать Токен Hysteria 2 (на Сервере 2)" \
-        "6" "🛑 Остановить службы Hysteria 2" \
-        "0" "🔙 Вернуться назад" || [ "$c_choice" = "0" ]; then
+        "4" "📋 Показать ссылки Shadowrocket" \
+        "5" "🔑 Показать токен подключения" \
+        "6" "🛑 Остановить службу Hysteria 2" \
+        "0" "🔙 Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -3107,9 +3107,15 @@ manage_cascade_xray_menu() {
         fi
 
         local c_choice
-        if ! smart_menu "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" "
-Текущая роль: $c_state
-Выберите действие:" 19 $WT_WIDTH 7 "c_choice"         "1" "🌍 Сервер 2 (Выход Зарубеж): Xray REALITY -> WARP / Чистый IP"         "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> Xray REALITY"         "3" "👤 Управление пользователями NaiveProxy"         "4" "📋 Показать ссылки для Shadowrocket"         "5" "🔄 Переключить выход на Сервере 2: Чистый IP <-> Cloudflare WARP"         "6" "🔑 Показать Токен Xray REALITY (на Сервере 2)"         "7" "🛑 Остановить службы Xray"         "0" "🔙 Вернуться назад" || [ "$c_choice" = "0" ]; then
+        if ! smart_menu "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nТекущая роль: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
+        "1" "🌍 Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
+        "2" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
+        "3" "👤 Управление пользователями NaiveProxy" \
+        "4" "📋 Показать ссылки Shadowrocket" \
+        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
+        "6" "🔑 Показать токен подключения" \
+        "7" "🛑 Остановить службы Xray" \
+        "0" "🔙 Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -3175,14 +3181,14 @@ mod_direct_wg_cascade() {
         fi
 
         local dc_choice
-        if ! smart_menu "🚀 Каскад 1: Naiveproxy - Wireguard - Warp (Без Tailscale)" "\nСтатус моста: $d_status\nСхема: Клиент -> NaiveProxy (РФ) -> WG+udp2raw -> Выход Зарубеж:" 19 $WT_WIDTH 7 "dc_choice" \
-        "1" "🌍 Сервер 2 (Выход Зарубеж): WG-Мост + Anti-DPI" \
-        "2" "🚀 Сервер 1 (Вход РФ): NaiveProxy -> WG-Мост" \
+        if ! smart_menu "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" "\nСтатус моста: $d_status\nВыберите действие:" 18 $WT_WIDTH 7 "dc_choice" \
+        "1" "🌍 Сервер 2 (Зарубеж): WG-мост + Anti-DPI" \
+        "2" "🇷🇺 Сервер 1 (РФ): NaiveProxy -> WG-мост" \
         "3" "👤 Управление пользователями NaiveProxy" \
-        "4" "📋 Показать ссылки для Shadowrocket" \
-        "5" "🔄 Переключить выход: IP <-> WARP" \
-        "6" "🔑 Показать Токен соединения" \
-        "7" "🛑 Остановить каскад и udp2raw" \
+        "4" "📋 Показать ссылки Shadowrocket" \
+        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
+        "6" "🔑 Показать токен подключения" \
+        "7" "🛑 Остановить каскад и мост" \
         "0" "🔙 Вернуться в главное меню" || [ "$dc_choice" = "0" ]; then
             break
         fi
@@ -3356,10 +3362,10 @@ manage_custom_derp() {
         fi
 
         local d_choice
-        if ! smart_menu "Личный ретранслятор (DERP)" "\nСтатус ретранслятора: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 "d_choice" \
-        "1" "🚀 Установить / Обновить узел DERP (Cloudflare + STUN)" \
+        if ! smart_menu "Личный ретранслятор (DERP)" "\nСтатус: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 "d_choice" \
+        "1" "🚀 Установить / Обновить DERP (Cloudflare + STUN)" \
         "2" "📋 Показать JSON-код (derpMap) для консоли" \
-        "3" "🔑 Редактировать сертификаты Cloudflare (.crt / .key)" \
+        "3" "🔑 Редактировать сертификаты Cloudflare" \
         "4" "🛑 Остановить и удалить службу DERP" \
         "0" "🔙 Вернуться назад" || [ "$d_choice" = "0" ]; then
             break
@@ -4874,7 +4880,11 @@ mod_logging_manager() {
 Выберите желаемое действие:"
     
     local log_choice=""
-    if ! smart_menu "Управление системными журналами" "$msg" 18 $WT_WIDTH 4 "log_choice"     "1" "🛡️ Ограничить 100 МБ (Рекомендуется, 1 месяц хранения)"     "2" "⚙️ Задать собственный лимит размера (Custom)"     "3" "🚫 Полностью отключить запись логов (Режим Stealth)"     "0" "🔙 Оставить без изменений" || [ "$log_choice" = "0" ] || [ -z "$log_choice" ]; then
+    if ! smart_menu "Управление системными журналами" "$msg" 16 $WT_WIDTH 4 "log_choice" \
+    "1" "🛡️ Ограничить размер (100 МБ, 1 месяц)" \
+    "2" "⚙️ Задать собственный лимит размера" \
+    "3" "🚫 Отключить ведение логов (Stealth)" \
+    "0" "🔙 Вернуться назад" || [ "$log_choice" = "0" ] || [ -z "$log_choice" ]; then
         MODULE_CANCELED=true
         return 0
     fi
@@ -6995,7 +7005,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.59 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.60 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -7071,10 +7081,10 @@ while true; do
     "16" "⏳ Анализ времени загрузки" \
     "17" "📡 Режим локального маршрутизатора" \
     "18" "📦 Экспорт / Импорт настроек" \
-    "19" "🚀 Каскад 1: Naiveproxy - Wireguard - Warp" \
-    "20" "🚀 Каскад 2: Naiveproxy - Hysteria - Warp" \
-    "21" "🚀 Каскад 3: Naiveproxy - Xray (REALITY) - Warp" \
-    "22" "🌐 Автономный NaiveProxy (Прямой выход, 1 сервер)" \
+    "19" "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" \
+    "20" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
+    "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
+    "22" "🌐 Автономный NaiveProxy (1 сервер)" \
     "23" "🔍 Аудит системы 1" \
     "24" "🩺 Аудит системы 2 и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \

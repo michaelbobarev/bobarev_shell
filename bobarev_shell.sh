@@ -3809,7 +3809,7 @@ check_system_resources() {
     if [ "$free_disk" -lt 1048576 ]; then
         echo -e "${C_RED}❌ Ошибка: Недостаточно места на диске (минимум 1ГБ требуется для сборки Caddy).${C_RESET}"
         return 1
-    }
+    fi
 
     # Если уже активен Swap (например, >= 512MB) или свободной ОЗУ >= 512МБ, то все в норме и не нужно спрашивать повторно
     if [ "$free_mem" -lt 512 ] && [ "${total_swap:-0}" -lt 512 ] && ! swapon --show 2>/dev/null | grep -qE "swapfile|swap"; then

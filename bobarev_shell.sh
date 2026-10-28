@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.62 (Full Dual-Stack & IPv6 Resilience Suite)
+# Версия: 3.8.63 (Full Dual-Stack & IPv6 Resilience Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -2310,7 +2310,62 @@ render_hysteria_server_config() {
     local h_pass="$2"
     local exit_mode="${3:-direct}"
 
-    render_hysteria_server_config "$h_port" "$h_pass" "$exit_mode"
+    mkdir -p /etc/hysteria
+    if [ ! -s /etc/hysteria/server.crt ] || [ ! -s /etc/hysteria/server.key ]; then
+        openssl req -x509 -nodes -days 3650 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt -subj "/CN=www.bing.com" 2>/dev/null
+    fi
+    chmod 600 /etc/hysteria/server.key
+
+    local outbound_block=""
+    if [ "$exit_mode" = "warp" ]; then
+        ip rule del from 172.16.0.2 lookup 51820 priority 5998 2>/dev/null || true
+        ip rule add from 172.16.0.2 lookup 51820 priority 5998 2>/dev/null || true
+        ip rule del oif warp lookup 51820 priority 5999 2>/dev/null || true
+        ip rule add oif warp lookup 51820 priority 5999 2>/dev/null || true
+        outbound_block="outbounds:
+  - name: warp_out
+    type: direct
+    direct:
+      mode: 4
+      bindDevice: warp"
+    else
+        outbound_block="outbounds:
+  - name: direct_out
+    type: direct
+    direct:
+      mode: 4"
+    fi
+
+    cat << EOF > /etc/hysteria/config.yaml
+listen: :${h_port}
+
+tls:
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key
+
+auth:
+  type: password
+  password: "${h_pass}"
+
+quic:
+  initStreamReceiveWindow: 16777216
+  maxStreamReceiveWindow: 16777216
+  initConnReceiveWindow: 67108864
+  maxConnReceiveWindow: 67108864
+  maxIdleTimeout: 60s
+  maxIncomingStreams: 1024
+  disablePathMTUDiscovery: false
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.bing.com
+    rewriteHost: true
+
+${outbound_block}
+EOF
+    chmod 600 /etc/hysteria/config.yaml
 }
 
 setup_cascade_hysteria_server2_foreign() {
@@ -7005,7 +7060,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.62 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.63 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

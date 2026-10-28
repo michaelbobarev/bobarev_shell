@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.56 (Professional Stealth & Audit Suite)
+# Версия: 3.8.57 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1043,6 +1043,90 @@ RU_SVC_EOF
     silent_run systemctl daemon-reload
     silent_run systemctl enable --now bobarev-cascade-ru.service
 }
+
+
+setup_standalone_naive() {
+    echo -e "${C_CYAN}🌐 === АВТОНОМНЫЙ NAIVEPROXY (ПРЯМОЙ ВЫХОД, 1 СЕРВЕР) ===${C_RESET}"
+    if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
+        return 0
+    fi
+    enable_routing_optimizations || true
+
+    local saved_dom=""
+    local saved_email=""
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        saved_dom="${NAIVE_DOMAIN:-}"
+        saved_email="${NAIVE_EMAIL:-}"
+    fi
+
+    local n_dom=""
+    prompt_default "1/3. Введите ваш домен, направленный по DNS (A-запись без прокси Cloudflare) на этот сервер:" "${saved_dom:-yourdomain.com}" n_dom
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
+
+    local n_email=""
+    prompt_default "2/3. Введите ваш Email для автоматического выпуска SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then return 0; fi
+
+    local n_user=""
+    prompt_default "3/3. Введите имя пользователя для подключения в Shadowrocket:" "user1" n_user
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
+    n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
+
+    local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
+    local n_pass=""
+    prompt_default "Пароль для пользователя $n_user (минимум 8 символов):" "$rand_pass" n_pass
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
+
+    if is_derp_active; then
+        echo -e "${C_YELLOW}⚠️ Внимание: служба личного DERP на порту 443 остановлена, так как порт 443 передается NaiveProxy (Caddy).${C_RESET}"
+        silent_run systemctl stop derper.service
+        silent_run systemctl disable derper.service
+    fi
+
+    # Очищаем старые каскадные службы и маршруты
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
+    silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
+    silent_run wg-quick down wg-cascade 2>/dev/null || true
+    ip link del dev wg-cascade 2>/dev/null || true
+    ip route flush table 51888 2>/dev/null || true
+    while ip rule del priority 100 2>/dev/null; do :; done
+    while ip rule del priority 30000 2>/dev/null; do :; done
+    clean_duplicate_cascade_iptables
+    if command -v tailscale &>/dev/null; then
+        silent_run tailscale set --exit-node=
+    fi
+
+    ensure_go_and_build_caddy_naive || return 1
+
+    local wan_dev=$(get_wan_if)
+    local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+
+    cat << EOF > /etc/default/bobarev-cascade
+CASCADE_ROLE="standalone_naive"
+NAIVE_DOMAIN="$n_dom"
+NAIVE_EMAIL="$n_email"
+SERVER_PUB_IP="$pub_ip"
+TCP_TUNE_PROFILE="balanced"
+EOF
+    chmod 600 /etc/default/bobarev-cascade
+
+    apply_naive_tcp_tuning_profile "balanced"
+    add_or_update_naive_user "$n_user" "$n_pass"
+    render_naive_caddyfile
+
+    if command -v ufw &>/dev/null; then
+        silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
+        silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
+        silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
+        echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
+    fi
+
+    echo -e "${C_GREEN}✅ Автономный NaiveProxy (Прямой выход в интернет с этого VPS) успешно настроен и запущен!${C_RESET}"
+    print_naive_shadowrocket_links
+}
+
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
@@ -6823,7 +6907,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.56 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.57 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -6902,8 +6986,9 @@ while true; do
     "19" "🚀 Каскад 1: Naiveproxy - Wireguard - Warp" \
     "20" "🚀 Каскад 2: Naiveproxy - Hysteria - Warp" \
     "21" "🚀 Каскад 3: Naiveproxy - Xray (REALITY) - Warp" \
-    "22" "🔍 Аудит системы 1" \
-    "23" "🩺 Аудит системы 2 и каскадные пары" \
+    "22" "🌐 Автономный NaiveProxy (Прямой выход, 1 сервер)" \
+    "23" "🔍 Аудит системы 1" \
+    "24" "🩺 Аудит системы 2 и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -6936,8 +7021,9 @@ while true; do
         19) mod_direct_wg_cascade ;;
         20) manage_cascade_hysteria_menu ;;
         21) manage_cascade_xray_menu ;;
-        22) mod_server_audit; pause_enter ;;
-        23) mod_network_cascade_audit ;;
+        22) setup_standalone_naive; pause_enter ;;
+        23) mod_server_audit; pause_enter ;;
+        24) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

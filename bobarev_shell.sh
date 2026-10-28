@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.58 (Professional Stealth & Audit Suite)
+# Версия: 3.8.59 (Professional Stealth & Audit Suite)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -4853,17 +4853,31 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 mod_logging_manager() {
     echo -e "${C_CYAN}📝 === 11/21. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
-    local log_choice
-    if ! smart_menu "Управление логами" "Выберите режим работы системных журналов:" 14 $WT_WIDTH 4 "log_choice" \
-    "1" "🛡️ Безопасное ограничение (100 МБ / 1 месяц)" \
-    "2" "⚙️ Указать свой лимит (Custom)" \
-    "3" "🚫 Полностью отключить логирование (Stealth)" \ \
-    "0" "🔙 Оставить без изменений" || [ "$log_choice" = "0" ]; then
+    local cur_usage="N/A"
+    if command -v journalctl &>/dev/null; then
+        cur_usage=$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[[:space:]]*[KMGTBkmgtb]+' | head -n 1 || echo "N/A")
+        [ -z "$cur_usage" ] && cur_usage="N/A"
+    fi
+    
+    local cur_mode="Стандартный"
+    if [ -f /etc/systemd/system/clean-logs-boot.service ] || [ -f /usr/local/bin/disable-logging.sh ]; then
+        cur_mode="🚫 Отключены (Stealth)"
+    elif grep -qE "^\s*SystemMaxUse=" /etc/systemd/journald.conf 2>/dev/null; then
+        local cur_lim=$(grep -E "^\s*SystemMaxUse=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+        cur_mode="🛡️ Ограничены (${cur_lim})"
+    fi
+    
+    local msg="\nТекущее состояние журналов:
+  • Занято на диске: $cur_usage
+  • Текущий режим:   $cur_mode
+
+Выберите желаемое действие:"
+    
+    local log_choice=""
+    if ! smart_menu "Управление системными журналами" "$msg" 18 $WT_WIDTH 4 "log_choice"     "1" "🛡️ Ограничить 100 МБ (Рекомендуется, 1 месяц хранения)"     "2" "⚙️ Задать собственный лимит размера (Custom)"     "3" "🚫 Полностью отключить запись логов (Режим Stealth)"     "0" "🔙 Оставить без изменений" || [ "$log_choice" = "0" ] || [ -z "$log_choice" ]; then
         MODULE_CANCELED=true
         return 0
     fi
-    
-    if [ "$log_choice" = "0" ]; then return 0; fi
     
     backup_file "/etc/systemd/journald.conf"
     
@@ -4874,6 +4888,7 @@ mod_logging_manager() {
             [ "$MODULE_CANCELED" = true ] && return 0
         fi
         
+        echo -e "${C_BLUE}⚙️ Применение лимита журналов ($log_size)...${C_RESET}"
         silent_run sed -i -E '/^\s*#?\s*(\[Journal\]|Storage=|ForwardToSyslog=|ForwardToKMsg=|ForwardToConsole=|ForwardToWall=|SystemMaxUse=|MaxRetentionSec=)/d' /etc/systemd/journald.conf
         cat << CONF >> /etc/systemd/journald.conf
 [Journal]
@@ -4883,11 +4898,17 @@ CONF
         
         silent_run systemctl restart systemd-journald
         silent_run systemctl disable clean-logs-boot.service 2>/dev/null || true
-        rm -f /usr/local/bin/disable-logging.sh
+        rm -f /usr/local/bin/disable-logging.sh /etc/systemd/system/clean-logs-boot.service
+        silent_run systemctl daemon-reload
         
-        echo -e "${C_GREEN}✅ Системные журналы безопасно ограничены объемом $log_size.${C_RESET}"
+        journalctl --vacuum-size="$log_size" >/dev/null 2>&1 || true
+        local new_usage=$(journalctl --disk-usage 2>/dev/null || echo "")
+        
+        echo -e "${C_GREEN}✅ Системные журналы успешно ограничены объемом $log_size (хранение до 1 месяца).${C_RESET}"
+        [ -n "$new_usage" ] && echo -e "  • ${C_BLUE}$new_usage${C_RESET}"
     
     elif [ "$log_choice" = "3" ]; then
+        echo -e "${C_BLUE}⚙️ Включение режима Stealth и отключение системных журналов...${C_RESET}"
         cat << 'DISABLE_LOGS_EOF' > /usr/local/bin/disable-logging.sh
 #!/bin/bash
 set -euo pipefail
@@ -4946,7 +4967,9 @@ BOOT_CLEAN_SVC_EOF
         silent_run systemctl daemon-reload
         silent_run systemctl enable clean-logs-boot.service
         /usr/local/bin/disable-logging.sh
-        echo -e "${C_GREEN}✅ Полное отключение системного журналирования успешно настроено.${C_RESET}"
+        echo -e "${C_GREEN}✅ Полное отключение системного журналирования успешно активировано (режим Stealth).${C_RESET}"
+        echo -e "  • ${C_BLUE}Служба journald переведена в режим Storage=none${C_RESET}"
+        echo -e "  • ${C_BLUE}Службы rsyslog/auditd отключены, логи очищены${C_RESET}"
     fi
 }
 mod_logging_manager_auto() {
@@ -6972,7 +6995,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.58 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.59 (Gold Master)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

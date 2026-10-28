@@ -1748,6 +1748,10 @@ apply_foreign_exit_mode() {
             render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$exit_mode"
             silent_run systemctl restart bobarev-xray.service
         fi
+        if [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] && [ -n "${HYSTERIA_PORT:-}" ]; then
+            render_hysteria_server_config "$HYSTERIA_PORT" "${HYSTERIA_PASS:-SecretPass2026}" "$exit_mode"
+            silent_run systemctl restart hysteria-server.service
+        fi
     fi
 
 }
@@ -1770,7 +1774,7 @@ toggle_foreign_warp_menu() {
     local def_item="1"
     [ "$cur_mode" = "warp" ] && def_item="2"
 
-    if ! smart_menu "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" "\nТекущий режим выхода: $cur_human\n\nРаботает для обоих каскадов (и для Прямого WG-моста, и для Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 "m_choice" \
+    if ! smart_menu "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" "\nТекущий режим выхода: $cur_human\n\nРаботает для всех каскадов (WG-мост, Hysteria 2, Xray REALITY и Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 "m_choice" \
     "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
     "2" "☁️ Cloudflare WARP (Маскировка выходного IP под Cloudflare)"; then
         return 0
@@ -2301,6 +2305,14 @@ EOF
     print_naive_shadowrocket_links
 }
 
+render_hysteria_server_config() {
+    local h_port="$1"
+    local h_pass="$2"
+    local exit_mode="${3:-direct}"
+
+    render_hysteria_server_config "$h_port" "$h_pass" "$exit_mode"
+}
+
 setup_cascade_hysteria_server2_foreign() {
     echo -e "${C_CYAN}🌍 === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): HYSTERIA 2 -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_hysteria_installed || return 1
@@ -2333,62 +2345,7 @@ setup_cascade_hysteria_server2_foreign() {
 
     apply_foreign_exit_mode "$exit_mode"
 
-    mkdir -p /etc/hysteria
-    if [ ! -s /etc/hysteria/server.crt ] || [ ! -s /etc/hysteria/server.key ]; then
-        openssl req -x509 -nodes -days 3650 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-            -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt -subj "/CN=www.bing.com" 2>/dev/null
-    fi
-    chmod 600 /etc/hysteria/server.key
-
-    local outbound_block=""
-    if [ "$exit_mode" = "warp" ]; then
-        ip rule del from 172.16.0.2 lookup 51820 priority 5998 2>/dev/null || true
-        ip rule add from 172.16.0.2 lookup 51820 priority 5998 2>/dev/null || true
-        ip rule del oif warp lookup 51820 priority 5999 2>/dev/null || true
-        ip rule add oif warp lookup 51820 priority 5999 2>/dev/null || true
-        outbound_block="outbounds:
-  - name: warp_out
-    type: direct
-    direct:
-      mode: 4
-      bindDevice: warp"
-    else
-        outbound_block="outbounds:
-  - name: direct_out
-    type: direct
-    direct:
-      mode: 4"
-    fi
-
-    cat << EOF > /etc/hysteria/config.yaml
-listen: :${h_port}
-
-tls:
-  cert: /etc/hysteria/server.crt
-  key: /etc/hysteria/server.key
-
-auth:
-  type: password
-  password: "${h_pass}"
-
-quic:
-  initStreamReceiveWindow: 16777216
-  maxStreamReceiveWindow: 16777216
-  initConnReceiveWindow: 67108864
-  maxConnReceiveWindow: 67108864
-  maxIdleTimeout: 60s
-  maxIncomingStreams: 1024
-  disablePathMTUDiscovery: false
-
-masquerade:
-  type: proxy
-  proxy:
-    url: https://www.bing.com
-    rewriteHost: true
-
-${outbound_block}
-EOF
-    chmod 600 /etc/hysteria/config.yaml
+    render_hysteria_server_config "$h_port" "$h_pass" "$exit_mode"
 
     cat << 'SVC_EOF' > /etc/systemd/system/hysteria-server.service
 [Unit]
@@ -2636,13 +2593,14 @@ manage_cascade_hysteria_menu() {
         fi
 
         local c_choice
-        if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 18 $WT_WIDTH 7 "c_choice" \
+        if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
         "1" "🌍 Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
         "2" "🚀 Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
-        "5" "🔑 Показать токен подключения" \
-        "6" "🛑 Остановить службу Hysteria 2" \
+        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
+        "6" "🔑 Показать токен подключения" \
+        "7" "🛑 Остановить службу Hysteria 2" \
         "0" "🔙 Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -2653,7 +2611,8 @@ manage_cascade_hysteria_menu() {
             2) setup_cascade_hysteria_server1_ru || true; pause_enter ;;
             3) manage_naive_users_menu ;;
             4) print_naive_shadowrocket_links; pause_enter ;;
-            5)
+            5) toggle_foreign_warp_menu; pause_enter ;;
+            6)
                 if [ -f /etc/default/bobarev-cascade ]; then
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
@@ -2671,7 +2630,7 @@ manage_cascade_hysteria_menu() {
                 fi
                 pause_enter
                 ;;
-            6)
+            7)
                 if prompt_yn "Остановить и отключить службы Hysteria 2 на этом сервере?" "false"; then
                     silent_run systemctl stop hysteria-server.service hysteria-client.service
                     silent_run systemctl disable hysteria-server.service hysteria-client.service

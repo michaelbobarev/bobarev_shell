@@ -1246,7 +1246,7 @@ disable_hybrid_wg_routing() {
     while ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null; do :; done
     while ip rule del sport 41641 lookup main priority 97 2>/dev/null; do :; done
     while ip rule del sport 443 lookup main priority 99 2>/dev/null; do :; done
-    while ip rule del sport 80 lookup main priority 100 2>/dev/null || true; do :; done
+    while ip rule del sport 80 lookup main priority 100 2>/dev/null; do :; done
 
     if [ -f /etc/ufw/before.rules ]; then
         sed -i '/-o wg0 -j MASQUERADE/d' /etc/ufw/before.rules 2>/dev/null || true

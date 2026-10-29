@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.65 (Full Dual-Stack & IPv6 Resilience Suite)
+# Версия: 3.8.70 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1046,17 +1046,220 @@ RU_SVC_EOF
 
 
 
+setup_hybrid_wg_routing() {
+    echo -e "${C_CYAN}🔒 === НАСТРОЙКА ГИБРИДНОГО ШЛЮЗА: NAIVEPROXY + TAILSCALE EXIT NODE -> WG0 ===${C_RESET}"
+    ensure_wg_kernel_modules
+    
+    local ssh_p="22"
+    local sshd_c=$(get_sshd_cmd)
+    if [ -n "$sshd_c" ]; then
+        ssh_p=$($sshd_c -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
+    fi
+    ssh_p="${ssh_p//[^0-9]/}"
+    [ -z "$ssh_p" ] && ssh_p="22"
+
+    local use_existing=false
+    if [ -f /etc/wireguard/wg0.conf ]; then
+        if prompt_yn "Конфигурация /etc/wireguard/wg0.conf уже существует.
+Использовать существующий профиль WireGuard (применив надежные правила FwMark 51820 и PBR)?" "true"; then
+            use_existing=true
+        fi
+    fi
+
+    local tmp_wg="/tmp/raw_wg0_input.conf"
+    rm -f "$tmp_wg"
+
+    if [ "$use_existing" = false ]; then
+        whiptail --title "Конфигурация WireGuard" --msgbox "Сейчас откроется редактор nano.
+Вставьте ваш конфиг от провайдера или зарубежного сервера (секции [Interface] и [Peer]).
+
+Для сохранения нажмите: Ctrl+O -> Enter -> Ctrl+X." 14 $WT_WIDTH
+        nano "$tmp_wg"
+    else
+        cp /etc/wireguard/wg0.conf "$tmp_wg"
+    fi
+
+    local priv=$(awk -F'= ' '/^PrivateKey/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    local addr=$(awk -F'= ' '/^Address/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    local pub=$(awk -F'= ' '/^PublicKey/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    local psk=$(awk -F'= ' '/^PresharedKey/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    local ep=$(awk -F'= ' '/^Endpoint/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    local keepalive=$(awk -F'= ' '/^PersistentKeepalive/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    [ -z "$keepalive" ] && keepalive="25"
+    rm -f "$tmp_wg"
+
+    if [ -z "$priv" ] || [ -z "$addr" ] || [ -z "$pub" ] || [ -z "$ep" ]; then
+        echo -e "${C_RED}❌ Ошибка: В введенной конфигурации отсутствуют обязательные поля (PrivateKey, Address, PublicKey или Endpoint)!${C_RESET}"
+        return 1
+    fi
+
+    local psk_line=""
+    [ -n "$psk" ] && psk_line="PresharedKey = $psk"
+
+    echo -e "${C_BLUE}⚙️ Формирование безопасного профиля /etc/wireguard/wg0.conf с FwMark = 51820...${C_RESET}"
+    mkdir -p /etc/wireguard
+    cat << EOF > /etc/wireguard/wg0.conf
+[Interface]
+PrivateKey = $priv
+Address = $addr
+FwMark = 51820
+Table = off
+
+# 1. Форвардинг ядра и отключение строгого rp_filter
+PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv4.conf.all.forwarding=1 >/dev/null 2>&1 || true
+PostUp = for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do [ -f "\$rp" ] && echo 0 > "\$rp"; done
+
+# 2. Маршруты в изолированную таблицу 150
+PostUp = ip route replace 100.64.0.0/10 dev tailscale0 table 150 2>/dev/null || true
+PostUp = ip route replace default dev wg0 table 150
+PostUp = ip route replace 100.64.0.0/10 dev tailscale0 table main 2>/dev/null || true
+
+# 3. ЗАЩИТА СИСТЕМНОГО ДОСТУПА (ВЫСОКИЙ ПРИОРИТЕТ 95-100 -> в таблицу main / ens3):
+# А) Пакеты самого WireGuard (FwMark 51820) — защита от зацикливания туннеля!
+PostUp = ip rule del fwmark 51820 lookup main priority 95 2>/dev/null || true
+PostUp = ip rule add fwmark 51820 lookup main priority 95
+
+# Б) Подсеть Tailscale (100.64.0.0/10) — трафик между узлами идет строго через tailscale0
+PostUp = ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null || true
+PostUp = ip rule add to 100.64.0.0/10 lookup main priority 96
+
+# В) Связь демона Tailscale с пирами и серверами координации (порт 41641/udp)
+PostUp = ip rule del sport 41641 lookup main priority 97 2>/dev/null || true
+PostUp = ip rule add sport 41641 lookup main priority 97
+
+# Г) Ответы SSH (порт $ssh_p) — сессия SSH никогда не упадет
+PostUp = ip rule del sport $ssh_p lookup main priority 98 2>/dev/null || true
+PostUp = ip rule add sport $ssh_p lookup main priority 98
+
+# Д) Ответы Caddy клиентам Shadowrocket (порты 443 и 80) — уходят клиенту через физический шлюз
+PostUp = ip rule del sport 443 lookup main priority 99 2>/dev/null || true
+PostUp = ip rule add sport 443 lookup main priority 99
+PostUp = ip rule del sport 80 lookup main priority 100 2>/dev/null || true
+PostUp = ip rule add sport 80 lookup main priority 100
+
+# 4. НАПРАВЛЕНИЕ ТРАФИКА В WG0:
+# А) Клиенты Tailscale Exit Node (входящие с интерфейса tailscale0)
+PostUp = ip rule del iif tailscale0 lookup 150 priority 1000 2>/dev/null || true
+PostUp = ip rule add iif tailscale0 lookup 150 priority 1000
+
+# Б) Запросы NaiveProxy/Caddy и весь исходящий трафик сервера в интернет
+PostUp = ip rule del lookup 150 priority 30000 2>/dev/null || true
+PostUp = ip rule add lookup 150 priority 30000
+
+# 5. ФОРВАРДИНГ, MSS CLAMPING И NAT
+PostUp = iptables -A FORWARD -i tailscale0 -o wg0 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -A FORWARD -i wg0 -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+# --- ПРАВИЛА ОЧИСТКИ ПРИ ОСТАНОВКЕ (PostDown) ---
+PostDown = ip rule del lookup 150 priority 30000 2>/dev/null || true
+PostDown = ip rule del iif tailscale0 lookup 150 priority 1000 2>/dev/null || true
+PostDown = ip rule del sport 80 lookup main priority 100 2>/dev/null || true
+PostDown = ip rule del sport 443 lookup main priority 99 2>/dev/null || true
+PostDown = ip rule del sport $ssh_p lookup main priority 98 2>/dev/null || true
+PostDown = ip rule del sport 41641 lookup main priority 97 2>/dev/null || true
+PostDown = ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null || true
+PostDown = ip rule del fwmark 51820 lookup main priority 95 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg0 -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i tailscale0 -o wg0 -j ACCEPT 2>/dev/null || true
+PostDown = ip route flush table 150 2>/dev/null || true
+
+[Peer]
+PublicKey = $pub
+$psk_line
+Endpoint = $ep
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = $keepalive
+EOF
+    chmod 600 /etc/wireguard/wg0.conf
+
+    echo -e "${C_BLUE}🚀 Запуск и включение автозагрузки WireGuard (wg0)...${C_RESET}"
+    silent_run systemctl daemon-reload
+    systemctl reset-failed wg-quick@wg0 2>/dev/null || true
+    systemctl enable wg-quick@wg0 >/dev/null 2>&1 || true
+    if ! systemctl restart wg-quick@wg0; then
+        echo -e "${C_YELLOW}⚠️ Повторная инициализация интерфейса wg0...${C_RESET}"
+        ip link del dev wg0 2>/dev/null || true
+        systemctl restart wg-quick@wg0
+    fi
+
+    if command -v tailscale &>/dev/null; then
+        silent_run tailscale set --advertise-exit-node=true
+    fi
+
+    if [ -f /etc/default/bobarev-cascade ]; then
+        sed -i '/^NAIVE_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+        echo 'NAIVE_OUT_MODE="wg0"' >> /etc/default/bobarev-cascade
+    fi
+
+    if systemctl is-active --quiet caddy.service 2>/dev/null; then
+        systemctl restart caddy.service || true
+    fi
+
+    echo -e "${C_BLUE}⚡ Проверка подключения и внешнего IP...${C_RESET}"
+    local test_ip=""
+    for i in {1..5}; do
+        test_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
+        [ -n "$test_ip" ] && break
+        sleep 1
+    done
+    [ -z "$test_ip" ] && test_ip=$(curl -4 -s --max-time 5 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте пир WireGuard")
+
+    echo -e "
+${C_GREEN}✅ Гибридный шлюз успешно активирован!${C_RESET}"
+    echo -e "  • Исходящий IP туннеля (WireGuard wg0): ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
+    echo -e "  • Клиенты NaiveProxy (Shadowrocket) и Tailscale Exit Node выходят в интернет через: ${C_BOLD}wg0${C_RESET}"
+    echo -e "  • Входящие подключения к серверу и SSH защищены и работают напрямую через: ${C_BOLD}ens3${C_RESET}"
+    return 0
+}
+
+disable_hybrid_wg_routing() {
+    echo -e "${C_YELLOW}🛑 Отключение туннеля wg0 и возврат к прямому выходу в интернет...${C_RESET}"
+    silent_run systemctl stop wg-quick@wg0
+    silent_run systemctl disable wg-quick@wg0
+    silent_run wg-quick down wg0 2>/dev/null || true
+    ip link del dev wg0 2>/dev/null || true
+    ip route flush table 150 2>/dev/null || true
+    while ip rule del priority 30000 2>/dev/null; do :; done
+    while ip rule del priority 1000 2>/dev/null; do :; done
+    while ip rule del fwmark 51820 lookup main priority 95 2>/dev/null; do :; done
+    while ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null; do :; done
+    while ip rule del sport 41641 lookup main priority 97 2>/dev/null; do :; done
+    while ip rule del sport 443 lookup main priority 99 2>/dev/null; do :; done
+    while ip rule del sport 80 lookup main priority 100 2>/dev/null || true; do :; done
+
+    if [ -f /etc/default/bobarev-cascade ]; then
+        sed -i '/^NAIVE_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+        echo 'NAIVE_OUT_MODE="direct"' >> /etc/default/bobarev-cascade
+    fi
+
+    if systemctl is-active --quiet caddy.service 2>/dev/null; then
+        systemctl restart caddy.service || true
+    fi
+    echo -e "${C_GREEN}✅ Туннель wg0 отключен. NaiveProxy переведен на прямой выход в интернет.${C_RESET}"
+}
+
 setup_standalone_naive() {
     while true; do
         MODULE_CANCELED=false
         local is_configured=false
         local c_state="Не настроен"
+        local cur_out="direct"
+
         if [ -f "$CADDYFILE" ] && [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
             if [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
                 is_configured=true
-                c_state="Активен (Домен: ${NAIVE_DOMAIN:-N/A})"
+                cur_out="${NAIVE_OUT_MODE:-direct}"
+                local out_human="Прямой выход"
+                if [ "$cur_out" = "wg0" ] || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+                    out_human="Гибридный шлюз (wg0 + Tailscale Exit Node)"
+                fi
+                c_state="Активен (Домен: ${NAIVE_DOMAIN:-N/A} | ${out_human})"
             fi
         fi
 
@@ -1065,22 +1268,24 @@ setup_standalone_naive() {
 
         local sc_choice=""
         if [ "$is_configured" = true ]; then
-            if ! smart_menu "🌐 Автономный NaiveProxy (1 сервер)" "\nСтатус: $c_state\nАктивных пользователей: $u_cnt\nВыберите действие:" 16 $WT_WIDTH 5 "sc_choice" \
-            "1" "📋 Показать ссылки Shadowrocket" \
-            "2" "👤 Управление пользователями" \
-            "3" "🔧 Перенастроить сервер с нуля" \
-            "4" "🛑 Остановить и удалить NaiveProxy" \
-            "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+            if ! smart_menu "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" "
+Статус: $c_state
+Активных пользователей: $u_cnt
+Выберите действие:" 18 $WT_WIDTH 6 "sc_choice"             "1" "📋 Показать ссылки Shadowrocket"             "2" "👤 Управление пользователями"             "3" "🚀 Подключить / Обновить туннель WireGuard (wg0 -> Выход)"             "4" "🌍 Переключить на прямой выход в интернет (отключить wg0)"             "5" "🔧 Перенастроить домен и NaiveProxy с нуля"             "6" "🛑 Остановить и удалить NaiveProxy"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
         else
-            if ! smart_menu "🌐 Автономный NaiveProxy (1 сервер)" "\nСтатус: $c_state\n\nNaiveProxy работает на одном сервере с прямым выходом в интернет.\nВыберите действие:" 14 $WT_WIDTH 2 "sc_choice" \
-            "1" "🚀 Настроить автономный NaiveProxy с нуля" \
-            "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+            if ! smart_menu "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" "
+Статус: $c_state
+
+Поддерживает 2 режима выхода:
+ • Прямой выход в интернет с этого VPS.
+ • Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0).
+
+Выберите действие:" 16 $WT_WIDTH 2 "sc_choice"             "1" "🚀 Настроить NaiveProxy (с выбором выхода: Прямой / WireGuard wg0)"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
-            # Map choice 1 to setup logic
-            [ "$sc_choice" = "1" ] && sc_choice="3"
+            [ "$sc_choice" = "1" ] && sc_choice="5"
         fi
 
         clear
@@ -1093,9 +1298,16 @@ setup_standalone_naive() {
                 manage_naive_users_menu
                 ;;
             3)
-                echo -e "${C_CYAN}🌐 === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
+                setup_hybrid_wg_routing || true
+                pause_enter
+                ;;
+            4)
+                disable_hybrid_wg_routing
+                pause_enter
+                ;;
+            5)
+                echo -e "${C_CYAN}🌐 === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY (+ ГИБРИДНЫЙ ШЛЮЗ) ===${C_RESET}"
 
-                # Если на порту 443 запущены предыдущие каскадные службы скрипта (Hysteria, Xray, DERP), остановим их перед проверкой
                 if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
                     echo -e "${C_YELLOW}⚠️ Освобождение портов 80/443 от предыдущих каскадных служб (Hysteria/Xray/DERP)...${C_RESET}"
                     silent_run systemctl stop hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
@@ -1118,7 +1330,7 @@ setup_standalone_naive() {
                 fi
 
                 local n_dom=""
-                prompt_default "1/3. Введите ваш домен, направленный по DNS (A-запись без прокси Cloudflare) на этот сервер:" "${saved_dom:-yourdomain.com}" n_dom
+                prompt_default "1/3. Введите ваш домен, направленный по DNS (A-запись без Cloudflare proxy) на этот сервер:" "${saved_dom:-yourdomain.com}" n_dom
                 if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then
                     if [ "$is_configured" = false ]; then break; else continue; fi
                 fi
@@ -1149,11 +1361,7 @@ setup_standalone_naive() {
                 ip link del dev wg-cascade 2>/dev/null || true
                 ip route flush table 51888 2>/dev/null || true
                 while ip rule del priority 100 2>/dev/null; do :; done
-                while ip rule del priority 30000 2>/dev/null; do :; done
                 clean_duplicate_cascade_iptables
-                if command -v tailscale &>/dev/null; then
-                    silent_run tailscale set --exit-node=
-                fi
 
                 ensure_go_and_build_caddy_naive || { pause_enter; if [ "$is_configured" = false ]; then break; else continue; fi; }
 
@@ -1166,6 +1374,7 @@ NAIVE_DOMAIN="$n_dom"
 NAIVE_EMAIL="$n_email"
 SERVER_PUB_IP="$pub_ip"
 TCP_TUNE_PROFILE="balanced"
+NAIVE_OUT_MODE="direct"
 EOF
                 chmod 600 /etc/default/bobarev-cascade
 
@@ -1180,16 +1389,23 @@ EOF
                     echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
                 fi
 
-                echo -e "${C_GREEN}✅ Автономный NaiveProxy (Прямой выход в интернет с этого VPS) успешно настроен и запущен!${C_RESET}"
+                if prompt_yn "Направить трафик NaiveProxy и Tailscale Exit Node через внешний туннель WireGuard (wg0)?
+
+• Да: гибридный шлюз (все запросы пойдут через зарубежный WireGuard wg0).
+• Нет: прямой выход с этого сервера (чистый IP)." "true"; then
+                    setup_hybrid_wg_routing || true
+                fi
+
+                echo -e "${C_GREEN}✅ Настройка автономного NaiveProxy успешно завершена!${C_RESET}"
                 print_naive_shadowrocket_links
                 pause_enter
                 ;;
-            4)
-                if prompt_yn "Остановить и удалить службы NaiveProxy (Caddy) на этом сервере?" "false"; then
+            6)
+                if prompt_yn "Остановить и удалить службы NaiveProxy (Caddy) и туннель wg0 на этом сервере?" "false"; then
+                    disable_hybrid_wg_routing
                     silent_run systemctl stop caddy.service
                     silent_run systemctl disable caddy.service
-                    rm -f /etc/caddy/Caddyfile
-                    rm -f /etc/default/bobarev-cascade
+                    rm -f /etc/caddy/Caddyfile /etc/default/bobarev-cascade
                     rm -rf "$NAIVE_DIR" "$WEBROOT" "$LOG_DIR"
                     silent_run systemctl daemon-reload
                     echo -e "${C_GREEN}✅ Служба NaiveProxy полностью остановлена и удалена.${C_RESET}"
@@ -1199,6 +1415,7 @@ EOF
         esac
     done
 }
+
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
@@ -5736,7 +5953,9 @@ mod_server_audit() {
 
     echo -e "\n${C_BOLD}--- 7. Закрытая меш-сеть Tailscale и Каскадные туннели ---${C_RESET}"
     local cascade_status="${C_BLUE}Не настроен${C_RESET}"
-    if is_naive_active && is_wg_cascade_active; then
+    if is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
+        cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
+    elif is_naive_active && is_wg_cascade_active; then
         cascade_status="${C_GREEN}🚀 Сервер 1 (Каскад 1: Naiveproxy - Wireguard - Warp: NaiveProxy -> WG-Мост активен)${C_RESET}"
     elif is_naive_active; then
         cascade_status="${C_GREEN}🔒 Сервер 1 (Tailscale-каскад: NaiveProxy -> Tailscale активен)${C_RESET}"
@@ -5744,6 +5963,8 @@ mod_server_audit() {
         cascade_status="${C_GREEN}🌍 Сервер 2 (Прямой скоростной выход: WG-Мост -> WARP активен)${C_RESET}"
     elif is_warp_active; then
         cascade_status="${C_GREEN}🌍 Сервер 2 (Tailscale-выход: Tailscale -> WARP активен)${C_RESET}"
+    elif systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; then
+        cascade_status="${C_GREEN}🔒 Шлюз WireGuard wg0 активен (таблица 150)${C_RESET}"
     fi
     echo -e "  • Активный режим каскада:    $cascade_status"
 
@@ -7075,7 +7296,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.65 (Gold Master)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.70 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -7154,7 +7375,7 @@ while true; do
     "19" "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" \
     "20" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
     "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
-    "22" "🌐 Автономный NaiveProxy (1 сервер)" \
+    "22" "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" \
     "23" "🔍 Аудит системы 1" \
     "24" "🩺 Аудит системы 2 и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \

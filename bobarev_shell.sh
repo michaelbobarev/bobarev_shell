@@ -1254,7 +1254,7 @@ disable_hybrid_wg_routing() {
     if command -v ufw &>/dev/null; then
         silent_run ufw route delete allow in on tailscale0 out on wg0 2>/dev/null || true
         silent_run ufw route delete allow in on wg0 out on tailscale0 2>/dev/null || true
-        silent_run ufw reload
+        silent_run ufw reload >/dev/null 2>&1 || true
     fi
 
     if [ -f /etc/default/bobarev-cascade ]; then

@@ -170,6 +170,12 @@ is_wg_cascade_active() {
     return 1
 }
 
+is_wg0_active() {
+    systemctl is-active --quiet wg-quick@wg0.service 2>/dev/null && return 0
+    ip link show wg0 >/dev/null 2>&1 && return 0
+    return 1
+}
+
 ensure_wg_kernel_modules() {
     silent_run modprobe wireguard
     silent_run modprobe ip6table_mangle
@@ -360,6 +366,9 @@ flush_and_reload_nat() {
     fi
     if is_wg_cascade_active; then
         iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
+    fi
+    if is_wg0_active; then
+        iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wg0 -j MASQUERADE 2>/dev/null || true
     fi
     if [ -x /usr/local/bin/bobarev-cascade-ru.sh ]; then
         /usr/local/bin/bobarev-cascade-ru.sh >/dev/null 2>&1 || true
@@ -1190,6 +1199,14 @@ EOF
         silent_run tailscale set --advertise-exit-node=true
     fi
 
+    ensure_ufw_nat_rule "-A POSTROUTING -o wg0 -j MASQUERADE"
+    if command -v ufw &>/dev/null; then
+        silent_run ufw route allow in on tailscale0 out on wg0 comment 'Tailscale to wg0 exit'
+        silent_run ufw route allow in on wg0 out on tailscale0 comment 'wg0 to Tailscale return'
+        silent_run ufw reload
+    fi
+    iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wg0 -j MASQUERADE 2>/dev/null || true
+
     if [ -f /etc/default/bobarev-cascade ]; then
         sed -i '/^NAIVE_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
         echo 'NAIVE_OUT_MODE="wg0"' >> /etc/default/bobarev-cascade
@@ -1230,6 +1247,15 @@ disable_hybrid_wg_routing() {
     while ip rule del sport 41641 lookup main priority 97 2>/dev/null; do :; done
     while ip rule del sport 443 lookup main priority 99 2>/dev/null; do :; done
     while ip rule del sport 80 lookup main priority 100 2>/dev/null || true; do :; done
+
+    if [ -f /etc/ufw/before.rules ]; then
+        sed -i '/-o wg0 -j MASQUERADE/d' /etc/ufw/before.rules 2>/dev/null || true
+    fi
+    if command -v ufw &>/dev/null; then
+        silent_run ufw route delete allow in on tailscale0 out on wg0 2>/dev/null || true
+        silent_run ufw route delete allow in on wg0 out on tailscale0 2>/dev/null || true
+        silent_run ufw reload
+    fi
 
     if [ -f /etc/default/bobarev-cascade ]; then
         sed -i '/^NAIVE_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
@@ -4763,6 +4789,13 @@ mod_ufw() {
         silent_run ufw route allow in on warp out on wg-cascade comment 'WARP to WG Cascade'
         ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
         echo -e "${C_BLUE}ℹ️ Восстановлены правила транзита UFW для туннеля Cloudflare WARP.${C_RESET}"
+    fi
+
+    if [ -f /etc/wireguard/wg0.conf ] || is_wg0_active; then
+        silent_run ufw route allow in on tailscale0 out on wg0 comment 'Tailscale to wg0 exit'
+        silent_run ufw route allow in on wg0 out on tailscale0 comment 'wg0 to Tailscale return'
+        ensure_ufw_nat_rule "-A POSTROUTING -o wg0 -j MASQUERADE"
+        echo -e "${C_BLUE}ℹ️ Восстановлены правила транзита UFW и NAT для шлюза WireGuard (wg0).${C_RESET}"
     fi
 
     if [ -f /etc/default/bobarev-cascade ]; then

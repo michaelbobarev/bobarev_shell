@@ -3615,7 +3615,7 @@ show_derp_json_interactive() {
         source /etc/default/bobarev-derp
         saved_domain="${DERP_DOMAIN:-derp.yourdomain.com}"
         is_installed=true
-    elif [ -f /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service ]; then
+    elif [ -f /etc/systemd/system/derper.service ]; then
         is_installed=true
     fi
 
@@ -3644,7 +3644,7 @@ manage_custom_derp() {
         local derp_state="Не установлен"
         if is_derp_active; then
             derp_state="Активен"
-        elif [ -f /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service ]; then
+        elif [ -f /etc/systemd/system/derper.service ]; then
             derp_state="Остановлен"
         fi
 
@@ -3725,7 +3725,7 @@ DERP_STUN_PORT="3478"
 EOF
 
                 echo -e "${C_BLUE}⚙️ Создание и запуск защищенной системной службы derper.service...${C_RESET}"
-                cat << EOF > /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service
+                cat << EOF > /etc/systemd/system/derper.service
 [Unit]
 Description=Tailscale DERP Relay Server ($d_dom)
 After=network-online.target tailscaled.service
@@ -3779,7 +3779,7 @@ EOF
                 if prompt_yn "Остановить и полностью удалить службу личного ретранслятора DERP и закрыть порты 443/tcp и 3478/udp в UFW?" "false"; then
                     silent_run systemctl stop derper.service
                     silent_run systemctl disable derper.service
-                    rm -f /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service /etc/default/bobarev-derp
+                    rm -f /etc/systemd/system/derper.service /etc/default/bobarev-derp
                     silent_run systemctl daemon-reload
                     if command -v ufw &>/dev/null; then
                         silent_run ufw delete allow 443/tcp
@@ -6022,7 +6022,7 @@ mod_server_audit() {
         local ts_derp_human="${C_BLUE}Не настроен${C_RESET}"
         if is_derp_active; then
             ts_derp_human="${C_GREEN}✅ Работает (443/tcp и STUN 3478/udp открыты)${C_RESET}"
-        elif [ -f /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service ]; then
+        elif [ -f /etc/systemd/system/derper.service ]; then
             ts_derp_human="${C_YELLOW}⚠️  Установлен, но служба derper остановлена${C_RESET}"
         fi
 
@@ -6255,7 +6255,7 @@ mod_backup_manager() {
             sysctl --system >/dev/null 2>&1 || true
             [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
             [ -x /usr/local/bin/bobarev-cascade-ru.sh ] && /usr/local/bin/bobarev-cascade-ru.sh
-            [ -f /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
+            [ -f /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
             is_naive_active && silent_run systemctl restart caddy.service
             is_warp_active && silent_run systemctl restart wg-quick@warp
             [ -f /etc/systemd/system/bobarev-udp2raw.service ] && [ -x /usr/local/bin/udp2raw ] && silent_run systemctl restart bobarev-udp2raw.service

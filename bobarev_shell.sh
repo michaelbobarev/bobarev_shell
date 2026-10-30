@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.74 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.8.76 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -7322,19 +7322,25 @@ nm_detect_role() {
  else echo unknown; fi
 }
 nm_status() {
- local role unit state bridge=0
- role=$(nm_detect_role)
- echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — только чтение'
+ local role="${1:-}" unit state human loaded bridge=0
+ [[ -n "$role" ]] || role=$(nm_detect_role)
+ echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — настройки не меняются'
  case "$role" in
-  1) echo 'Предполагаемая роль: сервер 1, вход (по мосту/маркеру).' ;;
-  2) echo 'Предполагаемая роль: сервер 2, выход (по активному microsocks-mesh).' ;;
-  mixed) echo 'Роль неоднозначна: найдены признаки входа и выхода.' ;;
-  *) echo 'Роль не определена. Номера mesh-IP сами по себе роль не задают.' ;;
+  1) echo 'Этот сервер: сервер 1 — вход для клиента (по выбранному мастеру или признакам служб).' ;;
+  2) echo 'Этот сервер: сервер 2 — выход в интернет (по выбранному мастеру или признакам служб).' ;;
+  mixed) echo 'Назначение неясно: найдены компоненты входа и выхода.' ;;
+  *) echo 'Назначение не определено. Для установки выберите сервер 2 или сервер 1 в меню.' ;;
  esac
  [[ ! -f /etc/xraymesh/config.env ]] || echo 'Найдена /etc/xraymesh/config.env'
  for unit in xraymesh caddy microsocks-mesh naive-mesh-bridge gost-mesh; do
   state=$(nm_state "$unit"); state=${state:-unknown}
-  printf '%-24s %-12s ' "$unit:" "$state"
+  loaded=$(systemctl show "$unit.service" -p LoadState --value 2>/dev/null) || loaded=unknown
+  case "$state" in
+   active) human='ЗАПУЩЕНО' ;;
+   failed) human='ОШИБКА' ;;
+   *) if [[ "$loaded" == not-found ]]; then human='НЕТ СЛУЖБЫ'; else human='НЕ ЗАПУЩЕНО'; fi ;;
+  esac
+  printf '[%s] %s: ' "$human" "$unit"
   case "$unit:$role" in
    xraymesh:*) [[ "$state" == active ]] && echo 'Служба mesh запущена; это не тест передачи трафика.' || echo 'Внимание: служба mesh не активна.' ;;
    caddy:2) echo 'Дополнительная служба; для SOCKS-выхода не обязательна.' ;;
@@ -7353,6 +7359,7 @@ nm_status() {
  echo; echo 'Peers:'
  if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then /opt/xraymesh/bin/easytier-cli peer || echo 'Не удалось получить peers.'
  else echo 'easytier-cli не найден в /opt/xraymesh/bin; peers не проверены.'; fi
+ echo; nm_realm_status || echo 'Ошибка чтения Realm'
  echo; echo 'Это снимок локального состояния, не проверка всей цепочки.'
  echo 'Финальный тест: Shadowrocket -> сайт определения IP; сравнить с выходом сервера 2.'
 }
@@ -7405,12 +7412,11 @@ nm_helper() (
 nm_apply() {
  command -v python3 >/dev/null || { echo 'Установите python3'; return 1; }
  nm_questions || return 1
- local role answer
- nm_prompt 'Роль ЭТОГО сервера: 1 вход, 2 выход' 1 role || return 1
+ local role="${1:-}" answer
  [[ "$role" == 1 || "$role" == 2 ]] || return 1
  echo 'Это изменение конфигурации. Работающую связку применять повторно не требуется.'
  nm_prompt 'Применить? Введите YES' no answer || return 1
- [[ "$answer" == YES ]] || return 0
+ [[ "$answer" == YES ]] || return 2
  if [[ "$role" == 2 ]]; then
   if ! command -v ufw >/dev/null || ! LC_ALL=C ufw status | grep -q '^Status: active'; then
    echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. SOCKS без пароля."
@@ -7428,36 +7434,154 @@ nm_apply() {
  nm_helper "$role" || return 1
  if [[ "$role" == 1 ]]; then (umask 077; printf '%s\n' "$NM_LOCAL" > /etc/naiveproxy/mesh-upstream.port); fi
 }
-manage_naive_mesh_menu() {
- local action answer detected height rows
+
+nm_yes() { local answer; nm_prompt "$1 Введите YES" no answer || return 1; [[ "$answer" == YES ]]; }
+nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet xraymesh.service; }
+nm_realm_status() {
+ echo 'REALM — пересылки этого сервера'
+ printf 'Служба: '; nm_state xraymesh-realm
+ command -v python3 >/dev/null || { echo 'Нужен python3 для чтения настроек.'; return 1; }
+ python3 - <<'REALM_READ'
+import json,pathlib
+p=pathlib.Path('/etc/xraymesh/realm.json')
+if not p.is_file(): print('realm.json не найден; Realm может не требоваться вашей схеме.'); raise SystemExit(0)
+try: data=json.loads(p.read_text())
+except (OSError,ValueError) as e: print('Ошибка чтения:',e); raise SystemExit(1)
+for i,e in enumerate(data.get('endpoints',[]),1):
+ print(f"{i}. {e.get('listen','?')} -> {e.get('remote','?')}; network={e.get('network',{})}")
+print('Наличие пересылки не доказывает её использование NaiveProxy.')
+REALM_READ
+}
+nm_realm_create() {
+ local name target lp rp proto answer backup item
+ echo 'НОВАЯ ПЕРЕСЫЛКА REALM — на текущем сервере'
+ echo 'Адрес назначения и направление не угадываются. Существующие туннели не удаляются.'
+ echo 'Слушатель будет 0.0.0.0:порт. До применения ограничьте доступ firewall.'
+ nm_realm_status || return 1
+ nm_prompt 'Имя НОВОЙ пересылки' '' name || return 1
+ nm_prompt 'Целевой mesh IPv4 (куда пересылать)' '' target || return 1
+ nm_prompt 'Входной порт ЭТОГО сервера' '' lp || return 1
+ nm_prompt 'Порт назначения на целевом узле' '' rp || return 1
+ nm_prompt 'Протокол tcp/udp/both' tcp proto || return 1
+ python3 - "$name" "$target" "$lp" "$rp" "$proto" <<'REALM_VALIDATE'
+import sys,re,ipaddress
+name,target,lp,rp,proto=sys.argv[1:]
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}',name): raise SystemExit('Некорректное имя')
+if ipaddress.IPv4Address(target) not in ipaddress.IPv4Network('10.0.0.0/8'): raise SystemExit('Нужен mesh IP из 10/8')
+for port in (lp,rp):
+ if not port.isdecimal() or not 1024<=int(port)<=65535: raise SystemExit('Порты мастера: 1024..65535')
+if proto not in ('tcp','udp','both'): raise SystemExit('Протокол: tcp/udp/both')
+REALM_VALIDATE
+ [[ $? == 0 ]] || return 1
+ [[ ! -e "/etc/xraymesh/realm-tunnels/$name.env" ]] || { echo 'Имя уже существует. Ничего не изменено.'; return 1; }
+ command -v ss >/dev/null || { echo 'Нужен iproute2 (ss).'; return 1; }
+ if [[ "$proto" == tcp || "$proto" == both ]]; then
+  [[ -z "$(ss -H -ltn "sport = :$lp")" ]] || { echo 'TCP-порт занят.'; return 1; }
+ fi
+ if [[ "$proto" == udp || "$proto" == both ]]; then
+  [[ -z "$(ss -H -lun "sport = :$lp")" ]] || { echo 'UDP-порт занят.'; return 1; }
+ fi
+ if [[ -f /etc/xraymesh/realm.json ]] && ! compgen -G '/etc/xraymesh/realm-tunnels/*.env' >/dev/null; then
+  echo 'Есть realm.json без управляемых definitions. Сначала нужна ручная миграция.'; return 1
+ fi
+ echo "Создать: $name; $proto; 0.0.0.0:$lp -> $target:$rp"
+ echo 'Общая Realm-служба перезапустится. Ручные изменения realm.json вне .env могут потеряться.'
+ echo 'Не публикуйте SOCKS без пароля. Firewall скрипт не открывает и не проверяет.'
+ nm_prompt 'Firewall/ACL уже ограничивает доступ? Введите ACL-READY' no answer || return 1
+ [[ "$answer" == ACL-READY ]] || return 2
+ nm_yes 'Создать указанную пересылку?' || return 2
+ backup=$(mktemp -d /root/realm-backup-XXXXXXXX) || return 1
+ chmod 700 "$backup"
+ for item in /etc/xraymesh/realm.json /etc/xraymesh/realm-tunnels /etc/systemd/system/xraymesh-realm.service; do
+  if [[ -e "$item" ]]; then cp -a -- "$item" "$backup/" || return 1; fi
+ done
+ echo "Backup: $backup"
+ nm_mesh realm-create "$name" "$target" "$lp:$rp" "$proto" || { echo "Ошибка. Проверьте службу. Backup: $backup; полного автоотката нет."; return 1; }
+ nm_realm_status
+}
+nm_realm_menu() {
+ local choice
  while true; do
-  detected='Установка не обнаружена'
-  if [[ -f /etc/xraymesh/config.env || -f /opt/xraymesh/xraymesh.sh ]] || command -v xraymesh >/dev/null; then detected='Обнаружена существующая установка'; fi
+  if ! smart_menu 'Realm — пересылка портов' 'Рабочие пересылки не нужно пересоздавать.' 17 "$WT_WIDTH" 3 choice \
+   '1' 'Состояние и настроенные пересылки' \
+   '2' 'Создать новую пересылку' \
+   '0' 'Вернуться в меню'; then break; fi
+  case "$choice" in
+   0) break ;;
+   1) nm_realm_status || echo 'Ошибка чтения'; pause_enter ;;
+   2) nm_realm_create || echo 'Создание остановлено или отменено'; pause_enter ;;
+  esac
+ done
+}
+nm_wizard() {
+ local target="$1"
+ if [[ "$target" == 2 ]]; then
+  echo 'СЕРВЕР 2 — ВЫХОД. Начните настройку пары с этого сервера.'
+ else
+  echo 'СЕРВЕР 1 — ВХОД. Сначала подготовьте сервер 2 и получите код подключения.'
+ fi
+ nm_yes 'Продолжить на этом сервере?' || return 2
+ if nm_ready; then echo 'XRayMesh уже настроен и запущен. Существующая сеть сохраняется.'
+ else
+  if [[ "$target" == 2 ]]; then
+   echo 'В официальном мастере выберите Create для новой сети.'
+   echo 'Задайте mesh-IP сервера 2, например 10.144.144.2; encryption=yes.'
+   nm_mesh setup-node || return 1
+  else
+   echo 'Вставьте код подключения сервера 2.'
+   nm_mesh join || return 1
+  fi
+  nm_ready || { echo 'XRayMesh ещё не готов. Проверьте диагностику.'; return 1; }
+ fi
+ if [[ "$target" == 1 ]] && ! systemctl is-active --quiet caddy.service; then
+  echo 'Настройте NaiveProxy существующим мастером, затем вернитесь сюда.'
+  setup_standalone_naive
+  systemctl is-active --quiet caddy.service || { echo 'Caddy не запущен. Следующие шаги не применяются.'; return 1; }
+ fi
+ echo 'Далее — реальные mesh-IP обоих серверов и порты.'
+ nm_apply "$target" || { echo 'Настройка не завершена/отменена. Уже сделанные шаги сохранены.'; return 1; }
+ nm_status "$target"
+ if [[ "$target" == 2 ]]; then
+  echo 'Realm нужен только при наличии соответствующей пересылки в вашей схеме.'
+  if nm_yes 'Открыть Realm? Для сохранения как есть нажмите Enter.'; then nm_realm_menu; fi
+  echo 'Теперь настройте сервер 1.'
+  if nm_yes 'Показать код подключения сервера 1?'; then nm_mesh invite || return 1; fi
+ else
+  echo 'Helper проверил SOCKS и localhost-мост перед применением Caddy.'
+  echo 'Полный тест: Shadowrocket -> сайт проверки IP -> сравнить с выходом сервера 2.'
+ fi
+}
+manage_naive_mesh_menu() {
+ local action height rows intro
+ while true; do
+  intro='Сначала сервер 2 (выход), затем сервер 1 (вход).'
+  if nm_ready; then intro='XRayMesh на этом сервере запущен. Проверка: пункт 1.'; fi
   height="${WT_HEIGHT:-27}"; rows=$((height-13)); ((rows>=3)) || rows=3
-  if ! smart_menu 'NaiveProxy + XRayMesh' "$detected
-Рабочая пара: пункт 1, без перенастройки.
-XRayMesh: официальный main." "$height" "$WT_WIDTH" "$rows" action \
-   '1' 'Локальная диагностика по роли' \
-   '2' 'Открыть официальный XRayMesh' \
-   '3' 'Создать / изменить mesh-узел' \
-   '4' 'Показать invite-код' \
-   '5' 'Присоединиться по invite' \
-   '6' 'Настроить роль 1 / 2' \
+  if ! smart_menu 'NaiveProxy + XRayMesh' "$intro
+Клиент -> сервер 1 -> сервер 2 -> интернет." "$height" "$WT_WIDTH" "$rows" action \
+   '1' 'Локальная диагностика' \
+   '2' 'Настроить сервер 2 — выход' \
+   '3' 'Настроить сервер 1 — вход' \
+   '4' 'Создать / изменить mesh-узел' \
+   '5' 'Показать код подключения' \
+   '6' 'Подключиться по коду' \
    '7' 'Настроить NaiveProxy' \
-   '8' 'Проверить localhost-мост' \
-   '9' 'Пользователи / ссылки' \
-   '0' 'Назад'; then break; fi
+   '8' 'Открыть меню XRayMesh' \
+   '9' 'Пользователи и ссылки NaiveProxy' \
+   '10' 'Realm — пересылка портов' \
+   '0' 'Вернуться в меню'; then break; fi
   case "$action" in
    0) break ;;
    1) nm_status; pause_enter ;;
-   2) echo 'Официальное меню может выполнять загрузки и подготовку компонентов.'; nm_prompt 'Запустить? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh || echo 'Ошибка XRayMesh'; fi; pause_enter ;;
-   3) echo 'Работающий mesh создавать заново не нужно.'; nm_prompt 'Открыть настройку? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh setup-node || echo 'Настройка не завершена'; fi; pause_enter ;;
-   4) nm_mesh invite || echo 'Ошибка invite'; pause_enter ;;
-   5) nm_prompt 'Присоединиться к mesh? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh join || echo 'Присоединение не завершено'; fi; pause_enter ;;
-   6) nm_apply || echo 'Настройка роли не завершена'; pause_enter ;;
+   2) nm_wizard 2 || echo 'Мастер остановлен'; pause_enter ;;
+   3) nm_wizard 1 || echo 'Мастер остановлен'; pause_enter ;;
+   4) if nm_yes 'Изменить mesh-узел?'; then nm_mesh setup-node || echo 'Настройка не завершена'; nm_status; fi; pause_enter ;;
+   5) nm_mesh invite || echo 'Код не получен'; pause_enter ;;
+   6) if nm_yes 'Подключиться к сети по коду?'; then nm_mesh join || echo 'Подключение не завершено'; nm_status; fi; pause_enter ;;
    7) setup_standalone_naive ;;
-   8) nm_load; curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "127.0.0.1:$NM_LOCAL" https://ifconfig.me || echo 'Мост недоступен'; echo; pause_enter ;;
+   8) echo 'Официальное меню может загружать и подготавливать компоненты.'; if nm_yes 'Открыть XRayMesh?'; then nm_mesh || echo 'Ошибка XRayMesh'; fi; pause_enter ;;
    9) manage_naive_users_menu ;;
+   10) nm_realm_menu ;;
   esac
  done
 }
@@ -7693,7 +7817,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.74 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.76 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.70 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.8.72 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -631,6 +631,7 @@ ${auth_lines}        }
             hide_via
 $( [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ] && echo "            upstream socks5://127.0.0.1:1080" )
 $( [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && echo "            upstream socks5://127.0.0.1:10808" )
+$( if [ -f /etc/naiveproxy/mesh-upstream.port ] && [ "${CASCADE_ROLE:-}" = standalone_naive ]; then read -r nm_port < /etc/naiveproxy/mesh-upstream.port; if [[ "$nm_port" =~ ^[0-9]{4,5}$ ]] && ((10#$nm_port >= 1024 && 10#$nm_port <= 65535)); then echo "            upstream socks5://127.0.0.1:$nm_port"; else echo "            upstream socks5://127.0.0.1:1"; fi; fi )
         }
     }
 
@@ -1269,6 +1270,11 @@ disable_hybrid_wg_routing() {
 }
 
 setup_standalone_naive() {
+    if [[ -f /etc/naiveproxy/mesh-upstream.port ]]; then
+        echo "Активен mesh-каскад. Используйте пункт 23; автономная перенастройка заблокирована."
+        pause_enter
+        return 0
+    fi
     while true; do
         MODULE_CANCELED=false
         local is_configured=false
@@ -1297,7 +1303,7 @@ setup_standalone_naive() {
             if ! smart_menu "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" "
 Статус: $c_state
 Активных пользователей: $u_cnt
-Выберите действие:" 18 $WT_WIDTH 6 "sc_choice"             "1" "📋 Показать ссылки Shadowrocket"             "2" "👤 Управление пользователями"             "3" "🚀 Подключить / Обновить туннель WireGuard (wg0 -> Выход)"             "4" "🌍 Переключить на прямой выход в интернет (отключить wg0)"             "5" "🔧 Перенастроить домен и NaiveProxy с нуля"             "6" "🛑 Остановить и удалить NaiveProxy"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+Выберите действие:" 18 $WT_WIDTH 6 "sc_choice"             "1" "📋 Показать ссылки Shadowrocket"             "2" "👤 Управление пользователями"             "3" "🚀 Подключить / Обновить туннель WireGuard (wg0 -> Выход)"             "4" "🌍 Переключить на прямой выход в интернет (отключить wg0)"             "5" "🔧 Перенастроить домен и NaiveProxy (без изменения выхода)"             "6" "🛑 Остановить и удалить NaiveProxy"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
         else
@@ -1306,9 +1312,9 @@ setup_standalone_naive() {
 
 Поддерживает 2 режима выхода:
  • Прямой выход в интернет с этого VPS.
- • Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0).
+ • WireGuard wg0 — отдельное дополнение после настройки NaiveProxy.
 
-Выберите действие:" 16 $WT_WIDTH 2 "sc_choice"             "1" "🚀 Настроить NaiveProxy (с выбором выхода: Прямой / WireGuard wg0)"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+Выберите действие:" 16 $WT_WIDTH 2 "sc_choice"             "1" "🚀 Настроить автономный NaiveProxy (прямой выход)"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
             [ "$sc_choice" = "1" ] && sc_choice="5"
@@ -1332,7 +1338,7 @@ setup_standalone_naive() {
                 pause_enter
                 ;;
             5)
-                echo -e "${C_CYAN}🌐 === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY (+ ГИБРИДНЫЙ ШЛЮЗ) ===${C_RESET}"
+                echo -e "${C_CYAN}🌐 === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
 
                 if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
                     echo -e "${C_YELLOW}⚠️ Освобождение портов 80/443 от предыдущих каскадных служб (Hysteria/Xray/DERP)...${C_RESET}"
@@ -1381,13 +1387,16 @@ setup_standalone_naive() {
                     if [ "$is_configured" = false ]; then break; else continue; fi
                 fi
 
-                silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
-                silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
-                silent_run wg-quick down wg-cascade 2>/dev/null || true
-                ip link del dev wg-cascade 2>/dev/null || true
-                ip route flush table 51888 2>/dev/null || true
-                while ip rule del priority 100 2>/dev/null; do :; done
-                clean_duplicate_cascade_iptables
+                # Повторная настройка NaiveProxy не должна менять маршрутизацию дополнений.
+                if [ "$is_configured" = false ]; then
+                    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
+                    silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
+                    silent_run wg-quick down wg-cascade 2>/dev/null || true
+                    ip link del dev wg-cascade 2>/dev/null || true
+                    ip route flush table 51888 2>/dev/null || true
+                    while ip rule del priority 100 2>/dev/null; do :; done
+                    clean_duplicate_cascade_iptables
+                fi
 
                 ensure_go_and_build_caddy_naive || { pause_enter; if [ "$is_configured" = false ]; then break; else continue; fi; }
 
@@ -1400,7 +1409,7 @@ NAIVE_DOMAIN="$n_dom"
 NAIVE_EMAIL="$n_email"
 SERVER_PUB_IP="$pub_ip"
 TCP_TUNE_PROFILE="balanced"
-NAIVE_OUT_MODE="direct"
+NAIVE_OUT_MODE="$cur_out"
 EOF
                 chmod 600 /etc/default/bobarev-cascade
 
@@ -1415,12 +1424,7 @@ EOF
                     echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
                 fi
 
-                if prompt_yn "Направить трафик NaiveProxy и Tailscale Exit Node через внешний туннель WireGuard (wg0)?
-
-• Да: гибридный шлюз (все запросы пойдут через зарубежный WireGuard wg0).
-• Нет: прямой выход с этого сервера (чистый IP)." "true"; then
-                    setup_hybrid_wg_routing || true
-                fi
+                echo -e "${C_BLUE}ℹ️ Режим выхода сохранён: ${cur_out}. WireGuard wg0 настраивается отдельно через пункт 3.${C_RESET}"
 
                 echo -e "${C_GREEN}✅ Настройка автономного NaiveProxy успешно завершена!${C_RESET}"
                 print_naive_shadowrocket_links
@@ -7301,6 +7305,105 @@ run_full_auto_setup() {
     MODULE_CANCELED=false
 }
 
+
+# NaiveProxy + XRayMesh: local two-role wizard, no remote SSH execution.
+NM_BUNDLE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+nm_prompt() {
+    local value
+    IFS= read -r -p "$1 [$2]: " value || return 1
+    printf -v "$3" '%s' "${value:-$2}"
+}
+nm_load() {
+    NM_ENTRY=10.144.144.1 NM_EXIT=10.144.144.2 NM_SOCKS=1080 NM_LOCAL=10808
+    NM_SERVER1=server1 NM_SERVER2=server2
+    [[ ! -f /etc/naiveproxy/mesh-wizard.env ]] || source /etc/naiveproxy/mesh-wizard.env
+}
+nm_questions() {
+    nm_load
+    echo 'Сервер 1 — вход NaiveProxy; сервер 2 — выход. Страна не имеет значения.'
+    nm_prompt 'Название сервера 1 (для подписи)' "$NM_SERVER1" NM_SERVER1 || return 1
+    nm_prompt 'Название сервера 2 (для подписи)' "$NM_SERVER2" NM_SERVER2 || return 1
+    nm_prompt 'Mesh IPv4 сервера 1' "$NM_ENTRY" NM_ENTRY || return 1
+    nm_prompt 'Mesh IPv4 сервера 2' "$NM_EXIT" NM_EXIT || return 1
+    nm_prompt 'SOCKS-порт сервера 2' "$NM_SOCKS" NM_SOCKS || return 1
+    nm_prompt 'Локальный порт моста сервера 1' "$NM_LOCAL" NM_LOCAL || return 1
+    python3 - "$NM_ENTRY" "$NM_EXIT" "$NM_SOCKS" "$NM_LOCAL" <<'NM_PY'
+import ipaddress,sys
+ips=[ipaddress.IPv4Address(v) for v in sys.argv[1:3]]
+if ips[0]==ips[1] or not all(v.is_private and not v.is_loopback and not v.is_link_local and not v.is_unspecified and not v.is_multicast for v in ips):
+    raise SystemExit('Нужны два разных частных mesh IPv4')
+for v in sys.argv[3:]:
+    if not v.isdecimal() or not 1024<=int(v)<=65535: raise SystemExit('Порты: 1024..65535')
+NM_PY
+    [[ $? == 0 ]] || return 1
+    mkdir -p /etc/naiveproxy
+    (umask 077; for key in NM_ENTRY NM_EXIT NM_SOCKS NM_LOCAL NM_SERVER1 NM_SERVER2; do printf '%s=%q\n' "$key" "${!key}"; done > /etc/naiveproxy/mesh-wizard.env)
+}
+nm_mesh() {
+    [[ -f "$NM_BUNDLE_DIR/xraymesh.sh" ]] || { echo 'Распакуйте весь ZIP рядом с основным скриптом.'; return 1; }
+    bash "$NM_BUNDLE_DIR/xraymesh.sh" "$@"
+}
+nm_apply() {
+    command -v python3 >/dev/null || { apt-get update && apt-get install -y python3; } || return 1
+    nm_questions || return 1
+    local role answer
+    nm_prompt 'Роль ЭТОГО сервера: 1 — вход, 2 — выход' '1' role || return 1
+    [[ "$role" == 1 || "$role" == 2 ]] || return 1
+    echo "Будет настроен только текущий сервер, роль $role. На втором запустите этот же мастер."
+    nm_prompt 'Применить? Введите YES' 'no' answer || return 1
+    [[ "$answer" == YES ]] || return 0
+    if [[ "$role" == 2 ]]; then
+        if ! command -v ufw >/dev/null || ! LC_ALL=C ufw status | grep -q '^Status: active'; then
+            echo "SOCKS без пароля: заранее ограничьте firewall/mesh ACL до $NM_ENTRY -> $NM_EXIT:$NM_SOCKS."
+            nm_prompt 'Ограничение настроено? Введите ACL-READY' 'no' answer || return 1
+            [[ "$answer" == ACL-READY ]] || return 1
+        fi
+        env ENTRY_IP="$NM_ENTRY" EXIT_IP="$NM_EXIT" SOCKS_PORT="$NM_SOCKS" LOCAL_PORT="$NM_LOCAL" bash "$NM_BUNDLE_DIR/server-foreign.sh" || return 1
+    else
+        if ! systemctl is-active --quiet caddy; then
+            echo 'Сначала настройте NaiveProxy через пункт 22, затем вернитесь сюда. Рабочий внешний Caddy тоже поддерживается.'
+            return 1
+        fi
+        if [[ -f /etc/default/bobarev-cascade ]]; then
+            local CASCADE_ROLE=''
+            source /etc/default/bobarev-cascade
+            [[ "$CASCADE_ROLE" == standalone_naive ]] || { echo 'Обнаружен другой каскад. Сначала отключите его вручную.'; return 1; }
+            [[ "${NAIVE_OUT_MODE:-direct}" == direct ]] || { echo 'Отключите WG Dual-Gateway перед mesh-каскадом.'; return 1; }
+        fi
+        env ENTRY_IP="$NM_ENTRY" EXIT_IP="$NM_EXIT" SOCKS_PORT="$NM_SOCKS" LOCAL_PORT="$NM_LOCAL" bash "$NM_BUNDLE_DIR/server-russia.sh" || return 1
+        (umask 077; printf '%s\n' "$NM_LOCAL" > /etc/naiveproxy/mesh-upstream.port)
+        echo 'Mesh upstream сохранён для последующего управления пользователями.'
+    fi
+}
+manage_naive_mesh_menu() {
+    local action
+    while true; do
+        if ! smart_menu 'NaiveProxy + XRayMesh' 'Сервер 1: вход → localhost-мост → mesh → сервер 2: SOCKS → интернет.
+Начните с mesh на сервере 2, затем присоедините сервер 1.
+Установка выполняется локально на каждом сервере, без передачи SSH-паролей.' 22 "$WT_WIDTH" 10 action \
+          '1' 'Создать / настроить mesh-узел (штатный мастер)' \
+          '2' 'Показать invite-код этого узла' \
+          '3' 'Присоединить этот узел по invite-коду' \
+          '4' 'Настроить роль 1 / 2 и связать NaiveProxy с mesh' \
+          '5' 'Настроить NaiveProxy (существующий мастер)' \
+          '6' 'Статус и peers XRayMesh' \
+          '7' 'Проверить локальный мост (на сервере 1)' \
+          '8' 'Пользователи NaiveProxy / ссылки' \
+          '0' 'Назад'; then break; fi
+        case "$action" in
+            0) break ;;
+            1) echo 'Для нового mesh выберите Create; для сервера 2 задайте его mesh IP, например 10.144.144.2. Сохраните encryption=yes.'; nm_mesh setup-node || echo 'Настройка mesh не завершена'; pause_enter ;;
+            2) nm_mesh invite || echo 'Invite не создан'; pause_enter ;;
+            3) nm_mesh join || echo 'Присоединение не завершено'; pause_enter ;;
+            4) nm_apply || echo 'Настройка не завершена. Проверьте сообщение выше.'; pause_enter ;;
+            5) if [[ -f /etc/naiveproxy/mesh-upstream.port ]]; then echo 'Mesh уже включён. Для изменения домена используйте резервную копию и отдельную миграцию.'; pause_enter; else setup_standalone_naive; fi ;;
+            6) nm_mesh status || true; nm_mesh peers || true; pause_enter ;;
+            7) nm_load; curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "127.0.0.1:$NM_LOCAL" https://ifconfig.me || echo 'Мост недоступен'; echo; pause_enter ;;
+            8) manage_naive_users_menu ;;
+        esac
+    done
+}
+
 # ------------------------------------------------------------------------------
 # ОБРАБОТКА CLI-АРГУМЕНТОВ БЫСТРОГО ЗАПУСКА
 # ------------------------------------------------------------------------------
@@ -7329,7 +7432,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.70 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.72 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -7409,8 +7512,9 @@ while true; do
     "20" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
     "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
     "22" "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" \
-    "23" "🔍 Аудит системы 1" \
-    "24" "🩺 Аудит системы 2 и каскадные пары" \
+    "23" "🔗 NaiveProxy + XRayMesh" \
+    "24" "🔍 Аудит системы 1" \
+    "25" "🩺 Аудит системы 2 и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -7444,8 +7548,9 @@ while true; do
         20) manage_cascade_hysteria_menu ;;
         21) manage_cascade_xray_menu ;;
         22) setup_standalone_naive ;;
-        23) mod_server_audit; pause_enter ;;
-        24) mod_network_cascade_audit ;;
+        23) manage_naive_mesh_menu ;;
+        24) mod_server_audit; pause_enter ;;
+        25) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

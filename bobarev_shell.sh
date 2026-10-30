@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.78 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.8.79 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -5626,6 +5626,49 @@ mod_boot_diag() {
 }
 
 # 17. Полный аудит сервера (с проверкой ретранслятора DERP и обоих типов каскада)
+
+# Audit-only: inspect direct POSTROUTING rules; never alter firewall.
+audit_nat_output() {
+    local iface="$1" rules stats total unique repeated groups
+    if ! command -v iptables >/dev/null 2>&1; then
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Проверка недоступна: не найден компонент iptables${C_RESET}"
+        return 0
+    fi
+    if ! rules=$(iptables -t nat -S POSTROUTING 2>/dev/null); then
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Не удалось прочитать правила; состояние NAT не определено${C_RESET}"
+        return 0
+    fi
+    stats=$(printf '%s\n' "$rules" | awk -v iface="$iface" '
+        $1 == "-A" && $2 == "POSTROUTING" {
+            out=""; jump=""
+            for (i=3; i<=NF; i++) {
+                if ($i == "-o" && i<NF) out=$(i+1)
+                if ($i == "-j" && i<NF) jump=$(i+1)
+            }
+            if (out==iface && (jump=="MASQUERADE" || jump=="SNAT")) {
+                key=$0
+                total++
+                if (++seen[key]==1) unique++
+            }
+        }
+        END {
+            for (key in seen) if (seen[key]>1) groups++
+            printf "%d %d %d %d", total+0, unique+0, total-unique, groups+0
+        }')
+    read -r total unique repeated groups <<< "$stats"
+    if [[ "$total" == 0 ]]; then
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Прямых правил для $iface не найдено; другие цепочки и сетевые механизмы не проверялись${C_RESET}"
+    elif [[ "$repeated" == 0 ]]; then
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  На $iface настроено правил: $total; точных повторов нет${C_RESET}"
+        if ((total>1)); then
+            echo -e "                              ${C_BLUE}Несколько разных правил — само по себе не ошибка. Очистка по этому признаку не требуется.${C_RESET}"
+        fi
+    else
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  На $iface правил: $total; различных: $unique; лишних точных повторов: $repeated${C_RESET}"
+        echo -e "                              ${C_BLUE}Замечание к конфигурации, не доказательство сбоя. Автоматическая очистка не выполняется.${C_RESET}"
+    fi
+}
+
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -5939,14 +5982,9 @@ mod_server_audit() {
         fi
 
         if [ -n "$wan_if" ]; then
-            local nat_cnt=$(iptables -t nat -S POSTROUTING 2>/dev/null | grep -cE -- "-o ${wan_if}[[:space:]].*-j (MASQUERADE|SNAT)" || true)
-            if [ "$nat_cnt" -eq 1 ]; then
-                echo -e "  • Трансляция NAT на выходе:  ${C_GREEN}✅ Активна на $wan_if (1 чистое правило без дубликатов)${C_RESET}"
-            elif [ "$nat_cnt" -gt 1 ]; then
-                echo -e "  • Трансляция NAT на выходе:  ${C_YELLOW}⚠️  Найдено дубликатов на $wan_if: $nat_cnt (очистите в п. 10 -> 8 -> 4)${C_RESET}"
-            else
-                echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Не используется на $wan_if (режим обычного узла без шлюза)${C_RESET}"
-            fi
+            audit_nat_output "$wan_if"
+        else
+            echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Выходной интерфейс не определён; проверка не выполнена${C_RESET}"
         fi
 
         if [ -f /etc/default/bobarev-router ]; then
@@ -5991,12 +6029,31 @@ mod_server_audit() {
 
     echo -e "\n${C_BOLD}--- 7. Закрытая меш-сеть Tailscale и Каскадные туннели ---${C_RESET}"
     local cascade_status="${C_BLUE}Не настроен${C_RESET}"
-    if is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
+    if [[ -f /etc/naiveproxy/mesh-paused ]]; then
+        cascade_status="${C_BLUE}NaiveProxy + XRayMesh: сохранена отметка паузы${C_RESET}"
+    elif is_naive_active && nm_bound; then
+        if systemctl is-active --quiet xraymesh.service && { systemctl is-active --quiet naive-mesh-bridge.service || systemctl is-active --quiet gost-mesh.service; }; then
+            cascade_status="${C_GREEN}Сервер 1: NaiveProxy + XRayMesh — локальные службы запущены; полный путь отдельно не проверен${C_RESET}"
+        else
+            cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
+        fi
+    elif systemctl is-active --quiet xraymesh.service && systemctl is-active --quiet microsocks-mesh.service; then
+        cascade_status="${C_GREEN}Сервер 2: XRayMesh + выходной SOCKS — локальные службы запущены${C_RESET}"
+    elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
         cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
     elif is_naive_active && is_wg_cascade_active; then
         cascade_status="${C_GREEN}🚀 Сервер 1 (Каскад 1: Naiveproxy - Wireguard - Warp: NaiveProxy -> WG-Мост активен)${C_RESET}"
     elif is_naive_active; then
-        cascade_status="${C_GREEN}🔒 Сервер 1 (Tailscale-каскад: NaiveProxy -> Tailscale активен)${C_RESET}"
+        local audit_saved_role=""
+        if [[ -r /etc/default/bobarev-cascade ]]; then
+            audit_saved_role=$(sed -n 's/^CASCADE_ROLE="\([a-zA-Z0-9_]*\)"$/\1/p' /etc/default/bobarev-cascade | head -n 1)
+        fi
+        case "$audit_saved_role" in
+            ru_hysteria_entry) cascade_status="${C_BLUE}NaiveProxy запущен; сохранена настройка каскада Hysteria 2${C_RESET}" ;;
+            ru_xray_entry) cascade_status="${C_BLUE}NaiveProxy запущен; сохранена настройка каскада Xray REALITY${C_RESET}" ;;
+            standalone_naive) cascade_status="${C_BLUE}NaiveProxy запущен в автономной конфигурации; фактический внешний IP не проверен${C_RESET}" ;;
+            *) cascade_status="${C_BLUE}NaiveProxy запущен; направление выхода по этой проверке не определено${C_RESET}" ;;
+        esac
     elif is_wg_cascade_active && is_warp_active; then
         cascade_status="${C_GREEN}🌍 Сервер 2 (Прямой скоростной выход: WG-Мост -> WARP активен)${C_RESET}"
     elif is_warp_active; then
@@ -7924,7 +7981,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.78 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.79 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

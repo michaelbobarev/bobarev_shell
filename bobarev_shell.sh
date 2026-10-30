@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.73 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.8.74 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -7306,142 +7306,160 @@ run_full_auto_setup() {
 }
 
 
-# NaiveProxy + XRayMesh integration v3.8.73
 nm_prompt() {
-    local value
-    IFS= read -r -p "$1 [$2]: " value || return 1
-    printf -v "$3" '%s' "${value:-$2}"
+ local value
+ IFS= read -r -p "$1 [$2]: " value || return 1
+ printf -v "$3" '%s' "${value:-$2}"
+}
+nm_state() { systemctl is-active "$1.service" 2>/dev/null || true; }
+nm_detect_role() {
+ local bridge=0 exitnode=0
+ [[ "$(nm_state microsocks-mesh)" != active ]] || exitnode=1
+ if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
+ if ((bridge && exitnode)); then echo mixed
+ elif ((exitnode)); then echo 2
+ elif ((bridge)); then echo 1
+ else echo unknown; fi
+}
+nm_status() {
+ local role unit state bridge=0
+ role=$(nm_detect_role)
+ echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — только чтение'
+ case "$role" in
+  1) echo 'Предполагаемая роль: сервер 1, вход (по мосту/маркеру).' ;;
+  2) echo 'Предполагаемая роль: сервер 2, выход (по активному microsocks-mesh).' ;;
+  mixed) echo 'Роль неоднозначна: найдены признаки входа и выхода.' ;;
+  *) echo 'Роль не определена. Номера mesh-IP сами по себе роль не задают.' ;;
+ esac
+ [[ ! -f /etc/xraymesh/config.env ]] || echo 'Найдена /etc/xraymesh/config.env'
+ for unit in xraymesh caddy microsocks-mesh naive-mesh-bridge gost-mesh; do
+  state=$(nm_state "$unit"); state=${state:-unknown}
+  printf '%-24s %-12s ' "$unit:" "$state"
+  case "$unit:$role" in
+   xraymesh:*) [[ "$state" == active ]] && echo 'Служба mesh запущена; это не тест передачи трафика.' || echo 'Внимание: служба mesh не активна.' ;;
+   caddy:2) echo 'Дополнительная служба; для SOCKS-выхода не обязательна.' ;;
+   caddy:1) [[ "$state" == active ]] && echo 'Нужен для входного NaiveProxy.' || echo 'Внимание: входной Caddy не активен.' ;;
+   microsocks-mesh:2) echo 'SOCKS-выход запущен; ACL и доступность отдельно не проверены.' ;;
+   microsocks-mesh:1) echo 'Для роли входа не требуется; active может означать совмещение ролей.' ;;
+   naive-mesh-bridge:2|gost-mesh:2)
+    if [[ "$state" == inactive || "$state" == unknown ]]; then echo 'Для сервера 2 не требуется (норма).'; else echo 'Необязателен на сервере 2; проверьте назначение.'; fi ;;
+   naive-mesh-bridge:1|gost-mesh:1)
+    if [[ "$state" == active ]]; then bridge=1; echo 'Активный вариант localhost-моста.'; else echo 'Допустимо, если работает другой мост.'; fi ;;
+   *) echo 'Назначение зависит от конфигурации; автоматически не оценивается.' ;;
+  esac
+ done
+ if [[ "$role" == 1 && "$bridge" == 0 ]]; then echo 'Внимание: ни один из известных localhost-мостов не активен.'; fi
+ echo; echo 'IPv4 интерфейсов:'; ip -br -4 address || true
+ echo; echo 'Peers:'
+ if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then /opt/xraymesh/bin/easytier-cli peer || echo 'Не удалось получить peers.'
+ else echo 'easytier-cli не найден в /opt/xraymesh/bin; peers не проверены.'; fi
+ echo; echo 'Это снимок локального состояния, не проверка всей цепочки.'
+ echo 'Финальный тест: Shadowrocket -> сайт определения IP; сравнить с выходом сервера 2.'
 }
 nm_mesh() (
-    local tmp rc
-    command -v curl >/dev/null || { echo 'Не найден curl. Установите curl и ca-certificates.'; exit 1; }
-    tmp=$(mktemp -d) || exit 1
-    trap 'rm -rf -- "$tmp"' EXIT
-    echo 'Загрузка XRayMesh из Erfan-XRay/XRayMesh, ветка main...'
-    if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 --retry 2 \
-      https://raw.githubusercontent.com/Erfan-XRay/XRayMesh/main/xraymesh.sh -o "$tmp/xraymesh.sh"; then
-        echo 'Ошибка загрузки. XRayMesh не запущен; локальная копия не используется.'
-        exit 1
-    fi
-    [[ -s "$tmp/xraymesh.sh" ]] && bash -n "$tmp/xraymesh.sh" || { echo 'Загруженный файл пуст или содержит ошибку синтаксиса.'; exit 1; }
-    bash "$tmp/xraymesh.sh" "$@"
-    rc=$?
-    exit "$rc"
+ local tmp rc
+ command -v curl >/dev/null || { echo 'Установите curl и ca-certificates.'; exit 1; }
+ tmp=$(mktemp -d) || exit 1
+ trap 'rm -rf -- "$tmp"' EXIT
+ echo 'Загрузка официального XRayMesh (main)...'
+ if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 --retry 2 https://raw.githubusercontent.com/Erfan-XRay/XRayMesh/main/xraymesh.sh -o "$tmp/xraymesh.sh"; then
+  echo 'Ошибка загрузки. Локальная копия не используется.'; exit 1
+ fi
+ [[ -s "$tmp/xraymesh.sh" ]] && bash -n "$tmp/xraymesh.sh" || { echo 'Пустой или синтаксически неверный файл.'; exit 1; }
+ bash "$tmp/xraymesh.sh" "$@"; rc=$?; exit "$rc"
 )
-nm_status() {
-    echo 'Локальная проверка (без загрузок и изменения настроек):'
-    [[ ! -f /etc/xraymesh/config.env ]] || echo 'Найдена /etc/xraymesh/config.env'
-    local unit
-    for unit in xraymesh caddy microsocks-mesh naive-mesh-bridge gost-mesh; do
-        printf '%s: ' "$unit"
-        systemctl is-active "$unit.service" 2>/dev/null || true
-    done
-    ip -br -4 address || true
-    if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then
-        /opt/xraymesh/bin/easytier-cli peer || true
-    fi
-}
 nm_load() {
-    NM_ENTRY=10.144.144.1 NM_EXIT=10.144.144.2 NM_SOCKS=1080 NM_LOCAL=10808
-    NM_SERVER1=server1 NM_SERVER2=server2
-    [[ ! -f /etc/naiveproxy/mesh-wizard.env ]] || source /etc/naiveproxy/mesh-wizard.env
+ NM_ENTRY=10.144.144.1 NM_EXIT=10.144.144.2 NM_SOCKS=1080 NM_LOCAL=10808
+ NM_SERVER1=server1 NM_SERVER2=server2
+ [[ ! -f /etc/naiveproxy/mesh-wizard.env ]] || source /etc/naiveproxy/mesh-wizard.env
 }
 nm_questions() {
-    nm_load
-    nm_prompt 'Название сервера 1 (вход)' "$NM_SERVER1" NM_SERVER1 || return 1
-    nm_prompt 'Название сервера 2 (выход)' "$NM_SERVER2" NM_SERVER2 || return 1
-    nm_prompt 'Реальный mesh IPv4 сервера 1' "$NM_ENTRY" NM_ENTRY || return 1
-    nm_prompt 'Реальный mesh IPv4 сервера 2' "$NM_EXIT" NM_EXIT || return 1
-    nm_prompt 'SOCKS-порт сервера 2' "$NM_SOCKS" NM_SOCKS || return 1
-    nm_prompt 'Порт localhost-моста сервера 1' "$NM_LOCAL" NM_LOCAL || return 1
-    python3 - "$NM_ENTRY" "$NM_EXIT" "$NM_SOCKS" "$NM_LOCAL" <<'NM_VALIDATE'
+ nm_load
+ local key
+ nm_prompt 'Название сервера 1 (вход)' "$NM_SERVER1" NM_SERVER1 || return 1
+ nm_prompt 'Название сервера 2 (выход)' "$NM_SERVER2" NM_SERVER2 || return 1
+ nm_prompt 'Реальный mesh IPv4 сервера 1' "$NM_ENTRY" NM_ENTRY || return 1
+ nm_prompt 'Реальный mesh IPv4 сервера 2' "$NM_EXIT" NM_EXIT || return 1
+ nm_prompt 'SOCKS-порт сервера 2' "$NM_SOCKS" NM_SOCKS || return 1
+ nm_prompt 'Порт localhost-моста сервера 1' "$NM_LOCAL" NM_LOCAL || return 1
+ python3 - "$NM_ENTRY" "$NM_EXIT" "$NM_SOCKS" "$NM_LOCAL" <<'NM_VALIDATE'
 import ipaddress,sys
 ips=[ipaddress.IPv4Address(v) for v in sys.argv[1:3]]
 if ips[0]==ips[1] or not all(v.is_private and not v.is_loopback and not v.is_link_local and not v.is_unspecified and not v.is_multicast for v in ips):
-    raise SystemExit('Нужны два различных частных mesh IPv4')
+ raise SystemExit('Нужны два различных частных mesh IPv4')
 for v in sys.argv[3:]:
-    if not v.isdecimal() or not 1024<=int(v)<=65535: raise SystemExit('Порты: 1024..65535')
+ if not v.isdecimal() or not 1024<=int(v)<=65535: raise SystemExit('Порты: 1024..65535')
 NM_VALIDATE
-    [[ $? == 0 ]] || return 1
-    mkdir -p /etc/naiveproxy
-    (umask 077; for key in NM_ENTRY NM_EXIT NM_SOCKS NM_LOCAL NM_SERVER1 NM_SERVER2; do printf '%s=%q\n' "$key" "${!key}"; done > /etc/naiveproxy/mesh-wizard.env)
+ [[ $? == 0 ]] || return 1
+ mkdir -p /etc/naiveproxy
+ (umask 077; for key in NM_ENTRY NM_EXIT NM_SOCKS NM_LOCAL NM_SERVER1 NM_SERVER2; do printf '%s=%q\n' "$key" "${!key}"; done > /etc/naiveproxy/mesh-wizard.env)
 }
 nm_helper() (
-    local tmp rc
-    tmp=$(mktemp -d) || exit 1
-    trap 'rm -rf -- "$tmp"' EXIT
-    case "$1" in
-        1) nm_write_entry > "$tmp/helper.sh" ;;
-        2) nm_write_exit > "$tmp/helper.sh" ;;
-        *) exit 1 ;;
-    esac
-    env ENTRY_IP="$NM_ENTRY" EXIT_IP="$NM_EXIT" SOCKS_PORT="$NM_SOCKS" LOCAL_PORT="$NM_LOCAL" bash "$tmp/helper.sh"
-    rc=$?
-    exit "$rc"
+ local tmp rc
+ tmp=$(mktemp -d) || exit 1
+ trap 'rm -rf -- "$tmp"' EXIT
+ case "$1" in 1) nm_write_entry > "$tmp/helper.sh" ;; 2) nm_write_exit > "$tmp/helper.sh" ;; *) exit 1 ;; esac
+ env ENTRY_IP="$NM_ENTRY" EXIT_IP="$NM_EXIT" SOCKS_PORT="$NM_SOCKS" LOCAL_PORT="$NM_LOCAL" bash "$tmp/helper.sh"
+ rc=$?; exit "$rc"
 )
 nm_apply() {
-    command -v python3 >/dev/null || { echo 'Сначала установите python3'; return 1; }
-    nm_questions || return 1
-    local role answer
-    nm_prompt 'Роль ЭТОГО сервера: 1 вход, 2 выход' 1 role || return 1
-    [[ "$role" == 1 || "$role" == 2 ]] || return 1
-    echo 'Это изменение конфигурации, не диагностика. Работающую связку применять повторно не требуется.'
-    nm_prompt 'Применить? Введите YES' no answer || return 1
-    [[ "$answer" == YES ]] || return 0
-    if [[ "$role" == 2 ]]; then
-        if ! command -v ufw >/dev/null || ! LC_ALL=C ufw status | grep -q '^Status: active'; then
-            echo "SOCKS без пароля: ограничьте firewall/mesh ACL до $NM_ENTRY -> $NM_EXIT:$NM_SOCKS."
-            nm_prompt 'ACL уже настроен? Введите ACL-READY' no answer || return 1
-            [[ "$answer" == ACL-READY ]] || return 1
-        fi
-    else
-        systemctl is-active --quiet caddy || { echo 'Сначала настройте NaiveProxy через пункт 22.'; return 1; }
-        if [[ -f /etc/default/bobarev-cascade ]]; then
-            local CASCADE_ROLE=''
-            source /etc/default/bobarev-cascade
-            [[ "$CASCADE_ROLE" == standalone_naive && "${NAIVE_OUT_MODE:-direct}" == direct ]] || { echo 'Сначала отключите другой каскад/WG.'; return 1; }
-        fi
-    fi
-    nm_helper "$role" || return 1
-    if [[ "$role" == 1 ]]; then
-        (umask 077; printf '%s\n' "$NM_LOCAL" > /etc/naiveproxy/mesh-upstream.port)
-    fi
+ command -v python3 >/dev/null || { echo 'Установите python3'; return 1; }
+ nm_questions || return 1
+ local role answer
+ nm_prompt 'Роль ЭТОГО сервера: 1 вход, 2 выход' 1 role || return 1
+ [[ "$role" == 1 || "$role" == 2 ]] || return 1
+ echo 'Это изменение конфигурации. Работающую связку применять повторно не требуется.'
+ nm_prompt 'Применить? Введите YES' no answer || return 1
+ [[ "$answer" == YES ]] || return 0
+ if [[ "$role" == 2 ]]; then
+  if ! command -v ufw >/dev/null || ! LC_ALL=C ufw status | grep -q '^Status: active'; then
+   echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. SOCKS без пароля."
+   nm_prompt 'ACL уже настроен? Введите ACL-READY' no answer || return 1
+   [[ "$answer" == ACL-READY ]] || return 1
+  fi
+ else
+  systemctl is-active --quiet caddy || { echo 'Сначала настройте NaiveProxy через пункт 22.'; return 1; }
+  if [[ -f /etc/default/bobarev-cascade ]]; then
+   local CASCADE_ROLE=''
+   source /etc/default/bobarev-cascade
+   [[ "$CASCADE_ROLE" == standalone_naive && "${NAIVE_OUT_MODE:-direct}" == direct ]] || { echo 'Сначала отключите другой каскад/WG.'; return 1; }
+  fi
+ fi
+ nm_helper "$role" || return 1
+ if [[ "$role" == 1 ]]; then (umask 077; printf '%s\n' "$NM_LOCAL" > /etc/naiveproxy/mesh-upstream.port); fi
 }
 manage_naive_mesh_menu() {
-    local action answer detected height rows
-    while true; do
-        detected='Установка не обнаружена'
-        if [[ -f /etc/xraymesh/config.env || -f /opt/xraymesh/xraymesh.sh ]] || command -v xraymesh >/dev/null; then
-            detected='Обнаружена существующая установка'
-        fi
-        height="${WT_HEIGHT:-27}"
-        rows=$((height-13)); ((rows>=3)) || rows=3
-        if ! smart_menu 'NaiveProxy + XRayMesh' "$detected
-Рабочая пара: сначала пункт 1, без перенастройки.
-XRayMesh запускается из официального main." "$height" "$WT_WIDTH" "$rows" action \
-            '1' 'Локальная диагностика' \
-            '2' 'Открыть официальный XRayMesh' \
-            '3' 'Создать / изменить mesh-узел' \
-            '4' 'Показать invite-код' \
-            '5' 'Присоединиться по invite' \
-            '6' 'Настроить роль 1 / 2' \
-            '7' 'Настроить NaiveProxy' \
-            '8' 'Проверить localhost-мост' \
-            '9' 'Пользователи / ссылки' \
-            '0' 'Назад'; then break; fi
-        case "$action" in
-            0) break ;;
-            1) nm_status; pause_enter ;;
-            2) echo 'Официальное меню может выполнять загрузки и подготовку компонентов.'; nm_prompt 'Запустить? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh || echo 'XRayMesh завершился с ошибкой'; fi; pause_enter ;;
-            3) echo 'Работающему mesh создание нового узла не требуется.'; nm_prompt 'Открыть настройку узла? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh setup-node || echo 'Настройка не завершена'; fi; pause_enter ;;
-            4) nm_mesh invite || echo 'Ошибка запуска invite'; pause_enter ;;
-            5) nm_prompt 'Открыть присоединение к mesh? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh join || echo 'Присоединение не завершено'; fi; pause_enter ;;
-            6) nm_apply || echo 'Настройка роли не завершена'; pause_enter ;;
-            7) setup_standalone_naive ;;
-            8) nm_load; curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "127.0.0.1:$NM_LOCAL" https://ifconfig.me || echo 'Мост недоступен'; echo; pause_enter ;;
-            9) manage_naive_users_menu ;;
-        esac
-    done
+ local action answer detected height rows
+ while true; do
+  detected='Установка не обнаружена'
+  if [[ -f /etc/xraymesh/config.env || -f /opt/xraymesh/xraymesh.sh ]] || command -v xraymesh >/dev/null; then detected='Обнаружена существующая установка'; fi
+  height="${WT_HEIGHT:-27}"; rows=$((height-13)); ((rows>=3)) || rows=3
+  if ! smart_menu 'NaiveProxy + XRayMesh' "$detected
+Рабочая пара: пункт 1, без перенастройки.
+XRayMesh: официальный main." "$height" "$WT_WIDTH" "$rows" action \
+   '1' 'Локальная диагностика по роли' \
+   '2' 'Открыть официальный XRayMesh' \
+   '3' 'Создать / изменить mesh-узел' \
+   '4' 'Показать invite-код' \
+   '5' 'Присоединиться по invite' \
+   '6' 'Настроить роль 1 / 2' \
+   '7' 'Настроить NaiveProxy' \
+   '8' 'Проверить localhost-мост' \
+   '9' 'Пользователи / ссылки' \
+   '0' 'Назад'; then break; fi
+  case "$action" in
+   0) break ;;
+   1) nm_status; pause_enter ;;
+   2) echo 'Официальное меню может выполнять загрузки и подготовку компонентов.'; nm_prompt 'Запустить? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh || echo 'Ошибка XRayMesh'; fi; pause_enter ;;
+   3) echo 'Работающий mesh создавать заново не нужно.'; nm_prompt 'Открыть настройку? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh setup-node || echo 'Настройка не завершена'; fi; pause_enter ;;
+   4) nm_mesh invite || echo 'Ошибка invite'; pause_enter ;;
+   5) nm_prompt 'Присоединиться к mesh? YES' no answer || continue; if [[ "$answer" == YES ]]; then nm_mesh join || echo 'Присоединение не завершено'; fi; pause_enter ;;
+   6) nm_apply || echo 'Настройка роли не завершена'; pause_enter ;;
+   7) setup_standalone_naive ;;
+   8) nm_load; curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "127.0.0.1:$NM_LOCAL" https://ifconfig.me || echo 'Мост недоступен'; echo; pause_enter ;;
+   9) manage_naive_users_menu ;;
+  esac
+ done
 }
 
 nm_write_entry() {
@@ -7675,7 +7693,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.73 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.74 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.77 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.8.78 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -580,6 +580,7 @@ ensure_go_and_build_caddy_naive() {
 }
 
 render_naive_caddyfile() {
+    if [[ -f /etc/naiveproxy/mesh-paused ]]; then echo "Каскад на паузе. Сначала возобновите его или переключите выход в меню управления каскадом."; return 1; fi
     [ ! -f /etc/default/bobarev-cascade ] && return 1
     # shellcheck disable=SC1091
     source /etc/default/bobarev-cascade
@@ -1270,10 +1271,10 @@ disable_hybrid_wg_routing() {
 }
 
 setup_standalone_naive() {
-    if [[ -f /etc/naiveproxy/mesh-upstream.port ]]; then
-        echo "Активен mesh upstream. Автономная перенастройка заблокирована; используйте пункт 23."
-        pause_enter
-        return 0
+    if nm_bound; then
+        echo "NaiveProxy сейчас связан с mesh-каскадом или приостановлен."
+        echo "Для автономной настройки сначала нужно переключить выход на этот сервер."
+        nm_direct || { pause_enter; return 0; }
     fi
     while true; do
         MODULE_CANCELED=false
@@ -7323,44 +7324,32 @@ nm_detect_role() {
 }
 
 nm_status() {
- local role="${1:-}" unit label state required
+ local role="${1:-}" unit label state optional
  [[ -n "$role" ]] || role=$(nm_detect_role)
  echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — настройки не меняются'
- case "$role" in
-  1) echo 'Назначение: сервер 1 — вход для клиента.' ;;
-  2) echo 'Назначение: сервер 2 — выход в интернет.' ;;
-  mixed) echo 'Найдены компоненты входа и выхода. Назначение требует уточнения.' ;;
-  *) echo 'Назначение пока не определено. Выберите мастер сервера 2 или сервера 1 при установке.' ;;
- esac
- echo 'При обычном просмотре назначение определяется по известным службам, а не гарантируется.'
+ case "$role" in 1) echo 'Сервер 1 — вход (по выбранному мастеру или признакам служб).' ;; 2) echo 'Сервер 2 — выход (по выбранному мастеру или признакам служб).' ;; *) echo 'Назначение сервера не определено однозначно.' ;; esac
+ [[ ! -f /etc/naiveproxy/mesh-paused ]] || echo 'NaiveProxy приостановлен. Управление: пункт 11.'
  for unit in xraymesh caddy microsocks-mesh naive-mesh-bridge gost-mesh; do
-  required=yes
+  optional=no
   case "$unit" in
    xraymesh) label='Связь между серверами' ;;
-   caddy) label='Вход для клиента NaiveProxy'; [[ "$role" != 2 ]] || required=no ;;
-   microsocks-mesh) label='Выходной прокси'; [[ "$role" != 1 ]] || required=no ;;
-   naive-mesh-bridge) label='Локальный мост'; [[ "$role" != 2 ]] || required=no ;;
-   gost-mesh) label='Альтернативный локальный мост'; [[ "$role" != 2 ]] || required=no ;;
+   caddy) label='Вход NaiveProxy'; [[ "$role" != 2 ]] || optional=yes ;;
+   microsocks-mesh) label='Выходной прокси'; [[ "$role" != 1 ]] || optional=yes ;;
+   naive-mesh-bridge) label='Локальный мост'; [[ "$role" != 2 ]] || optional=yes ;;
+   gost-mesh) label='Альтернативный мост'; [[ "$role" != 2 ]] || optional=yes ;;
   esac
   state=$(nm_state "$unit")
   if [[ "$state" == active ]]; then echo "$label: запущено."
-  elif [[ "$required" == no ]]; then echo "$label: не требуется на этом сервере."
-  else
-   case "$state" in
-    failed) echo "$label: остановлено из-за ошибки." ;;
-    activating) echo "$label: запускается." ;;
-    *) echo "$label: не запущено или ещё не установлено." ;;
-   esac
-  fi
+  elif [[ "$optional" == yes ]]; then echo "$label: не требуется на этом сервере."
+  elif [[ "$state" == failed ]]; then echo "$label: остановлено из-за ошибки."
+  else echo "$label: не запущено или ещё не установлено."; fi
  done
- [[ "$role" != 1 ]] || echo 'Для входного сервера достаточно одного работающего варианта локального моста.'
- echo; echo 'Сетевые адреса этого сервера:'; ip -br -4 address || true
- echo; echo 'Узлы внутренней сети:'
- if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then /opt/xraymesh/bin/easytier-cli peer || echo 'Не удалось получить список узлов.'
- else echo 'Компонент просмотра узлов не найден в ожидаемом расположении.'; fi
- echo; nm_realm_status || echo 'Проверка пересылок не завершена.'
- echo; echo 'Проверен только текущий сервер, а не вся цепочка.'
- echo 'Полный тест: Shadowrocket -> сайт проверки IP -> сравнение с выходом сервера 2.'
+ [[ "$role" != 1 ]] || echo 'Достаточно одного работающего варианта локального моста.'
+ echo 'Сетевые адреса:'; ip -br -4 address || true
+ echo 'Узлы внутренней сети:'
+ if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then /opt/xraymesh/bin/easytier-cli peer || echo 'Список недоступен.'; fi
+ nm_realm_status || echo 'Не удалось прочитать настройки пересылок.'
+ echo 'Это состояние текущего сервера, не тест всей цепочки.'
 }
 nm_mesh() (
  local tmp rc
@@ -7409,6 +7398,7 @@ nm_helper() (
  rc=$?; exit "$rc"
 )
 nm_apply() {
+ [[ ! -f /etc/naiveproxy/mesh-paused ]] || { echo "Каскад на паузе. Сначала выберите возобновление или отключение в меню управления."; return 1; }
  command -v python3 >/dev/null || { echo 'Установите python3'; return 1; }
  nm_questions || return 1
  local role="${1:-}" answer
@@ -7435,167 +7425,243 @@ nm_apply() {
 }
 
 nm_yes() { local answer; nm_prompt "$1 Введите ДА" нет answer || return 1; [[ "$answer" == ДА || "$answer" == да || "$answer" == YES ]]; }
-nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet xraymesh.service; }
+nm_bound() {
+ [[ -f /etc/naiveproxy/mesh-upstream.port || -f /etc/naiveproxy/mesh-paused ]] && return 0
+ if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active ]]; then
+  grep -Eq '^[[:space:]]*upstream[[:space:]]+socks5://127\.0\.0\.1:' /etc/caddy/Caddyfile 2>/dev/null && return 0
+ fi
+ return 1
+}
+nm_direct_candidate() {
+ python3 - "$1" "$2" <<'NM_DIRECT'
+import pathlib,re,sys
+src,dst=map(pathlib.Path,sys.argv[1:])
+s=src.read_text()
+if re.search(r'(?m)^\s*import\s',s): raise SystemExit('Конфигурация с внешними включениями: автоматическое переключение остановлено.')
+blocks=list(re.finditer(r'(?m)^[ \t]*forward_proxy\s*\{[^\S\n]*(?:#.*)?$',s))
+if len(blocks)!=1: raise SystemExit('Нужен один простой блок прокси. Настройки не изменены.')
+a=blocks[0].end();b=s.find('}',a)
+if b<0 or '{' in s[a:b]: raise SystemExit('Сложная конфигурация: настройки не изменены.')
+block=s[a:b]
+up=list(re.finditer(r'(?m)^[ \t]*upstream\s+([^\n]+)\n?',block))
+if len(up)>1: raise SystemExit('Несколько направлений выхода: автоматическое переключение остановлено.')
+if up:
+ value=up[0].group(1).strip()
+ if not re.fullmatch(r'socks5://127\.0\.0\.1:[0-9]{1,5}',value): raise SystemExit('Неизвестное направление выхода. Настройки не изменены.')
+ block=block[:up[0].start()]+block[up[0].end():]
+dst.write_text(s[:a]+block+s[b:])
+NM_DIRECT
+}
+nm_direct() {
+ local cf=/etc/caddy/Caddyfile cb=/usr/local/bin/caddy backup tmp paused=0
+ echo 'ВОЗВРАТ К ВЫХОДУ ЧЕРЕЗ ЭТОТ СЕРВЕР'
+ echo 'Клиенты NaiveProxy больше не будут направляться на сервер 2.'
+ echo 'Это может раскрыть IP сервера 1. Внешние VPN/маршруты автоматически не отключаются.'
+ nm_yes 'Переключить выход?' || return 2
+ [[ -f "$cf" && ! -L "$cf" ]] || { echo 'Не найден обычный файл настроек Caddy. Ничего не изменено.'; return 1; }
+ [[ -x "$cb" ]] || { echo 'Не найден используемый бинарник Caddy.'; return 1; }
+ command -v python3 >/dev/null || { echo 'Нужен Python 3.'; return 1; }
+ # Do not silently switch unrelated BOBAREV cascades.
+ if [[ -f /etc/default/bobarev-cascade ]] && ! grep -Eq '^CASCADE_ROLE="standalone_naive"$' /etc/default/bobarev-cascade; then
+  echo 'Обнаружен другой каскад. Автоматическое переключение остановлено.'; return 1
+ fi
+ backup=$(mktemp -d /root/bobarev-direct-backup-XXXXXXXX) || return 1
+ chmod 700 "$backup"
+ cp -a "$cf" "$backup/Caddyfile" || return 1
+ mkdir -p /etc/naiveproxy
+ [[ ! -f /etc/naiveproxy/mesh-upstream.port ]] || cp -a /etc/naiveproxy/mesh-upstream.port "$backup/"
+ [[ ! -f /etc/naiveproxy/mesh-paused ]] || paused=1
+ tmp="$backup/candidate"
+ nm_direct_candidate "$cf" "$tmp" || return 1
+ "$cb" validate --config "$tmp" --adapter caddyfile || { echo 'Проверка не пройдена. Рабочие настройки сохранены.'; return 1; }
+ cat "$tmp" > "$cf" || { cp -a "$backup/Caddyfile" "$cf"; return 1; }
+ if systemctl is-active --quiet caddy.service; then
+  if ! systemctl reload caddy.service; then
+   cp -a "$backup/Caddyfile" "$cf"; systemctl reload caddy.service || true
+   echo 'Не удалось применить. Прежняя конфигурация восстановлена.'; return 1
+  fi
+ else
+  if ! systemctl start caddy.service; then
+   cp -a "$backup/Caddyfile" "$cf"
+   echo 'Не удалось запустить Caddy. Прежняя конфигурация восстановлена.'; return 1
+  fi
+ fi
+ # Only remove the mode markers AFTER successful validation and service application.
+ rm -f /etc/naiveproxy/mesh-upstream.port /etc/naiveproxy/mesh-paused
+ systemctl enable caddy.service >/dev/null || echo 'Не удалось включить автозапуск Caddy. Проверьте отдельно.'
+ echo 'NaiveProxy переключён на маршрутизацию текущего сервера.'
+ echo "Резервная копия: $backup"
+ echo 'XRayMesh, Realm и компоненты второго сервера не удалены.'
+}
+nm_pause() {
+ nm_bound || { echo 'Активная привязка NaiveProxy к mesh не обнаружена.'; return 1; }
+ echo 'Будет остановлен Caddy целиком: NaiveProxy и сайты, которые он обслуживает.'
+ echo 'Перехода на прямой выход НЕ будет. XRayMesh и Realm останутся запущены.'
+ nm_yes 'Приостановить?' || return 2
+ systemctl stop caddy.service || return 1
+ systemctl disable caddy.service >/dev/null || { echo 'Служба остановлена, но отключить автозапуск не удалось.'; return 1; }
+ mkdir -p /etc/naiveproxy
+ (umask 077; printf 'paused\n' > /etc/naiveproxy/mesh-paused)
+ echo 'Каскад приостановлен. Для запуска используйте «Возобновить».'
+}
+nm_resume() {
+ [[ -f /etc/naiveproxy/mesh-paused ]] || { echo 'Сохранённая пауза не найдена. Используйте мастер сервера 1 для настройки.'; return 1; }
+ nm_yes 'Запустить Caddy с сохранённой конфигурацией каскада?' || return 2
+ /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
+ systemctl enable caddy.service >/dev/null && systemctl start caddy.service || return 1
+ systemctl is-active --quiet caddy.service || return 1
+ rm -f /etc/naiveproxy/mesh-paused
+ echo 'Caddy запущен. Проверьте соединение Shadowrocket; доступность выхода отдельно не проверялась.'
+}
+nm_remove_proxy_parts() {
+ if nm_bound; then echo 'Сначала переключите NaiveProxy на выход через этот сервер (пункт 3).'; return 1; fi
+ echo 'Удаляются только известные локальные службы моста и SOCKS: socat/GOST mesh и microsocks mesh.'
+ echo 'XRayMesh, Realm, Caddy, пакеты и правила firewall не удаляются.'
+ echo 'На сервере 2 это отключит выход для подключённых к нему клиентов.'
+ nm_yes 'Отключить и удалить эти локальные службы?' || return 2
+ local unit
+ for unit in naive-mesh-bridge gost-mesh microsocks-mesh; do
+  if [[ -f "/etc/systemd/system/$unit.service" ]]; then
+   systemctl disable --now "$unit.service" || { echo "Не удалось остановить $unit; удаление прервано."; return 1; }
+   rm -f "/etc/systemd/system/$unit.service"
+  fi
+ done
+ systemctl daemon-reload || return 1
+ echo 'Локальные службы удалены. Правила firewall оставлены: проверьте их отдельно.'
+}
+nm_lifecycle() {
+ local choice
+ while true; do
+  if ! smart_menu 'Управление каскадом' 'Действия выполняются только на текущем сервере.
+Возврат прямого выхода выполняйте на сервере 1.' 22 "$WT_WIDTH" 7 choice \
+   '1' 'Приостановить NaiveProxy (без прямого выхода)' \
+   '2' 'Возобновить NaiveProxy после паузы' \
+   '3' 'Отключить каскад: выход через этот сервер' \
+   '4' 'Удалить локальные службы моста / SOCKS' \
+   '5' 'Остановить XRayMesh до следующего запуска' \
+   '6' 'Полностью удалить XRayMesh и его туннели' \
+   '0' 'Вернуться в меню'; then break; fi
+  case "$choice" in
+   0) break ;;
+   1) nm_pause || echo 'Пауза не завершена или отменена'; pause_enter ;;
+   2) nm_resume || echo 'Возобновление не завершено или отменено'; pause_enter ;;
+   3) nm_direct || echo 'Переключение не завершено или отменено'; pause_enter ;;
+   4) nm_remove_proxy_parts || echo 'Удаление не завершено или отменено'; pause_enter ;;
+   5|6)
+    if nm_bound; then echo 'Сначала выберите пункт 3: Caddy ещё привязан к mesh.'
+    else
+     echo 'Отключатся ВСЕ локальные туннели XRayMesh, включая Realm и другие сервисы.'
+     echo 'Это может нарушить работу других клиентов и SSH через mesh. Используйте прямой доступ или консоль провайдера.'
+     if nm_yes 'Продолжить?'; then
+      if [[ "$choice" == 5 ]]; then nm_mesh stop || echo 'Не удалось остановить все службы. Проверьте состояние.'
+      else nm_mesh uninstall || echo 'Удаление не завершено'; fi
+     fi
+    fi
+    pause_enter ;;
+  esac
+ done
+}
+
 nm_realm_status() {
- echo 'REALM — ПЕРЕСЫЛКА ПОРТОВ'
- echo 'Проверяется только текущий сервер.'
- local state
- state=$(nm_state xraymesh-realm)
- case "$state" in
-  active) echo 'Служба запущена.' ;;
-  inactive) echo 'Служба остановлена или ещё не установлена.' ;;
-  failed) echo 'Служба остановлена из-за ошибки. Требуется проверка.' ;;
-  activating) echo 'Служба запускается. Повторите проверку через несколько секунд.' ;;
-  deactivating) echo 'Служба останавливается.' ;;
-  *) echo 'Не удалось определить состояние службы.' ;;
- esac
- command -v python3 >/dev/null || { echo 'Для просмотра настроек нужен дополнительный компонент Python 3.'; return 1; }
+ echo 'REALM — ПЕРЕСЫЛКИ ЭТОГО СЕРВЕРА'
+ case "$(nm_state xraymesh-realm)" in active) echo 'Служба запущена.' ;; failed) echo 'Служба остановлена из-за ошибки.' ;; *) echo 'Служба не запущена или не установлена.' ;; esac
+ command -v python3 >/dev/null || { echo 'Для просмотра нужен Python 3.'; return 1; }
  python3 - <<'REALM_READ'
-import json,pathlib
+import pathlib,json
 p=pathlib.Path('/etc/xraymesh/realm.json')
-if not p.is_file():
- print('Сохранённые настройки пересылок в стандартном расположении не найдены.')
- print('Если вы ещё не настраивали пересылки на этом сервере, это нормально.')
- print('Если ожидали увидеть рабочие пересылки, проверьте, что открыт нужный сервер.')
- raise SystemExit(0)
-try: data=json.loads(p.read_text())
-except (OSError,ValueError):
- print('Не удалось прочитать сохранённые настройки. Они не изменены.'); raise SystemExit(1)
-if not isinstance(data,dict) or not isinstance(data.get('endpoints',[]),list):
- print('Формат сохранённых настроек не распознан. Они не изменены.'); raise SystemExit(1)
-entries=data.get('endpoints',[])
-if not entries:
- print('Настроенных пересылок нет.'); raise SystemExit(0)
-def address(v,local=False):
- if not isinstance(v,str): return 'не указан'
- if local and v.startswith('0.0.0.0:'): return 'все сетевые адреса этого сервера, порт '+v.rsplit(':',1)[1]
- return v
-for n,e in enumerate(entries,1):
- if not isinstance(e,dict): print(f'Пересылка {n}: параметры не распознаны.'); continue
- net=e.get('network',{})
- if not isinstance(net,dict): net={}
- tcp=net.get('no_tcp'); udp=net.get('use_udp')
- proto='по настройкам службы'
- if tcp is False and udp is True: proto='TCP и UDP'
- elif tcp is True and udp is True: proto='UDP'
- elif tcp is False and udp is False: proto='TCP'
- print(f'\nПересылка {n}')
- print('  Принимать: '+address(e.get('listen'),True))
- print('  Отправлять: '+address(e.get('remote')))
- print('  Тип соединения: '+proto)
-print('\nЭто сохранённые настройки, а не проверка передачи трафика.')
-print('Наличие пересылки не означает, что через неё проходит соединение NaiveProxy.')
+if not p.is_file(): print('Сохранённые пересылки в стандартном расположении не найдены.'); raise SystemExit(0)
+try:
+ d=json.loads(p.read_text()); eps=d.get('endpoints',[])
+ if not isinstance(eps,list): raise ValueError()
+except (ValueError,OSError,AttributeError): print('Не удалось прочитать настройки. Они не изменены.'); raise SystemExit(1)
+if not eps: print('Настроенных пересылок нет.')
+for i,e in enumerate(eps,1):
+ if not isinstance(e,dict): print('Параметры одной из пересылок не распознаны.'); continue
+ loc=str(e.get('listen','не указан'))
+ if loc.startswith('0.0.0.0:'): loc='все адреса этого сервера, порт '+loc.rsplit(':',1)[1]
+ print(f"Пересылка {i}: принимать — {loc}; отправлять — {e.get('remote','не указан')}")
+print('Это сохранённые настройки, а не проверка прохождения трафика.')
 REALM_READ
 }
 nm_realm_create() {
- local name target lp rp proto answer backup item
- echo 'НОВАЯ ПЕРЕСЫЛКА ПОРТОВ'
- echo 'Она будет создана на текущем сервере. Существующие пересылки не удаляются.'
- echo 'Укажите, откуда принимать соединения и куда их отправлять.'
- echo 'Новый порт будет доступен на всех IPv4-адресах сервера: заранее ограничьте доступ сетевыми правилами.'
+ local name target lp rp proto backup item log
  nm_realm_status || return 1
- nm_prompt 'Название новой пересылки (латиница, цифры, дефис)' '' name || return 1
- nm_prompt 'Адрес получателя во внутренней сети между серверами' '' target || return 1
+ echo 'Новая пересылка на текущем сервере. Существующие definitions не удаляются.'
+ nm_prompt 'Название (латиница, цифры, дефис)' '' name || return 1
+ nm_prompt 'Адрес получателя во внутренней сети' '' target || return 1
  nm_prompt 'Порт приёма на этом сервере' '' lp || return 1
  nm_prompt 'Порт получателя' '' rp || return 1
- nm_prompt 'Тип соединения: tcp, udp или both (оба)' tcp proto || return 1
+ nm_prompt 'Тип: tcp, udp или both (оба)' tcp proto || return 1
  python3 - "$name" "$target" "$lp" "$rp" "$proto" <<'REALM_VALIDATE'
-import sys,re,ipaddress
-name,target,lp,rp,proto=sys.argv[1:]
-if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}',name): raise SystemExit('Проверьте название: до 32 символов, латиница, цифры, дефис или подчёркивание.')
-try: ip=ipaddress.IPv4Address(target)
-except ValueError: raise SystemExit('Проверьте адрес получателя.')
-if ip not in ipaddress.IPv4Network('10.0.0.0/8'): raise SystemExit('Нужен внутренний адрес получателя, начинающийся с 10.')
-for port in (lp,rp):
- if not port.isdecimal() or not 1024<=int(port)<=65535: raise SystemExit('Введите порты от 1024 до 65535.')
-if proto not in ('tcp','udp','both'): raise SystemExit('Выберите tcp, udp или both.')
+import re,ipaddress,sys
+n,t,l,r,p=sys.argv[1:]
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}',n): raise SystemExit('Проверьте название.')
+try: ip=ipaddress.IPv4Address(t)
+except ValueError: raise SystemExit('Проверьте адрес.')
+if ip not in ipaddress.IPv4Network('10.0.0.0/8'): raise SystemExit('Нужен адрес внутренней сети, начинающийся с 10.')
+for v in (l,r):
+ if not v.isdecimal() or not 1024<=int(v)<=65535: raise SystemExit('Порты: 1024..65535.')
+if p not in ('tcp','udp','both'): raise SystemExit('Выберите tcp/udp/both.')
 REALM_VALIDATE
  [[ $? == 0 ]] || return 1
- [[ ! -e "/etc/xraymesh/realm-tunnels/$name.env" ]] || { echo 'Пересылка с таким названием уже существует. Она не изменена.'; return 1; }
- command -v ss >/dev/null || { echo 'Нужен компонент iproute2 для проверки занятости портов.'; return 1; }
- if [[ "$proto" == tcp || "$proto" == both ]]; then
-  [[ -z "$(ss -H -ltn "sport = :$lp")" ]] || { echo 'Порт TCP уже занят. Выберите другой.'; return 1; }
- fi
- if [[ "$proto" == udp || "$proto" == both ]]; then
-  [[ -z "$(ss -H -lun "sport = :$lp")" ]] || { echo 'Порт UDP уже занят. Выберите другой.'; return 1; }
- fi
- if [[ -f /etc/xraymesh/realm.json ]] && ! compgen -G '/etc/xraymesh/realm-tunnels/*.env' >/dev/null; then
-  echo 'Обнаружены нестандартные настройки. Автоматическое добавление остановлено, чтобы их не потерять.'; return 1
- fi
- echo "Новая пересылка: $name. Принимать на порту $lp; отправлять на $target, порт $rp; тип $proto."
- echo 'Общая служба пересылок перезапустится: возможен краткий перерыв.'
- echo 'Ручные изменения вне системы управления XRayMesh могут быть потеряны.'
- echo 'Не открывайте для всех доступ к прокси без пароля.'
- nm_yes 'Доступ уже ограничен сетевыми правилами?' || return 2
- nm_yes 'Создать указанную пересылку?' || return 2
- backup=$(mktemp -d /root/realm-backup-XXXXXXXX) || { echo 'Не удалось создать резервную копию.'; return 1; }
+ [[ ! -e "/etc/xraymesh/realm-tunnels/$name.env" ]] || { echo 'Название уже существует.'; return 1; }
+ command -v ss >/dev/null || { echo 'Для проверки портов нужен iproute2.'; return 1; }
+ if [[ "$proto" != udp && -n "$(ss -H -ltn "sport = :$lp")" ]]; then echo 'TCP-порт занят.'; return 1; fi
+ if [[ "$proto" != tcp && -n "$(ss -H -lun "sport = :$lp")" ]]; then echo 'UDP-порт занят.'; return 1; fi
+ if [[ -f /etc/xraymesh/realm.json ]] && ! compgen -G '/etc/xraymesh/realm-tunnels/*.env' >/dev/null; then echo 'Нестандартная конфигурация. Требуется ручная миграция.'; return 1; fi
+ echo "Принимать на всех IPv4-адресах сервера, порт $lp; отправлять на $target:$rp; тип $proto."
+ echo 'Служба перезапустится. Ручные настройки вне системы XRayMesh могут потеряться.'
+ echo 'Не публикуйте прокси без пароля. Firewall автоматически не настраивается.'
+ nm_yes 'Доступ заранее ограничен сетевыми правилами?' || return 2
+ nm_yes 'Создать?' || return 2
+ backup=$(mktemp -d /root/realm-backup-XXXXXXXX) || return 1
  chmod 700 "$backup"
  for item in /etc/xraymesh/realm.json /etc/xraymesh/realm-tunnels /etc/systemd/system/xraymesh-realm.service; do
-  if [[ -e "$item" ]]; then cp -a -- "$item" "$backup/" || { echo 'Не удалось сохранить резервную копию. Настройка остановлена.'; return 1; }; fi
+  if [[ -e "$item" ]]; then cp -a -- "$item" "$backup/" || return 1; fi
  done
- echo 'Резервная копия сохранена. Путь записан в журнал обновления.'
- printf '%s\n' "$backup" > /root/bobarev-realm-last-backup.txt
- chmod 600 /root/bobarev-realm-last-backup.txt
- # Native output remains visible only on failure for meaningful troubleshooting.
- local log
  log=$(mktemp /root/bobarev-realm-result-XXXXXXXX.log) || return 1
  chmod 600 "$log"
- echo 'Настраиваем пересылку через официальный XRayMesh...'
- if ! nm_mesh realm-create "$name" "$target" "$lp:$rp" "$proto" > "$log" 2>&1; then
-  echo 'Не удалось завершить настройку. Подробности сохранены в журнале для диагностики.'
-  echo 'Проверьте состояние службы. Полный автоматический откат не выполнялся.'
-  echo "Журнал ошибки: $log"; return 1
- fi
- echo 'Команда настройки выполнена. Проверяем службу и сохранённые пересылки:'
+ echo "Резервная копия: $backup"
+ if ! nm_mesh realm-create "$name" "$target" "$lp:$rp" "$proto" > "$log" 2>&1; then echo "Настройка не завершена. Журнал: $log. Полного автоотката нет."; return 1; fi
  nm_realm_status
 }
 nm_realm_menu() {
  local choice
  while true; do
-  if ! smart_menu 'Realm — пересылка портов' 'Здесь можно проверить пересылки или добавить новую.
-Рабочие пересылки не нужно создавать заново.' 18 "$WT_WIDTH" 3 choice \
-   '1' 'Проверить службу и пересылки' \
-   '2' 'Настроить новую пересылку' \
-   '0' 'Вернуться в меню'; then break; fi
-  case "$choice" in
-   0) break ;;
-   1) nm_realm_status || echo 'Проверка не завершена. Настройки не изменены.'; pause_enter ;;
-   2) nm_realm_create || echo 'Настройка остановлена или отменена. См. сообщение выше.'; pause_enter ;;
-  esac
+  if ! smart_menu 'Realm — пересылка портов' 'Рабочие пересылки не нужно создавать заново.' 17 "$WT_WIDTH" 3 choice \
+   '1' 'Проверить службу и пересылки' '2' 'Настроить новую пересылку' '0' 'Вернуться в меню'; then break; fi
+  case "$choice" in 0) break ;; 1) nm_realm_status || echo 'Проверка не завершена'; pause_enter ;; 2) nm_realm_create || echo 'Настройка остановлена или отменена'; pause_enter ;; esac
  done
 }
+nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet xraymesh.service; }
 nm_wizard() {
  local target="$1"
- if [[ "$target" == 2 ]]; then echo 'СЕРВЕР 2 — ВЫХОД. Начните настройку пары с этого сервера.'
- else echo 'СЕРВЕР 1 — ВХОД. Сначала подготовьте сервер 2 и получите код подключения.'; fi
+ echo "НАСТРОЙКА СЕРВЕРА $target. Сначала сервер 2 — выход; затем сервер 1 — вход."
  nm_yes 'Продолжить на этом сервере?' || return 2
- if nm_ready; then echo 'XRayMesh уже настроен и запущен. Существующая сеть сохраняется.'
+ if nm_ready; then echo 'Работающая сеть сохраняется.'
  else
-  if [[ "$target" == 2 ]]; then
-   echo 'В официальном мастере выберите Create для новой сети, задайте внутренний адрес сервера 2 и включите шифрование.'
-   nm_mesh setup-node || return 1
+  if [[ "$target" == 2 ]]; then echo 'В официальном мастере выберите Create, задайте внутренний адрес сервера 2 и включите шифрование.'; nm_mesh setup-node || return 1
   else echo 'Вставьте код подключения сервера 2.'; nm_mesh join || return 1; fi
-  nm_ready || { echo 'XRayMesh ещё не готов. Проверьте диагностику.'; return 1; }
+  nm_ready || { echo 'XRayMesh ещё не готов.'; return 1; }
  fi
  if [[ "$target" == 1 ]] && ! systemctl is-active --quiet caddy.service; then
-  echo 'Настройте NaiveProxy существующим мастером, затем вернитесь сюда.'
   setup_standalone_naive
-  systemctl is-active --quiet caddy.service || { echo 'NaiveProxy не запущен. Следующие шаги не применяются.'; return 1; }
+  systemctl is-active --quiet caddy.service || return 1
  fi
- echo 'Далее — внутренние адреса обоих серверов и порты.'
- nm_apply "$target" || { echo 'Настройка не завершена или отменена. Уже сделанные шаги сохранены.'; return 1; }
+ nm_apply "$target" || return 1
  nm_status "$target"
  if [[ "$target" == 2 ]]; then
-  if nm_yes 'Открыть дополнительные настройки Realm? Enter — оставить как есть.'; then nm_realm_menu; fi
-  echo 'Теперь настройте сервер 1.'
+  if nm_yes 'Открыть дополнительные настройки Realm?'; then nm_realm_menu; fi
   if nm_yes 'Показать код подключения сервера 1?'; then nm_mesh invite || return 1; fi
- else echo 'Полная проверка: подключитесь через Shadowrocket и сравните внешний IP с выходом сервера 2.'; fi
+ else echo 'Проверьте внешний IP через Shadowrocket.'; fi
 }
 manage_naive_mesh_menu() {
  local action height rows intro
  while true; do
   intro='Сначала сервер 2 (выход), затем сервер 1 (вход).'
-  if nm_ready; then intro='XRayMesh на этом сервере запущен. Проверка: пункт 1.'; fi
+  if [[ -f /etc/naiveproxy/mesh-paused ]]; then intro='NaiveProxy на паузе. Возобновить или отключить: пункт 11.'
+  elif nm_bound; then intro='NaiveProxy связан с mesh. Управление и отключение: пункт 11.'
+  elif nm_ready; then intro='XRayMesh запущен. Проверка: пункт 1; управление: пункт 11.'; fi
   height="${WT_HEIGHT:-27}"; rows=$((height-13)); ((rows>=3)) || rows=3
   if ! smart_menu 'NaiveProxy + XRayMesh' "$intro
 Клиент -> сервер 1 -> сервер 2 -> интернет." "$height" "$WT_WIDTH" "$rows" action \
@@ -7605,23 +7671,24 @@ manage_naive_mesh_menu() {
    '4' 'Создать / изменить узел сети' \
    '5' 'Показать код подключения' \
    '6' 'Подключиться по коду' \
-   '7' 'Настроить NaiveProxy' \
+   '7' 'Настроить NaiveProxy / автономный режим' \
    '8' 'Открыть меню XRayMesh' \
    '9' 'Пользователи и ссылки NaiveProxy' \
    '10' 'Realm — пересылка портов' \
+   '11' 'Отключить / возобновить / удалить' \
    '0' 'Вернуться в меню'; then break; fi
   case "$action" in
-   0) break ;;
-   1) nm_status; pause_enter ;;
+   0) break ;; 1) nm_status; pause_enter ;;
    2) nm_wizard 2 || echo 'Мастер остановлен'; pause_enter ;;
    3) nm_wizard 1 || echo 'Мастер остановлен'; pause_enter ;;
    4) if nm_yes 'Изменить узел сети?'; then nm_mesh setup-node || echo 'Настройка не завершена'; nm_status; fi; pause_enter ;;
    5) nm_mesh invite || echo 'Код не получен'; pause_enter ;;
-   6) if nm_yes 'Подключиться к сети по коду?'; then nm_mesh join || echo 'Подключение не завершено'; nm_status; fi; pause_enter ;;
+   6) if nm_yes 'Подключиться к сети?'; then nm_mesh join || echo 'Подключение не завершено'; nm_status; fi; pause_enter ;;
    7) setup_standalone_naive ;;
-   8) echo 'Официальное меню может загружать и подготавливать компоненты.'; if nm_yes 'Открыть XRayMesh?'; then nm_mesh || echo 'Ошибка запуска'; fi; pause_enter ;;
+   8) if nm_yes 'Открыть официальный XRayMesh?'; then nm_mesh || echo 'Ошибка запуска'; fi; pause_enter ;;
    9) manage_naive_users_menu ;;
    10) nm_realm_menu ;;
+   11) nm_lifecycle ;;
   esac
  done
 }
@@ -7857,7 +7924,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.77 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.78 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.9 (NaiveProxy + Tailscale Mullvad Exit Edition)
+# Версия: 3.9.10 (NaiveProxy + Tailscale Mullvad Exit Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -7705,7 +7705,13 @@ manage_naive_mullvad_menu() {
  fi
  while true; do
   current_ip=$(curl --noproxy '*' -4 -fsS --connect-timeout 8 --max-time 15 https://ifconfig.me 2>/dev/null || echo 'неизвестен')
-  if ! smart_menu 'NaiveProxy → Mullvad Exit' "Текущий внешний IP сервера: ${current_ip}\nNaiveProxy/Caddy остаётся входом; интернет-трафик сервера направляется через выбранный Mullvad exit node.\n\nПеред включением убедитесь, что SSH доступен через Tailscale." 24 "$WT_WIDTH" 7 action \
+  echo
+  echo -e "${C_BOLD}NaiveProxy → Tailscale Mullvad Exit${C_RESET}"
+  echo -e "NaiveProxy/Caddy остаётся входом; интернет-трафик сервера направляется через выбранный Mullvad exit node."
+  echo -e "Текущий внешний IP сервера: ${C_GREEN}${current_ip}${C_RESET}"
+  echo -e "${C_YELLOW}Перед включением убедитесь, что SSH доступен через Tailscale.${C_RESET}"
+  echo
+  if ! smart_menu 'NaiveProxy → Mullvad Exit' 'Выберите действие.' 24 "$WT_WIDTH" 7 action \
    '1' 'Показать доступные Mullvad exit nodes' \
    '2' 'Включить / сменить Mullvad exit node' \
    '3' 'Выключить Mullvad exit node' \

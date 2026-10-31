@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.5 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.9.6 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6032,7 +6032,7 @@ mod_server_audit() {
     if [[ -f /etc/naiveproxy/mesh-paused ]]; then
         cascade_status="${C_BLUE}NaiveProxy + XRayMesh: сохранена отметка паузы${C_RESET}"
     elif is_naive_active && nm_bound; then
-        if systemctl is-active --quiet xraymesh.service && { systemctl is-active --quiet naive-mesh-bridge.service || systemctl is-active --quiet gost-mesh.service; }; then
+        if systemctl is-active --quiet xraymesh.service && { systemctl is-active --quiet naive-mesh-bridge.service; }; then
             cascade_status="${C_GREEN}Сервер 1: NaiveProxy + XRayMesh — локальные службы запущены; полный путь отдельно не проверен${C_RESET}"
         else
             cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
@@ -7383,7 +7383,7 @@ nm_state() { systemctl is-active "$1.service" 2>/dev/null || true; }
 nm_detect_role() {
  local bridge=0 exitnode=0
  [[ "$(nm_state xray-mesh-socks)" != active ]] || exitnode=1
- if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
+ if [[ "$(nm_state naive-mesh-bridge)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
  if ((bridge && exitnode)); then echo mixed
  elif ((exitnode)); then echo 2
  elif ((bridge)); then echo 1
@@ -7396,15 +7396,13 @@ nm_status() {
  echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — настройки не меняются'
  case "$role" in 1) echo 'Сервер 1 — вход (по выбранному мастеру или признакам служб).' ;; 2) echo 'Сервер 2 — выход (по выбранному мастеру или признакам служб).' ;; *) echo 'Назначение сервера не определено однозначно.' ;; esac
  [[ ! -f /etc/naiveproxy/mesh-paused ]] || echo 'NaiveProxy приостановлен. Управление: раздел управления.'
- for unit in xraymesh caddy xray-mesh-socks microsocks-local naive-mesh-bridge gost-mesh; do
+ for unit in xraymesh caddy xray-mesh-socks naive-mesh-bridge; do
   optional=no
   case "$unit" in
    xraymesh) label='Связь между серверами' ;;
    caddy) label='Вход NaiveProxy'; [[ "$role" != 2 ]] || optional=yes ;;
    xray-mesh-socks) label='Xray SOCKS'; [[ "$role" != 1 ]] || optional=yes ;;
-   microsocks-local) label='Старый microsocks'; optional=yes ;;
    naive-mesh-bridge) label='Локальный мост'; [[ "$role" != 2 ]] || optional=yes ;;
-   gost-mesh) label='Альтернативный мост'; [[ "$role" != 2 ]] || optional=yes ;;
   esac
   state=$(nm_state "$unit")
   if [[ "$state" == active ]]; then echo "$label: запущено."
@@ -7412,7 +7410,6 @@ nm_status() {
   elif [[ "$state" == failed ]]; then echo "$label: остановлено из-за ошибки."
   else echo "$label: не запущено или ещё не установлено."; fi
  done
- [[ "$role" != 1 ]] || echo 'Достаточно одного работающего варианта локального моста.'
  echo 'Сетевые адреса:'; ip -br -4 address || true
  echo 'Узлы внутренней сети:'
  if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then /opt/xraymesh/bin/easytier-cli peer || echo 'Список недоступен.'; fi
@@ -7506,7 +7503,7 @@ nm_apply() {
 nm_yes() { local answer; nm_prompt "$1 Введите ДА" нет answer || return 1; [[ "$answer" == ДА || "$answer" == да || "$answer" == YES ]]; }
 nm_bound() {
  [[ -f /etc/naiveproxy/mesh-upstream.port || -f /etc/naiveproxy/mesh-paused ]] && return 0
- if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active ]]; then
+ if [[ "$(nm_state naive-mesh-bridge)" == active ]]; then
   grep -Eq '^[[:space:]]*upstream[[:space:]]+socks5://127\.0\.0\.1:' /etc/caddy/Caddyfile 2>/dev/null && return 0
  fi
  return 1
@@ -7594,12 +7591,12 @@ nm_resume() {
 }
 nm_remove_proxy_parts() {
  if nm_bound; then echo 'Сначала переключите NaiveProxy на выход через этот сервер (пункт 3).'; return 1; fi
- echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh и старый microsocks mesh.'
+ echo 'Удаляются только службы этого стека: локальный socat-мост и Xray SOCKS.'
  echo 'XRayMesh, Caddy, пакеты и правила firewall не удаляются.'
  echo 'На сервере 2 это отключит выход для подключённых к нему клиентов.'
  nm_yes 'Отключить и удалить эти локальные службы?' || return 2
  local unit
- for unit in naive-mesh-bridge gost-mesh xray-mesh-socks realm-mesh microsocks-mesh microsocks-local; do
+ for unit in naive-mesh-bridge xray-mesh-socks; do
   if [[ -f "/etc/systemd/system/$unit.service" ]]; then
    systemctl disable --now "$unit.service" || { echo "Не удалось остановить $unit; удаление прервано."; return 1; }
    rm -f "/etc/systemd/system/$unit.service"
@@ -7769,7 +7766,7 @@ def main():
     ports=re.findall(r'(?m)^\s*upstream\s+socks5://127\.0\.0\.1:([0-9]+)\s*(?:#.*)?$',text)
     if len(ports)!=1:raise ValueError('Нужен один Caddy upstream на localhost. Сначала настройте сервер 1.')
     local=ports[0]
-    units=[u+'.service' for u in ['naive-mesh-bridge','gost-mesh'] if subprocess.run(['systemctl','is-active','--quiet',u+'.service']).returncode==0]
+    units=[u+'.service' for u in ['naive-mesh-bridge'] if subprocess.run(['systemctl','is-active','--quiet',u+'.service']).returncode==0]
     if len(units)!=1:raise ValueError('Должен быть активен ровно один известный мост.')
     unit=units[0]
     if output(['systemctl','show',unit,'-p','DropInPaths','--value']):raise ValueError('Есть drop-in службы. Автоматическое изменение остановлено.')
@@ -7876,7 +7873,7 @@ curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "$EXIT_IP:$SOC
 # Сохраняем уже работающий GOST: ничего не скачиваем и не заменяем.
 if ss -H -ltn "sport = :$LOCAL_PORT" | grep -q .; then
  echo "Порт $LOCAL_PORT уже занят. Проверяем существующий мост, не изменяя его."
- if ! systemctl is-active --quiet gost-mesh.service && ! systemctl is-active --quiet naive-mesh-bridge.service; then
+ if ! systemctl is-active --quiet naive-mesh-bridge.service; then
    echo 'Неизвестный слушатель. Проверьте ss -ltnp и его автозапуск. Остановка.'; exit 1
  fi
  echo 'Убедитесь: существующий мост направлен на нужный EXIT_IP и слушает только localhost.'

@@ -6037,8 +6037,8 @@ mod_server_audit() {
         else
             cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
         fi
-    elif systemctl is-active --quiet xraymesh.service && systemctl is-active --quiet realm-mesh.service; then
-        cascade_status="${C_GREEN}Сервер 2: XRayMesh + realm-релей — локальные службы запущены${C_RESET}"
+    elif systemctl is-active --quiet xraymesh.service && systemctl is-active --quiet xray-mesh-socks.service; then
+        cascade_status="${C_GREEN}Сервер 2: XRayMesh + Xray SOCKS — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
         cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
     elif is_naive_active && is_wg_cascade_active; then
@@ -7382,7 +7382,7 @@ nm_prompt() {
 nm_state() { systemctl is-active "$1.service" 2>/dev/null || true; }
 nm_detect_role() {
  local bridge=0 exitnode=0
- [[ "$(nm_state realm-mesh)" != active ]] || exitnode=1
+ [[ "$(nm_state xray-mesh-socks)" != active ]] || exitnode=1
  if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
  if ((bridge && exitnode)); then echo mixed
  elif ((exitnode)); then echo 2
@@ -7396,12 +7396,12 @@ nm_status() {
  echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — настройки не меняются'
  case "$role" in 1) echo 'Сервер 1 — вход (по выбранному мастеру или признакам служб).' ;; 2) echo 'Сервер 2 — выход (по выбранному мастеру или признакам служб).' ;; *) echo 'Назначение сервера не определено однозначно.' ;; esac
  [[ ! -f /etc/naiveproxy/mesh-paused ]] || echo 'NaiveProxy приостановлен. Управление: пункт 11.'
- for unit in xraymesh caddy realm-mesh naive-mesh-bridge gost-mesh; do
+ for unit in xraymesh caddy xray-mesh-socks naive-mesh-bridge gost-mesh; do
   optional=no
   case "$unit" in
    xraymesh) label='Связь между серверами' ;;
    caddy) label='Вход NaiveProxy'; [[ "$role" != 2 ]] || optional=yes ;;
-   realm-mesh) label='Realm-релей выхода'; [[ "$role" != 1 ]] || optional=yes ;;
+   xray-mesh-socks) label='Xray SOCKS выхода'; [[ "$role" != 1 ]] || optional=yes ;;
    naive-mesh-bridge) label='Локальный мост'; [[ "$role" != 2 ]] || optional=yes ;;
    gost-mesh) label='Альтернативный мост'; [[ "$role" != 2 ]] || optional=yes ;;
   esac
@@ -7443,7 +7443,6 @@ nm_questions() {
  nm_prompt 'Реальный mesh IPv4 сервера 2' "$NM_EXIT" NM_EXIT || return 1
  nm_prompt 'SOCKS-порт сервера 2' "$NM_SOCKS" NM_SOCKS || return 1
  nm_prompt 'Порт localhost-моста сервера 1' "$NM_LOCAL" NM_LOCAL || return 1
- nm_prompt 'Назначение realm на сервере 2 (host:port)' "${NM_REALM_REMOTE:-127.0.0.1:1080}" NM_REALM_REMOTE || return 1
  python3 - "$NM_ENTRY" "$NM_EXIT" "$NM_SOCKS" "$NM_LOCAL" <<'NM_VALIDATE'
 import ipaddress,sys
 ips=[ipaddress.IPv4Address(v) for v in sys.argv[1:3]]
@@ -7454,14 +7453,14 @@ for v in sys.argv[3:]:
 NM_VALIDATE
  [[ $? == 0 ]] || return 1
  mkdir -p /etc/naiveproxy
- (umask 077; for key in NM_ENTRY NM_EXIT NM_SOCKS NM_LOCAL NM_REALM_REMOTE NM_SERVER1 NM_SERVER2; do printf '%s=%q\n' "$key" "${!key}"; done > /etc/naiveproxy/mesh-wizard.env)
+ (umask 077; for key in NM_ENTRY NM_EXIT NM_SOCKS NM_LOCAL NM_SERVER1 NM_SERVER2; do printf '%s=%q\n' "$key" "${!key}"; done > /etc/naiveproxy/mesh-wizard.env)
 }
 nm_helper() (
  local tmp rc
  tmp=$(mktemp -d) || exit 1
  trap 'rm -rf -- "$tmp"' EXIT
  case "$1" in 1) nm_write_entry > "$tmp/helper.sh" ;; 2) nm_write_exit > "$tmp/helper.sh" ;; *) exit 1 ;; esac
- env ENTRY_IP="$NM_ENTRY" EXIT_IP="$NM_EXIT" SOCKS_PORT="$NM_SOCKS" LOCAL_PORT="$NM_LOCAL" REALM_REMOTE="$NM_REALM_REMOTE" bash "$tmp/helper.sh"
+ env ENTRY_IP="$NM_ENTRY" EXIT_IP="$NM_EXIT" SOCKS_PORT="$NM_SOCKS" LOCAL_PORT="$NM_LOCAL" bash "$tmp/helper.sh"
  rc=$?; exit "$rc"
 )
 nm_apply() {
@@ -7475,7 +7474,7 @@ nm_apply() {
  [[ "$answer" == YES ]] || return 2
  if [[ "$role" == 2 ]]; then
   if ! command -v ufw >/dev/null || ! LC_ALL=C ufw status | grep -q '^Status: active'; then
-   echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. Realm TCP relay без аутентификации."
+   echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. Xray SOCKS без аутентификации."
    nm_prompt 'ACL уже настроен? Введите ACL-READY' no answer || return 1
    [[ "$answer" == ACL-READY ]] || return 1
   fi
@@ -7582,12 +7581,12 @@ nm_resume() {
 }
 nm_remove_proxy_parts() {
  if nm_bound; then echo 'Сначала переключите NaiveProxy на выход через этот сервер (пункт 3).'; return 1; fi
- echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh, realm-mesh и старый microsocks mesh.'
+ echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh, Xray SOCKS, realm-mesh и microsocks.'
  echo 'XRayMesh, Caddy, пакеты и правила firewall не удаляются.'
  echo 'На сервере 2 это отключит выход для подключённых к нему клиентов.'
  nm_yes 'Отключить и удалить эти локальные службы?' || return 2
  local unit
- for unit in naive-mesh-bridge gost-mesh realm-mesh microsocks-mesh; do
+ for unit in naive-mesh-bridge gost-mesh xray-mesh-socks realm-mesh microsocks-mesh microsocks-local; do
   if [[ -f "/etc/systemd/system/$unit.service" ]]; then
    systemctl disable --now "$unit.service" || { echo "Не удалось остановить $unit; удаление прервано."; return 1; }
    rm -f "/etc/systemd/system/$unit.service"
@@ -7954,58 +7953,28 @@ PY
 }
 
 check_local_ip "$EXIT_IP"
-REALM_REMOTE=${REALM_REMOTE:-127.0.0.1:1080}
 apt-get update
-apt-get install -y curl tar ca-certificates
+apt-get install -y curl unzip ca-certificates
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
 case "$ARCH" in
- amd64|x86_64) REALM_ASSET=realm-x86_64-unknown-linux-gnu.tar.gz ;;
- arm64|aarch64) REALM_ASSET=realm-aarch64-unknown-linux-gnu.tar.gz ;;
+ amd64|x86_64) XRAY_ZIP=Xray-linux-64.zip ;;
+ arm64|aarch64) XRAY_ZIP=Xray-linux-arm64-v8a.zip ;;
  *) echo "Не поддерживаемая архитектура: $ARCH"; exit 1 ;;
 esac
-REALM_TMP=$(mktemp -d)
-if ! curl -fsSL --retry 2 "https://github.com/zhboner/realm/releases/latest/download/$REALM_ASSET" -o "$REALM_TMP/realm.tar.gz"; then
- rm -rf "$REALM_TMP"
- echo 'Не удалось скачать realm из GitHub releases.'; exit 1
-fi
-tar -xzf "$REALM_TMP/realm.tar.gz" -C "$REALM_TMP"
-REALM_BIN=$(find "$REALM_TMP" -type f -name realm | head -n1)
-if [ -z "$REALM_BIN" ]; then
- rm -rf "$REALM_TMP"
- echo 'Бинарник realm не найден в архиве.'; exit 1
-fi
-install -m 0755 "$REALM_BIN" /usr/local/bin/realm
-rm -rf "$REALM_TMP"
-
-# Локальный SOCKS5-выход только на loopback: доступен исключительно Realm.
-if ! ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
- apt-get install -y microsocks
- MICROSOCKS_BIN=$(command -v microsocks)
- LOCAL_UNIT=/etc/systemd/system/microsocks-local.service
- cat > "$LOCAL_UNIT" <<EOF
-[Unit]
-Description=Local-only SOCKS5 exit for Realm
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-ExecStart=$MICROSOCKS_BIN -i 127.0.0.1 -p $SOCKS_PORT
-Restart=always
-RestartSec=5
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-RestrictAddressFamilies=AF_INET AF_INET6
-
-[Install]
-WantedBy=multi-user.target
-EOF
- systemctl daemon-reload
- systemctl enable --now microsocks-local.service
- sleep 1
- systemctl is-active --quiet microsocks-local.service || { journalctl -u microsocks-local -n 30 --no-pager; exit 1; }
+if [[ ! -x /usr/local/bin/xray ]]; then
+ XRAY_TMP=$(mktemp -d)
+ if ! curl -fsSL --retry 2 "https://github.com/XTLS/Xray-core/releases/latest/download/$XRAY_ZIP" -o "$XRAY_TMP/xray.zip"; then
+  rm -rf "$XRAY_TMP"
+  echo 'Не удалось скачать Xray-core из GitHub releases.'; exit 1
+ fi
+ unzip -qo "$XRAY_TMP/xray.zip" -d "$XRAY_TMP"
+ if [[ -f "$XRAY_TMP/xray" ]]; then
+  install -m 0755 "$XRAY_TMP/xray" /usr/local/bin/xray
+ else
+  rm -rf "$XRAY_TMP"
+  echo 'Бинарник xray не найден в архиве.'; exit 1
+ fi
+ rm -rf "$XRAY_TMP"
 fi
 MESH_IF=$(python3 - "$EXIT_IP" <<'PY'
 import json,subprocess,sys
@@ -8013,36 +7982,54 @@ for n in json.loads(subprocess.check_output(['ip','-j','-4','addr','show'])):
     if any(a.get('local')==sys.argv[1] for a in n.get('addr_info',[])): print(n['ifname']); break
 PY
 )
-if ss -H -ltn "sport = :$SOCKS_PORT" | grep -v '127.0.0.1' | grep -q .; then
- systemctl is-active --quiet realm-mesh.service || { echo 'Mesh-порт занят чужим процессом. Остановка.'; exit 1; }
+if ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
+ systemctl is-active --quiet xray-mesh-socks.service || { echo 'Mesh-порт занят чужим процессом. Остановка.'; exit 1; }
 fi
-mkdir -p /etc/realm
-UNIT=/etc/systemd/system/realm-mesh.service
+mkdir -p /etc/xray
+UNIT=/etc/systemd/system/xray-mesh-socks.service
 [[ ! -f $UNIT ]] || cp -a "$UNIT" "$UNIT.bak.$(date +%s)"
-cat > /etc/realm/mesh.toml <<EOF
-# Realm TCP relay для NaiveProxy - XrayMesh.
-# ВАЖНО: realm пересылает TCP на один фиксированный адрес назначения.
-# Для произвольных сайтов укажите здесь локальный SOCKS/HTTP-прокси,
-# например 127.0.0.1:1080, либо используйте фиксированную цель.
-[network]
-no_tcp = false
-use_udp = false
-
-[[endpoints]]
-listen = "$EXIT_IP:$SOCKS_PORT"
-remote = "$REALM_REMOTE"
+cat > /etc/xray/mesh-socks.json <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "$EXIT_IP",
+      "port": $SOCKS_PORT,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIPv4"
+      }
+    }
+  ]
+}
 EOF
-chmod 600 /etc/realm/mesh.toml
+chmod 600 /etc/xray/mesh-socks.json
 cat > "$UNIT" <<EOF
 [Unit]
-Description=Realm TCP relay exit on mesh address only
+Description=Xray SOCKS exit bound to XRayMesh address only
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/realm -c /etc/realm/mesh.toml
+ExecStart=/usr/local/bin/xray run -c /etc/xray/mesh-socks.json
 Restart=always
 RestartSec=5
 NoNewPrivileges=yes
@@ -8063,14 +8050,16 @@ else
  echo "ВНИМАНИЕ: UFW неактивен/отсутствует. Ограничьте доступ к $EXIT_IP:$SOCKS_PORT адресом $ENTRY_IP в вашем firewall/mesh ACL."
 fi
 systemctl daemon-reload
-systemctl disable microsocks-mesh.service 2>/dev/null || true
-systemctl enable realm-mesh.service
-systemctl restart realm-mesh.service
+systemctl disable --now realm-mesh.service 2>/dev/null || true
+systemctl disable --now microsocks-local.service 2>/dev/null || true
+systemctl enable --now xray-mesh-socks.service
+systemctl restart xray-mesh-socks.service
 sleep 2
-systemctl is-active --quiet realm-mesh.service || { journalctl -u realm-mesh -n 30 --no-pager; exit 1; }
+systemctl is-active --quiet xray-mesh-socks.service || { journalctl -u xray-mesh-socks -n 30 --no-pager; exit 1; }
 ss -ltnp "sport = :$SOCKS_PORT"
-echo "Готово. Realm слушает $EXIT_IP:$SOCKS_PORT и пересылает TCP на $REALM_REMOTE."
-echo "Локальный SOCKS5-выход microsocks слушает только 127.0.0.1:$SOCKS_PORT."
+echo "Готово. Xray SOCKS слушает $EXIT_IP:$SOCKS_PORT и выходит в интернет напрямую."
+echo 'Проверка SOCKS через mesh-адрес:'
+curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "$EXIT_IP:$SOCKS_PORT" https://ifconfig.me; echo
 echo 'Проверка прямого IPv4 этого сервера:'
 curl -4 -fsS --connect-timeout 10 --max-time 30 https://ifconfig.me; echo
 

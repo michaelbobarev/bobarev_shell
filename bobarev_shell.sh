@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.8 (NaiveProxy + Tailscale Mullvad Exit Edition)
+# Версия: 3.9.9 (NaiveProxy + Tailscale Mullvad Exit Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -7694,7 +7694,7 @@ nm_checks_menu() {
 # МОДУЛЬ: NAIVEPROXY → TAILSCALE MULLVAD EXIT
 # ------------------------------------------------------------------------------
 manage_naive_mullvad_menu() {
- local action node current_ip
+ local action='' node='' current_ip=''
  if ! command -v tailscale >/dev/null 2>&1; then
   echo -e "${C_RED}❌ Tailscale не установлен. Сначала настройте Tailscale в пункте 10.${C_RESET}"
   pause_enter; return 1
@@ -7712,6 +7712,7 @@ manage_naive_mullvad_menu() {
    '4' 'Проверить внешний IP и NaiveProxy' \
    '5' 'Статус Tailscale' \
    '0' 'Вернуться в меню'; then break; fi
+  [[ -n "$action" ]] || break
   case "$action" in
    0) break ;;
    1)
@@ -7721,7 +7722,7 @@ manage_naive_mullvad_menu() {
     pause_enter ;;
    2)
     tailscale exit-node list || true
-    prompt_default 'Имя или Tailscale IP Mullvad exit node' '' node
+    read -r -p 'Имя или Tailscale IP Mullvad exit node (Enter — отмена): ' node || node=''
     if [[ -z "$node" ]]; then echo -e "${C_YELLOW}Отменено.${C_RESET}"; pause_enter; continue; fi
     echo -e "${C_YELLOW}⚠️ После включения exit node публичный SSH этого VPS может стать недоступным.${C_RESET}"
     nm_yes 'Включить выбранный Mullvad exit node?' || continue

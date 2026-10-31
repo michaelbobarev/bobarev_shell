@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.80 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.8.81 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -7474,7 +7474,7 @@ nm_apply() {
   if [[ -f /etc/default/bobarev-cascade ]]; then
    local CASCADE_ROLE=''
    source /etc/default/bobarev-cascade
-   [[ "$CASCADE_ROLE" == standalone_naive && "${NAIVE_OUT_MODE:-direct}" == direct ]] || { echo 'Сначала отключите другой каскад/WG.'; return 1; }
+   [[ ( "$CASCADE_ROLE" == standalone_naive || "$CASCADE_ROLE" == none ) && "${NAIVE_OUT_MODE:-direct}" == direct ]] || { echo 'Сначала отключите другой каскад/WG.'; return 1; }
   fi
  fi
  nm_helper "$role" || return 1
@@ -7519,7 +7519,7 @@ nm_direct() {
  [[ -x "$cb" ]] || { echo 'Не найден используемый бинарник Caddy.'; return 1; }
  command -v python3 >/dev/null || { echo 'Нужен Python 3.'; return 1; }
  # Do not silently switch unrelated BOBAREV cascades.
- if [[ -f /etc/default/bobarev-cascade ]] && ! grep -Eq '^CASCADE_ROLE="standalone_naive"$' /etc/default/bobarev-cascade; then
+ if [[ -f /etc/default/bobarev-cascade ]] && ! grep -Eq '^CASCADE_ROLE="(standalone_naive|none)"$' /etc/default/bobarev-cascade; then
   echo 'Обнаружен другой каскад. Автоматическое переключение остановлено.'; return 1
  fi
  backup=$(mktemp -d /root/bobarev-direct-backup-XXXXXXXX) || return 1
@@ -7708,6 +7708,7 @@ nm_wizard() {
  nm_apply "$target" || return 1
  nm_status "$target"
  if [[ "$target" == 2 ]]; then
+  echo 'Для SOCKS-выхода Realm не требуется. Это дополнительная пересылка портов.'
   if nm_yes 'Открыть дополнительные настройки Realm?'; then nm_realm_menu; fi
   if nm_yes 'Показать код подключения сервера 1?'; then nm_mesh invite || return 1; fi
  else echo 'Проверьте внешний IP через Shadowrocket.'; fi
@@ -7719,7 +7720,7 @@ manage_naive_mesh_menu() {
   if [[ -f /etc/naiveproxy/mesh-paused ]]; then intro='NaiveProxy на паузе. Возобновить или отключить: пункт 11.'
   elif nm_bound; then intro='NaiveProxy связан с mesh. Управление и отключение: пункт 11.'
   elif nm_ready; then intro='XRayMesh запущен. Проверка: пункт 1; управление: пункт 11.'; fi
-  height="${WT_HEIGHT:-27}"; rows=$((height-12)); ((rows>=3)) || rows=3
+  height="${WT_HEIGHT:-27}"; rows=$((height-13)); ((rows>=3)) || rows=3
   if ! smart_menu 'NaiveProxy + XRayMesh' "$intro
 Клиент -> сервер 1 -> сервер 2 -> интернет." "$height" "$WT_WIDTH" "$rows" action \
    '1' 'Локальная диагностика' \
@@ -7752,126 +7753,122 @@ manage_naive_mesh_menu() {
  done
 }
 
-
-nm_select_exit() {
+nm_select_exit() (
+ command -v python3 >/dev/null || { echo 'Нужен Python 3.'; exit 1; }
  nm_load
- local new_exit="$NM_EXIT" new_socks="$NM_SOCKS" new_local="$NM_LOCAL" unit old_target new_target
- local bridge_unit='' old_ip="$NM_EXIT" old_socks="$NM_SOCKS" old_local="$NM_LOCAL"
- echo 'ВЫБОР ВЫХОДНОГО СЕРВЕРА XRAYMESH'
- echo 'Действие доступно на сервере 1. Caddy продолжит использовать localhost,'
- echo 'но локальный мост будет направлен на другой mesh-IP.'
- if [[ ! -f /etc/naiveproxy/mesh-paused ]]; then
-  nm_bound || { echo 'Активная привязка NaiveProxy к mesh не найдена. Сначала настройте сервер 1.'; return 1; }
- fi
- systemctl is-active --quiet xraymesh.service || { echo 'XRayMesh не запущен. Сначала восстановите mesh-сеть.'; return 1; }
- echo "Текущий выходной mesh-IP: $NM_EXIT"
- echo "Текущий SOCKS-порт выхода: $NM_SOCKS"
- echo "Текущий локальный порт моста: $NM_LOCAL"
- nm_prompt 'Новый выходной mesh IPv4' "$NM_EXIT" new_exit || return 1
- nm_prompt 'SOCKS-порт нового выхода' "$NM_SOCKS" new_socks || return 1
- nm_prompt 'Локальный порт моста на сервере 1' "$NM_LOCAL" new_local || return 1
- python3 - "$NM_ENTRY" "$new_exit" "$new_socks" "$new_local" <<'NM_SELECT_VALIDATE'
-import ipaddress,sys
-entry,exit_ip=map(ipaddress.IPv4Address,sys.argv[1:3])
-if entry==exit_ip or not exit_ip.is_private or exit_ip.is_loopback or exit_ip.is_link_local:
- raise SystemExit('Нужен другой частный mesh IPv4')
-for v in sys.argv[3:]:
- if not v.isdecimal() or not 1024<=int(v)<=65535: raise SystemExit('Порты: 1024..65535')
-NM_SELECT_VALIDATE
- [[ $? == 0 ]] || return 1
- echo "Проверка нового выхода $new_exit:$new_socks через mesh..."
- if ! curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "$new_exit:$new_socks" https://ifconfig.me; then
-  echo
-  echo 'Новый выход недоступен. Настройки не изменены.'
-  echo 'Проверьте microsocks-mesh на новом сервере и доступ с mesh-IP сервера 1.'
-  return 1
- fi
- echo
- if [[ "$(nm_state naive-mesh-bridge)" == active ]]; then bridge_unit=naive-mesh-bridge
- elif [[ "$(nm_state gost-mesh)" == active ]]; then bridge_unit=gost-mesh
- elif [[ -f /etc/systemd/system/naive-mesh-bridge.service ]]; then bridge_unit=naive-mesh-bridge
- elif [[ -f /etc/systemd/system/gost-mesh.service ]]; then bridge_unit=gost-mesh
- else
-  echo 'Локальный мост не найден. Используйте мастер сервера 1.'
-  return 1
- fi
- unit="/etc/systemd/system/$bridge_unit.service"
- old_target="$old_ip:$old_socks"
- new_target="$new_exit:$new_socks"
- echo "Будет изменён мост: $bridge_unit"
- echo "  $old_target -> $new_target"
- if [[ "$old_local" != "$new_local" ]]; then echo "  локальный порт: $old_local -> $new_local"; fi
- nm_yes 'Переключить выходной сервер?' || return 2
- local backup="$unit.bak.exit.$(date +%Y%m%d-%H%M%S).$$"
- cp -a "$unit" "$backup" || return 1
- rollback_exit() {
-  echo 'Ошибка. Возвращаем прежний мост.'
-  cp -a "$backup" "$unit"
-  systemctl daemon-reload || true
-  systemctl restart "$bridge_unit.service" || true
- }
- trap 'rollback_exit' ERR
- python3 - "$unit" "$old_target" "$new_target" "$old_local" "$new_local" <<'NM_SELECT_PATCH'
-import pathlib,re,sys
-p,old,new,old_local,new_local=sys.argv[1:]
-s=pathlib.Path(p).read_text()
-if old==new and old_local==new_local: raise SystemExit('Изменений нет')
-if old!=new:
- count=s.count(old)
- if count!=1: raise SystemExit('Ожидался один адрес выхода, найдено: '+str(count)+'. Автоматическое изменение остановлено.')
- s=s.replace(old,new,1)
-if old_local!=new_local:
- pat=r'(?<![0-9])'+re.escape(old_local)+r'(?![0-9])'
- s2,n=re.subn(pat,new_local,s)
- if n<1: raise SystemExit('Не найден локальный порт моста.')
- s=s2
-pathlib.Path(p).write_text(s)
-NM_SELECT_PATCH
- systemctl daemon-reload
- systemctl restart "$bridge_unit.service"
- sleep 2
- systemctl is-active --quiet "$bridge_unit.service" || { journalctl -u "$bridge_unit" -n 30 --no-pager; return 1; }
- echo "Проверка выхода через локальный мост 127.0.0.1:$new_local..."
- curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "127.0.0.1:$new_local" https://ifconfig.me
- echo
- if [[ "$old_local" != "$new_local" ]]; then
-  local cf=/etc/caddy/Caddyfile cb cfb="$cf.bak.exit.$(date +%Y%m%d-%H%M%S).$$"
-  if [[ -f "$cf" && ! -L "$cf" ]]; then
-   cb=/usr/local/bin/caddy; [[ -x "$cb" ]] || cb=$(command -v caddy)
-   cp -a "$cf" "$cfb"
-   python3 - "$cf" "$old_local" "$new_local" <<'NM_SELECT_CADDY'
-import pathlib,re,sys
-p,old,new=sys.argv[1:]
-s=pathlib.Path(p).read_text()
-blocks=list(re.finditer(r'(?m)^[ \t]*forward_proxy\s*\{[^\S\n]*(?:#.*)?$',s))
-if len(blocks)!=1: raise SystemExit('Нужен ровно один простой блок forward_proxy.')
-a=blocks[0].end(); b=s.find('}',a)
-if b<0 or '{' in s[a:b]: raise SystemExit('Сложный блок forward_proxy: изменение остановлено.')
-block=s[a:b]
-ups=list(re.finditer(r'(?m)^([ \t]*)upstream\s+socks5://127\.0\.0\.1:'+re.escape(old)+r'[^\n]*',block))
-if len(ups)!=1: raise SystemExit('Ожидался один upstream на прежнем локальном порту.')
-line=ups[0].group(1)+'upstream socks5://127.0.0.1:'+new
-block=block[:ups[0].start()]+line+block[ups[0].end():]
-pathlib.Path(p).write_text(s[:a]+block+s[b:])
-NM_SELECT_CADDY
-   "$cb" fmt --overwrite "$cf"
-   "$cb" validate --config "$cf" --adapter caddyfile || { cp -a "$cfb" "$cf"; return 1; }
-   systemctl reload caddy || { cp -a "$cfb" "$cf"; systemctl reload caddy || true; return 1; }
-  else
-   echo 'Caddyfile не найден; локальный порт Caddy не изменён.'
-   return 1
-  fi
- fi
- trap - ERR
- mkdir -p /etc/naiveproxy
- NM_EXIT="$new_exit"; NM_SOCKS="$new_socks"; NM_LOCAL="$new_local"
- (umask 077; for key in NM_ENTRY NM_EXIT NM_SOCKS NM_LOCAL NM_SERVER1 NM_SERVER2; do printf '%s=%q\n' "$key" "${!key}"; done > /etc/naiveproxy/mesh-wizard.env)
- (umask 077; printf '%s\n' "$NM_LOCAL" > /etc/naiveproxy/mesh-upstream.port)
- echo "Готово. Выходной сервер: $NM_EXIT:$NM_SOCKS."
- echo "Резервная копия моста: $backup"
- echo 'Проверьте в Shadowrocket прежний профиль: https://ifconfig.me должен показать IP нового сервера.'
-}
+ local selected_ip="$NM_EXIT" selected_port="$NM_SOCKS" tmp
+ echo 'ВЫБОР ВЫХОДНОГО СЕРВЕРА — запускайте на сервере 1'
+ echo 'На выбранном mesh-узле должен работать SOCKS-выход (пункт 2).'
+ nm_prompt 'Mesh IPv4 выходного сервера' "$NM_EXIT" selected_ip || exit 1
+ nm_prompt 'SOCKS-порт выхода' "$NM_SOCKS" selected_port || exit 1
+ tmp=$(mktemp -d) || exit 1
+ trap 'rm -rf -- "$tmp"' EXIT
+ cat > "$tmp/switch.py" <<'NM_SWITCH_PY'
+import ipaddress,json,pathlib,re,shlex,shutil,subprocess,sys,tempfile
 
+def run(args,**kw):
+    return subprocess.run(args,check=True,text=True,**kw)
+def output(args):
+    return subprocess.check_output(args,text=True).strip()
+def endpoint_patch(text,ip,port,local):
+    lines=list(re.finditer(r'(?m)^ExecStart=(.+)$',text))
+    if len(lines)!=1: raise ValueError('Нужна одна команда запуска моста.')
+    m=lines[0]; cmd=m.group(1)
+    if 'socat ' in cmd:
+        if not re.search(r'TCP4-LISTEN:'+re.escape(local)+r',bind=127\.0\.0\.1,',cmd):
+            raise ValueError('Не распознан localhost-слушатель socat.')
+        pattern=r'(TCP4:)(\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?=,|\s|$)'
+    elif re.search(r'(?:^|/)gost\s',cmd):
+        if not re.search(r'(?:socks5?|socks5h)://127\.0\.0\.1:'+re.escape(local)+r'(?=[\s"\x27]|$)',cmd):
+            raise ValueError('Не распознан localhost-слушатель GOST.')
+        pattern=r'(-F[= ]socks5h?://)(\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?=[\s"\x27/?]|$)'
+    else: raise ValueError('Неизвестный тип моста. Настройки не изменены.')
+    matches=list(re.finditer(pattern,cmd))
+    if len(matches)!=1: raise ValueError('Нужно одно однозначное направление выхода моста.')
+    target=matches[0]
+    old=target.group(2)+':'+target.group(3)
+    cmd=cmd[:target.start()]+target.group(1)+ip+':'+port+cmd[target.end():]
+    return text[:m.start(1)]+cmd+text[m.end(1):],old
+
+def main():
+    ip,port=sys.argv[1:]
+    addr=ipaddress.IPv4Address(ip)
+    if not addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified or addr.is_multicast or addr.is_reserved:
+        raise ValueError('Нужен частный unicast IPv4 mesh-узла.')
+    if not port.isdecimal() or not 1024<=int(port)<=65535: raise ValueError('Порт: 1024..65535.')
+    for cmd in ['systemctl','curl','ip']: shutil.which(cmd) or sys.exit('Не найдена команда '+cmd)
+    run(['systemctl','is-active','--quiet','xraymesh.service'])
+    run(['systemctl','is-active','--quiet','caddy.service'])
+    if pathlib.Path('/etc/naiveproxy/mesh-paused').exists(): raise ValueError('Сначала возобновите каскад в пункте 11.')
+    nodes=json.loads(output(['ip','-j','-4','address','show']))
+    if any(a.get('local')==ip for n in nodes for a in n.get('addr_info',[])): raise ValueError('Нельзя выбрать адрес текущего сервера.')
+    cf=pathlib.Path('/etc/caddy/Caddyfile')
+    text=cf.read_text()
+    if re.search(r'(?m)^\s*import\s',text): raise ValueError('Внешние включения Caddy не поддерживаются этим переключателем.')
+    ups=re.findall(r'(?m)^\s*upstream\s+socks5://127\.0\.0\.1:([0-9]+)\s*(?:#.*)?$',text)
+    if len(ups)!=1: raise ValueError('Нужен один Caddy upstream socks5://127.0.0.1:порт. Сначала настройте сервер 1.')
+    local=ups[0]
+    units=[u for u in ['naive-mesh-bridge','gost-mesh'] if subprocess.run(['systemctl','is-active','--quiet',u+'.service']).returncode==0]
+    if len(units)!=1: raise ValueError('Должен быть активен ровно один известный мост.')
+    unit=units[0]+'.service'
+    if output(['systemctl','show',unit,'-p','DropInPaths','--value']): raise ValueError('Есть дополнительные настройки службы (drop-in). Автоматическое изменение остановлено.')
+    path=pathlib.Path(output(['systemctl','show',unit,'-p','FragmentPath','--value']))
+    if path!=pathlib.Path('/etc/systemd/system')/unit or path.is_symlink(): raise ValueError('Необычное расположение службы. Настройки не изменены.')
+    candidate,old=endpoint_patch(path.read_text(),ip,port,local)
+    def probe(target):
+        value=output(['curl','--noproxy','','-4','-fsS','--connect-timeout','10','--max-time','30','--socks5-hostname',target,'https://ifconfig.me'])
+        return str(ipaddress.IPv4Address(value))
+    print('Проверяем новый SOCKS-выход через mesh...',flush=True)
+    public=probe(ip+':'+port)
+    print('Текущий адрес моста: '+old+'; новый: '+ip+':'+port)
+    print('Внешний IPv4 нового выхода: '+public)
+    print('Существующие соединения могут прерваться. Caddy и Realm не изменяются.')
+    if input('Переключить выход? Введите ДА: ').strip() not in ['ДА','да','YES']:
+        print('Отменено. Настройки не изменены.'); return
+    root=pathlib.Path('/etc/naiveproxy');root.mkdir(exist_ok=True)
+    env=root/'mesh-wizard.env'; marker=root/'mesh-upstream.port'
+    paths=[path,env,marker]
+    backup=pathlib.Path(tempfile.mkdtemp(prefix='bobarev-mesh-exit-',dir='/root'))
+    snapshots={p:(p.read_bytes() if p.exists() else None) for p in paths}
+    for i,p in enumerate(paths):
+        if p.exists(): shutil.copy2(p,backup/(str(i)+'-'+p.name))
+    (backup/'paths.txt').write_text('\n'.join(str(p) for p in paths))
+    try:
+        path.write_text(candidate)
+        run(['systemctl','daemon-reload']);run(['systemctl','restart',unit])
+        run(['systemctl','is-active','--quiet',unit])
+        actual=probe('127.0.0.1:'+local)
+        if actual!=public: raise ValueError('Выход через localhost отличается от проверенного выхода mesh.')
+        et=env.read_text() if env.exists() else ''
+        for k,v in [('NM_EXIT',ip),('NM_SOCKS',port),('NM_LOCAL',local)]:
+            et=re.sub(r'(?m)^'+k+r'=.*\n?', '',et)
+            et=et.rstrip('\n')+'\n'+k+'='+shlex.quote(v)+'\n'
+        env.write_text(et);env.chmod(0o600)
+        marker.write_text(local+'\n');marker.chmod(0o600)
+    except BaseException:
+        errors=[]
+        for p,data in snapshots.items():
+            try:
+                if data is None: p.unlink(missing_ok=True)
+                else: p.write_bytes(data)
+            except Exception as e: errors.append(str(e))
+        for cmd in [['systemctl','daemon-reload'],['systemctl','restart',unit]]:
+            try: run(cmd)
+            except Exception as e: errors.append(str(e))
+        print('Выполнен откат. Резервная копия: '+str(backup),file=sys.stderr)
+        if errors: print('Ошибки восстановления: '+'; '.join(errors),file=sys.stderr)
+        raise
+    print('Готово. Выход: '+ip+':'+port+'; внешний IPv4: '+actual)
+    print('Резервная копия: '+str(backup))
+    print('Проверьте прежний профиль Shadowrocket: https://ifconfig.me')
+
+if __name__=='__main__':
+    try: main()
+    except Exception as e:
+        print('Переключение не завершено: '+str(e),file=sys.stderr);sys.exit(1)
+NM_SWITCH_PY
+ python3 "$tmp/switch.py" "$selected_ip" "$selected_port"
+)
 
 nm_write_entry() {
 cat <<'NM_ENTRY_SCRIPT'
@@ -8104,7 +8101,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.80 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.81 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.6 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.9.7 (NaiveProxy + Tailscale Mullvad Exit Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6032,7 +6032,7 @@ mod_server_audit() {
     if [[ -f /etc/naiveproxy/mesh-paused ]]; then
         cascade_status="${C_BLUE}NaiveProxy + XRayMesh: сохранена отметка паузы${C_RESET}"
     elif is_naive_active && nm_bound; then
-        if systemctl is-active --quiet xraymesh.service && { systemctl is-active --quiet naive-mesh-bridge.service; }; then
+        if systemctl is-active --quiet xraymesh.service && { systemctl is-active --quiet naive-mesh-bridge.service || systemctl is-active --quiet gost-mesh.service; }; then
             cascade_status="${C_GREEN}Сервер 1: NaiveProxy + XRayMesh — локальные службы запущены; полный путь отдельно не проверен${C_RESET}"
         else
             cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
@@ -7383,7 +7383,7 @@ nm_state() { systemctl is-active "$1.service" 2>/dev/null || true; }
 nm_detect_role() {
  local bridge=0 exitnode=0
  [[ "$(nm_state xray-mesh-socks)" != active ]] || exitnode=1
- if [[ "$(nm_state naive-mesh-bridge)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
+ if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
  if ((bridge && exitnode)); then echo mixed
  elif ((exitnode)); then echo 2
  elif ((bridge)); then echo 1
@@ -7396,13 +7396,15 @@ nm_status() {
  echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — настройки не меняются'
  case "$role" in 1) echo 'Сервер 1 — вход (по выбранному мастеру или признакам служб).' ;; 2) echo 'Сервер 2 — выход (по выбранному мастеру или признакам служб).' ;; *) echo 'Назначение сервера не определено однозначно.' ;; esac
  [[ ! -f /etc/naiveproxy/mesh-paused ]] || echo 'NaiveProxy приостановлен. Управление: раздел управления.'
- for unit in xraymesh caddy xray-mesh-socks naive-mesh-bridge; do
+ for unit in xraymesh caddy xray-mesh-socks microsocks-local naive-mesh-bridge gost-mesh; do
   optional=no
   case "$unit" in
    xraymesh) label='Связь между серверами' ;;
    caddy) label='Вход NaiveProxy'; [[ "$role" != 2 ]] || optional=yes ;;
    xray-mesh-socks) label='Xray SOCKS'; [[ "$role" != 1 ]] || optional=yes ;;
+   microsocks-local) label='Старый microsocks'; optional=yes ;;
    naive-mesh-bridge) label='Локальный мост'; [[ "$role" != 2 ]] || optional=yes ;;
+   gost-mesh) label='Альтернативный мост'; [[ "$role" != 2 ]] || optional=yes ;;
   esac
   state=$(nm_state "$unit")
   if [[ "$state" == active ]]; then echo "$label: запущено."
@@ -7410,6 +7412,7 @@ nm_status() {
   elif [[ "$state" == failed ]]; then echo "$label: остановлено из-за ошибки."
   else echo "$label: не запущено или ещё не установлено."; fi
  done
+ [[ "$role" != 1 ]] || echo 'Достаточно одного работающего варианта локального моста.'
  echo 'Сетевые адреса:'; ip -br -4 address || true
  echo 'Узлы внутренней сети:'
  if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then /opt/xraymesh/bin/easytier-cli peer || echo 'Список недоступен.'; fi
@@ -7503,7 +7506,7 @@ nm_apply() {
 nm_yes() { local answer; nm_prompt "$1 Введите ДА" нет answer || return 1; [[ "$answer" == ДА || "$answer" == да || "$answer" == YES ]]; }
 nm_bound() {
  [[ -f /etc/naiveproxy/mesh-upstream.port || -f /etc/naiveproxy/mesh-paused ]] && return 0
- if [[ "$(nm_state naive-mesh-bridge)" == active ]]; then
+ if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active ]]; then
   grep -Eq '^[[:space:]]*upstream[[:space:]]+socks5://127\.0\.0\.1:' /etc/caddy/Caddyfile 2>/dev/null && return 0
  fi
  return 1
@@ -7591,12 +7594,12 @@ nm_resume() {
 }
 nm_remove_proxy_parts() {
  if nm_bound; then echo 'Сначала переключите NaiveProxy на выход через этот сервер (пункт 3).'; return 1; fi
- echo 'Удаляются только службы этого стека: локальный socat-мост и Xray SOCKS.'
+ echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh и старый microsocks mesh.'
  echo 'XRayMesh, Caddy, пакеты и правила firewall не удаляются.'
  echo 'На сервере 2 это отключит выход для подключённых к нему клиентов.'
  nm_yes 'Отключить и удалить эти локальные службы?' || return 2
  local unit
- for unit in naive-mesh-bridge xray-mesh-socks; do
+ for unit in naive-mesh-bridge gost-mesh xray-mesh-socks realm-mesh microsocks-mesh microsocks-local; do
   if [[ -f "/etc/systemd/system/$unit.service" ]]; then
    systemctl disable --now "$unit.service" || { echo "Не удалось остановить $unit; удаление прервано."; return 1; }
    rm -f "/etc/systemd/system/$unit.service"
@@ -7687,6 +7690,85 @@ nm_checks_menu() {
   esac
  done
 }
+# ------------------------------------------------------------------------------
+# МОДУЛЬ: NAIVEPROXY → TAILSCALE MULLVAD EXIT
+# ------------------------------------------------------------------------------
+manage_naive_mullvad_menu() {
+ local action node current_ip
+ if ! command -v tailscale >/dev/null 2>&1; then
+  echo -e "${C_RED}❌ Tailscale не установлен. Сначала настройте Tailscale в пункте 10.${C_RESET}"
+  pause_enter; return 1
+ fi
+ if ! is_tailscale_authenticated; then
+  echo -e "${C_RED}❌ Tailscale не авторизован. Сначала выполните вход в Tailscale.${C_RESET}"
+  pause_enter; return 1
+ fi
+ while true; do
+  current_ip=$(curl --noproxy '*' -4 -fsS --connect-timeout 8 --max-time 15 https://ifconfig.me 2>/dev/null || echo 'неизвестен')
+  if ! smart_menu 'NaiveProxy → Mullvad Exit' "Текущий внешний IP сервера: ${current_ip}\nNaiveProxy/Caddy остаётся входом; интернет-трафик сервера направляется через выбранный Mullvad exit node.\n\nПеред включением убедитесь, что SSH доступен через Tailscale." 24 "$WT_WIDTH" 7 action \
+   '1' 'Показать доступные Mullvad exit nodes' \
+   '2' 'Включить / сменить Mullvad exit node' \
+   '3' 'Выключить Mullvad exit node' \
+   '4' 'Проверить внешний IP и NaiveProxy' \
+   '5' 'Статус Tailscale' \
+   '0' 'Вернуться в меню'; then break; fi
+  case "$action" in
+   0) break ;;
+   1)
+    echo -e "${C_BOLD}Доступные exit nodes:${C_RESET}"
+    tailscale exit-node list || echo -e "${C_RED}Не удалось получить список.${C_RESET}"
+    echo -e "${C_YELLOW}Если список пуст: включите Mullvad add-on в Tailscale Admin Console и добавьте этот VPS в Mullvad devices.${C_RESET}"
+    pause_enter ;;
+   2)
+    tailscale exit-node list || true
+    prompt_default 'Имя или Tailscale IP Mullvad exit node' '' node
+    if [[ -z "$node" ]]; then echo -e "${C_YELLOW}Отменено.${C_RESET}"; pause_enter; continue; fi
+    echo -e "${C_YELLOW}⚠️ После включения exit node публичный SSH этого VPS может стать недоступным.${C_RESET}"
+    nm_yes 'Включить выбранный Mullvad exit node?' || continue
+    if tailscale set --exit-node="$node" --exit-node-allow-lan-access=true; then
+     sleep 3
+     current_ip=$(curl --noproxy '*' -4 -fsS --connect-timeout 10 --max-time 20 https://ifconfig.me 2>/dev/null || echo 'не удалось определить')
+     echo -e "${C_GREEN}✅ Mullvad exit node включён.${C_RESET}"
+     echo -e "Текущий внешний IP: ${C_BOLD}${current_ip}${C_RESET}"
+     if systemctl is-active --quiet caddy.service; then
+      echo -e "${C_GREEN}Caddy/NaiveProxy активен: клиентский трафик будет выходить через этот IP.${C_RESET}"
+     else
+      echo -e "${C_YELLOW}Caddy/NaiveProxy не запущен. Настройте автономный NaiveProxy в пункте 22.${C_RESET}"
+     fi
+    else
+     echo -e "${C_RED}❌ Не удалось включить exit node. Проверьте имя узла и доступ Mullvad для этого устройства.${C_RESET}"
+    fi
+    pause_enter ;;
+   3)
+    nm_yes 'Выключить Mullvad exit node и вернуть прямой выход VPS?' || continue
+    if tailscale set --exit-node=; then
+     sleep 2
+     current_ip=$(curl --noproxy '*' -4 -fsS --connect-timeout 10 --max-time 20 https://ifconfig.me 2>/dev/null || echo 'не удалось определить')
+     echo -e "${C_GREEN}✅ Mullvad exit node выключен. Текущий IP: ${current_ip}${C_RESET}"
+    else
+     echo -e "${C_RED}❌ Не удалось выключить exit node.${C_RESET}"
+    fi
+    pause_enter ;;
+   4)
+    echo -e "${C_BOLD}Внешний IP сервера:${C_RESET}"
+    curl --noproxy '*' -4 -fsS --connect-timeout 10 --max-time 20 https://ifconfig.me || echo 'Проверка не удалась'
+    echo
+    if systemctl is-active --quiet caddy.service; then
+     echo -e "${C_GREEN}Caddy/NaiveProxy: запущен.${C_RESET}"
+    else
+     echo -e "${C_YELLOW}Caddy/NaiveProxy: не запущен.${C_RESET}"
+    fi
+    echo -e "${C_BLUE}Проверьте Shadowrocket: https://ifconfig.me${C_RESET}"
+    pause_enter ;;
+   5)
+    tailscale status || true
+    echo
+    tailscale exit-node list || true
+    pause_enter ;;
+  esac
+ done
+}
+
 manage_naive_mesh_menu() {
  local action
  while true; do
@@ -7766,7 +7848,7 @@ def main():
     ports=re.findall(r'(?m)^\s*upstream\s+socks5://127\.0\.0\.1:([0-9]+)\s*(?:#.*)?$',text)
     if len(ports)!=1:raise ValueError('Нужен один Caddy upstream на localhost. Сначала настройте сервер 1.')
     local=ports[0]
-    units=[u+'.service' for u in ['naive-mesh-bridge'] if subprocess.run(['systemctl','is-active','--quiet',u+'.service']).returncode==0]
+    units=[u+'.service' for u in ['naive-mesh-bridge','gost-mesh'] if subprocess.run(['systemctl','is-active','--quiet',u+'.service']).returncode==0]
     if len(units)!=1:raise ValueError('Должен быть активен ровно один известный мост.')
     unit=units[0]
     if output(['systemctl','show',unit,'-p','DropInPaths','--value']):raise ValueError('Есть drop-in службы. Автоматическое изменение остановлено.')
@@ -7873,7 +7955,7 @@ curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "$EXIT_IP:$SOC
 # Сохраняем уже работающий GOST: ничего не скачиваем и не заменяем.
 if ss -H -ltn "sport = :$LOCAL_PORT" | grep -q .; then
  echo "Порт $LOCAL_PORT уже занят. Проверяем существующий мост, не изменяя его."
- if ! systemctl is-active --quiet naive-mesh-bridge.service; then
+ if ! systemctl is-active --quiet gost-mesh.service && ! systemctl is-active --quiet naive-mesh-bridge.service; then
    echo 'Неизвестный слушатель. Проверьте ss -ltnp и его автозапуск. Остановка.'; exit 1
  fi
  echo 'Убедитесь: существующий мост направлен на нужный EXIT_IP и слушает только localhost.'
@@ -8151,6 +8233,7 @@ while true; do
     "23" "🔗 NaiveProxy + XRayMesh" \
     "24" "🔍 Аудит системы 1" \
     "25" "🩺 Аудит системы 2 и каскадные пары" \
+    "26" "🌍 NaiveProxy → Tailscale Mullvad Exit" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -8187,6 +8270,7 @@ while true; do
         23) manage_naive_mesh_menu ;;
         24) mod_server_audit; pause_enter ;;
         25) mod_network_cascade_audit ;;
+        26) manage_naive_mullvad_menu ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

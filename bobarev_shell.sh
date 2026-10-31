@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.8.81 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.8.83 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -7364,6 +7364,16 @@ run_full_auto_setup() {
 }
 
 
+nm_reload_caddy() {
+ local cb="${CADDY_BIN:-/usr/local/bin/caddy}" cf="${CADDYFILE:-/etc/caddy/Caddyfile}"
+ [[ -x "$cb" ]] || cb=$(command -v caddy) || { echo 'Не найден Caddy.' >&2; return 1; }
+ "$cb" validate --config "$cf" --adapter caddyfile || return 1
+ "$cb" reload --config "$cf" --adapter caddyfile --force || {
+  echo 'Caddy не принял конфигурацию через admin API. Автоматического restart не будет.' >&2
+  return 1
+ }
+}
+
 nm_prompt() {
  local value
  IFS= read -r -p "$1 [$2]: " value || return 1
@@ -7405,7 +7415,6 @@ nm_status() {
  echo 'Сетевые адреса:'; ip -br -4 address || true
  echo 'Узлы внутренней сети:'
  if [[ -x /opt/xraymesh/bin/easytier-cli ]]; then /opt/xraymesh/bin/easytier-cli peer || echo 'Список недоступен.'; fi
- nm_realm_status || echo 'Не удалось прочитать настройки пересылок.'
  echo 'Это состояние текущего сервера, не тест всей цепочки.'
 }
 nm_mesh() (
@@ -7533,8 +7542,8 @@ nm_direct() {
  "$cb" validate --config "$tmp" --adapter caddyfile || { echo 'Проверка не пройдена. Рабочие настройки сохранены.'; return 1; }
  cat "$tmp" > "$cf" || { cp -a "$backup/Caddyfile" "$cf"; return 1; }
  if systemctl is-active --quiet caddy.service; then
-  if ! systemctl reload caddy.service; then
-   cp -a "$backup/Caddyfile" "$cf"; systemctl reload caddy.service || true
+  if ! nm_reload_caddy; then
+   cp -a "$backup/Caddyfile" "$cf"; nm_reload_caddy || echo 'ВНИМАНИЕ: прежний файл восстановлен, но применить его к Caddy не удалось.' >&2
    echo 'Не удалось применить. Прежняя конфигурация восстановлена.'; return 1
   fi
  else
@@ -7548,12 +7557,12 @@ nm_direct() {
  systemctl enable caddy.service >/dev/null || echo 'Не удалось включить автозапуск Caddy. Проверьте отдельно.'
  echo 'NaiveProxy переключён на маршрутизацию текущего сервера.'
  echo "Резервная копия: $backup"
- echo 'XRayMesh, Realm и компоненты второго сервера не удалены.'
+ echo 'XRayMesh и компоненты второго сервера не удалены.'
 }
 nm_pause() {
  nm_bound || { echo 'Активная привязка NaiveProxy к mesh не обнаружена.'; return 1; }
  echo 'Будет остановлен Caddy целиком: NaiveProxy и сайты, которые он обслуживает.'
- echo 'Перехода на прямой выход НЕ будет. XRayMesh и Realm останутся запущены.'
+ echo 'Перехода на прямой выход НЕ будет. XRayMesh и другие сетевые службы останутся запущены.'
  nm_yes 'Приостановить?' || return 2
  systemctl stop caddy.service || return 1
  systemctl disable caddy.service >/dev/null || { echo 'Служба остановлена, но отключить автозапуск не удалось.'; return 1; }
@@ -7573,7 +7582,7 @@ nm_resume() {
 nm_remove_proxy_parts() {
  if nm_bound; then echo 'Сначала переключите NaiveProxy на выход через этот сервер (пункт 3).'; return 1; fi
  echo 'Удаляются только известные локальные службы моста и SOCKS: socat/GOST mesh и microsocks mesh.'
- echo 'XRayMesh, Realm, Caddy, пакеты и правила firewall не удаляются.'
+ echo 'XRayMesh, Caddy, пакеты и правила firewall не удаляются.'
  echo 'На сервере 2 это отключит выход для подключённых к нему клиентов.'
  nm_yes 'Отключить и удалить эти локальные службы?' || return 2
  local unit
@@ -7607,7 +7616,7 @@ nm_lifecycle() {
    5|6)
     if nm_bound; then echo 'Сначала выберите пункт 3: Caddy ещё привязан к mesh.'
     else
-     echo 'Отключатся ВСЕ локальные туннели XRayMesh, включая Realm и другие сервисы.'
+     echo 'Отключатся ВСЕ локальные туннели XRayMesh, включая дополнительные пересылки и сервисы.'
      echo 'Это может нарушить работу других клиентов и SSH через mesh. Используйте прямой доступ или консоль провайдера.'
      if nm_yes 'Продолжить?'; then
       if [[ "$choice" == 5 ]]; then nm_mesh stop || echo 'Не удалось остановить все службы. Проверьте состояние.'
@@ -7619,77 +7628,6 @@ nm_lifecycle() {
  done
 }
 
-nm_realm_status() {
- echo 'REALM — ПЕРЕСЫЛКИ ЭТОГО СЕРВЕРА'
- case "$(nm_state xraymesh-realm)" in active) echo 'Служба запущена.' ;; failed) echo 'Служба остановлена из-за ошибки.' ;; *) echo 'Служба не запущена или не установлена.' ;; esac
- command -v python3 >/dev/null || { echo 'Для просмотра нужен Python 3.'; return 1; }
- python3 - <<'REALM_READ'
-import pathlib,json
-p=pathlib.Path('/etc/xraymesh/realm.json')
-if not p.is_file(): print('Сохранённые пересылки в стандартном расположении не найдены.'); raise SystemExit(0)
-try:
- d=json.loads(p.read_text()); eps=d.get('endpoints',[])
- if not isinstance(eps,list): raise ValueError()
-except (ValueError,OSError,AttributeError): print('Не удалось прочитать настройки. Они не изменены.'); raise SystemExit(1)
-if not eps: print('Настроенных пересылок нет.')
-for i,e in enumerate(eps,1):
- if not isinstance(e,dict): print('Параметры одной из пересылок не распознаны.'); continue
- loc=str(e.get('listen','не указан'))
- if loc.startswith('0.0.0.0:'): loc='все адреса этого сервера, порт '+loc.rsplit(':',1)[1]
- print(f"Пересылка {i}: принимать — {loc}; отправлять — {e.get('remote','не указан')}")
-print('Это сохранённые настройки, а не проверка прохождения трафика.')
-REALM_READ
-}
-nm_realm_create() {
- local name target lp rp proto backup item log
- nm_realm_status || return 1
- echo 'Новая пересылка на текущем сервере. Существующие definitions не удаляются.'
- nm_prompt 'Название (латиница, цифры, дефис)' '' name || return 1
- nm_prompt 'Адрес получателя во внутренней сети' '' target || return 1
- nm_prompt 'Порт приёма на этом сервере' '' lp || return 1
- nm_prompt 'Порт получателя' '' rp || return 1
- nm_prompt 'Тип: tcp, udp или both (оба)' tcp proto || return 1
- python3 - "$name" "$target" "$lp" "$rp" "$proto" <<'REALM_VALIDATE'
-import re,ipaddress,sys
-n,t,l,r,p=sys.argv[1:]
-if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}',n): raise SystemExit('Проверьте название.')
-try: ip=ipaddress.IPv4Address(t)
-except ValueError: raise SystemExit('Проверьте адрес.')
-if ip not in ipaddress.IPv4Network('10.0.0.0/8'): raise SystemExit('Нужен адрес внутренней сети, начинающийся с 10.')
-for v in (l,r):
- if not v.isdecimal() or not 1024<=int(v)<=65535: raise SystemExit('Порты: 1024..65535.')
-if p not in ('tcp','udp','both'): raise SystemExit('Выберите tcp/udp/both.')
-REALM_VALIDATE
- [[ $? == 0 ]] || return 1
- [[ ! -e "/etc/xraymesh/realm-tunnels/$name.env" ]] || { echo 'Название уже существует.'; return 1; }
- command -v ss >/dev/null || { echo 'Для проверки портов нужен iproute2.'; return 1; }
- if [[ "$proto" != udp && -n "$(ss -H -ltn "sport = :$lp")" ]]; then echo 'TCP-порт занят.'; return 1; fi
- if [[ "$proto" != tcp && -n "$(ss -H -lun "sport = :$lp")" ]]; then echo 'UDP-порт занят.'; return 1; fi
- if [[ -f /etc/xraymesh/realm.json ]] && ! compgen -G '/etc/xraymesh/realm-tunnels/*.env' >/dev/null; then echo 'Нестандартная конфигурация. Требуется ручная миграция.'; return 1; fi
- echo "Принимать на всех IPv4-адресах сервера, порт $lp; отправлять на $target:$rp; тип $proto."
- echo 'Служба перезапустится. Ручные настройки вне системы XRayMesh могут потеряться.'
- echo 'Не публикуйте прокси без пароля. Firewall автоматически не настраивается.'
- nm_yes 'Доступ заранее ограничен сетевыми правилами?' || return 2
- nm_yes 'Создать?' || return 2
- backup=$(mktemp -d /root/realm-backup-XXXXXXXX) || return 1
- chmod 700 "$backup"
- for item in /etc/xraymesh/realm.json /etc/xraymesh/realm-tunnels /etc/systemd/system/xraymesh-realm.service; do
-  if [[ -e "$item" ]]; then cp -a -- "$item" "$backup/" || return 1; fi
- done
- log=$(mktemp /root/bobarev-realm-result-XXXXXXXX.log) || return 1
- chmod 600 "$log"
- echo "Резервная копия: $backup"
- if ! nm_mesh realm-create "$name" "$target" "$lp:$rp" "$proto" > "$log" 2>&1; then echo "Настройка не завершена. Журнал: $log. Полного автоотката нет."; return 1; fi
- nm_realm_status
-}
-nm_realm_menu() {
- local choice
- while true; do
-  if ! smart_menu 'Realm — пересылка портов' 'Рабочие пересылки не нужно создавать заново.' 17 "$WT_WIDTH" 3 choice \
-   '1' 'Проверить службу и пересылки' '2' 'Настроить новую пересылку' '0' 'Вернуться в меню'; then break; fi
-  case "$choice" in 0) break ;; 1) nm_realm_status || echo 'Проверка не завершена'; pause_enter ;; 2) nm_realm_create || echo 'Настройка остановлена или отменена'; pause_enter ;; esac
- done
-}
 nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet xraymesh.service; }
 nm_wizard() {
  local target="$1"
@@ -7708,8 +7646,6 @@ nm_wizard() {
  nm_apply "$target" || return 1
  nm_status "$target"
  if [[ "$target" == 2 ]]; then
-  echo 'Для SOCKS-выхода Realm не требуется. Это дополнительная пересылка портов.'
-  if nm_yes 'Открыть дополнительные настройки Realm?'; then nm_realm_menu; fi
   if nm_yes 'Показать код подключения сервера 1?'; then nm_mesh invite || return 1; fi
  else echo 'Проверьте внешний IP через Shadowrocket.'; fi
 }
@@ -7732,7 +7668,6 @@ manage_naive_mesh_menu() {
    '7' 'Настроить NaiveProxy / автономный режим' \
    '8' 'Открыть меню XRayMesh' \
    '9' 'Пользователи и ссылки NaiveProxy' \
-   '10' 'Realm — пересылка портов' \
    '11' 'Отключить / возобновить / удалить' \
    '12' 'Выбрать выходной сервер (mesh-IP)' \
    '0' 'Вернуться в меню'; then break; fi
@@ -7746,7 +7681,6 @@ manage_naive_mesh_menu() {
    7) setup_standalone_naive ;;
    8) if nm_yes 'Открыть официальный XRayMesh?'; then nm_mesh || echo 'Ошибка запуска'; fi; pause_enter ;;
    9) manage_naive_users_menu ;;
-   10) nm_realm_menu ;;
    11) nm_lifecycle ;;
    12) nm_select_exit || echo 'Выбор выхода не завершён или отменён'; pause_enter ;;
   esac
@@ -7757,7 +7691,7 @@ nm_select_exit() (
  command -v python3 >/dev/null || { echo 'Нужен Python 3.'; exit 1; }
  nm_load
  local selected_ip="$NM_EXIT" selected_port="$NM_SOCKS" tmp
- echo 'ВЫБОР ВЫХОДНОГО СЕРВЕРА — запускайте на сервере 1'
+ echo 'ВЫБОР ВЫХОДА — на входном сервере 1'
  echo 'На выбранном mesh-узле должен работать SOCKS-выход (пункт 2).'
  nm_prompt 'Mesh IPv4 выходного сервера' "$NM_EXIT" selected_ip || exit 1
  nm_prompt 'SOCKS-порт выхода' "$NM_SOCKS" selected_port || exit 1
@@ -7766,82 +7700,75 @@ nm_select_exit() (
  cat > "$tmp/switch.py" <<'NM_SWITCH_PY'
 import ipaddress,json,pathlib,re,shlex,shutil,subprocess,sys,tempfile
 
-def run(args,**kw):
-    return subprocess.run(args,check=True,text=True,**kw)
+def run(args):
+    return subprocess.run(args,check=True,text=True)
 def output(args):
     return subprocess.check_output(args,text=True).strip()
-def endpoint_patch(text,ip,port,local):
-    lines=list(re.finditer(r'(?m)^ExecStart=(.+)$',text))
-    if len(lines)!=1: raise ValueError('Нужна одна команда запуска моста.')
-    m=lines[0]; cmd=m.group(1)
+def patch_endpoint(text,ip,port,local):
+    commands=list(re.finditer(r'(?m)^ExecStart=(.+)$',text))
+    if len(commands)!=1:raise ValueError('Нужна одна команда запуска моста.')
+    m=commands[0];cmd=m.group(1)
     if 'socat ' in cmd:
-        if not re.search(r'TCP4-LISTEN:'+re.escape(local)+r',bind=127\.0\.0\.1,',cmd):
-            raise ValueError('Не распознан localhost-слушатель socat.')
+        if not re.search(r'TCP4-LISTEN:'+re.escape(local)+r',bind=127\.0\.0\.1,',cmd):raise ValueError('Не распознан localhost-слушатель socat.')
         pattern=r'(TCP4:)(\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?=,|\s|$)'
     elif re.search(r'(?:^|/)gost\s',cmd):
-        if not re.search(r'(?:socks5?|socks5h)://127\.0\.0\.1:'+re.escape(local)+r'(?=[\s"\x27]|$)',cmd):
-            raise ValueError('Не распознан localhost-слушатель GOST.')
+        if not re.search(r'(?:socks5?|socks5h)://127\.0\.0\.1:'+re.escape(local)+r'(?=[\s"\x27]|$)',cmd):raise ValueError('Не распознан localhost-слушатель GOST.')
         pattern=r'(-F[= ]socks5h?://)(\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?=[\s"\x27/?]|$)'
-    else: raise ValueError('Неизвестный тип моста. Настройки не изменены.')
-    matches=list(re.finditer(pattern,cmd))
-    if len(matches)!=1: raise ValueError('Нужно одно однозначное направление выхода моста.')
-    target=matches[0]
-    old=target.group(2)+':'+target.group(3)
-    cmd=cmd[:target.start()]+target.group(1)+ip+':'+port+cmd[target.end():]
+    else:raise ValueError('Неизвестный тип моста.')
+    targets=list(re.finditer(pattern,cmd))
+    if len(targets)!=1:raise ValueError('Неоднозначное направление выхода.')
+    t=targets[0];old=t.group(2)+':'+t.group(3)
+    cmd=cmd[:t.start()]+t.group(1)+ip+':'+port+cmd[t.end():]
     return text[:m.start(1)]+cmd+text[m.end(1):],old
+
+def probe(target):
+    value=output(['curl','--noproxy','','-4','-fsS','--connect-timeout','10','--max-time','30','--socks5-hostname',target,'https://ifconfig.me'])
+    return str(ipaddress.IPv4Address(value))
 
 def main():
     ip,port=sys.argv[1:]
     addr=ipaddress.IPv4Address(ip)
-    if not addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified or addr.is_multicast or addr.is_reserved:
-        raise ValueError('Нужен частный unicast IPv4 mesh-узла.')
-    if not port.isdecimal() or not 1024<=int(port)<=65535: raise ValueError('Порт: 1024..65535.')
-    for cmd in ['systemctl','curl','ip']: shutil.which(cmd) or sys.exit('Не найдена команда '+cmd)
+    if not addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified or addr.is_multicast or addr.is_reserved:raise ValueError('Нужен частный unicast mesh IPv4.')
+    if not port.isdecimal() or not 1024<=int(port)<=65535:raise ValueError('Порт: 1024..65535.')
     run(['systemctl','is-active','--quiet','xraymesh.service'])
     run(['systemctl','is-active','--quiet','caddy.service'])
-    if pathlib.Path('/etc/naiveproxy/mesh-paused').exists(): raise ValueError('Сначала возобновите каскад в пункте 11.')
+    if pathlib.Path('/etc/naiveproxy/mesh-paused').exists():raise ValueError('Сначала возобновите каскад, пункт 11.')
     nodes=json.loads(output(['ip','-j','-4','address','show']))
-    if any(a.get('local')==ip for n in nodes for a in n.get('addr_info',[])): raise ValueError('Нельзя выбрать адрес текущего сервера.')
-    cf=pathlib.Path('/etc/caddy/Caddyfile')
-    text=cf.read_text()
-    if re.search(r'(?m)^\s*import\s',text): raise ValueError('Внешние включения Caddy не поддерживаются этим переключателем.')
-    ups=re.findall(r'(?m)^\s*upstream\s+socks5://127\.0\.0\.1:([0-9]+)\s*(?:#.*)?$',text)
-    if len(ups)!=1: raise ValueError('Нужен один Caddy upstream socks5://127.0.0.1:порт. Сначала настройте сервер 1.')
-    local=ups[0]
-    units=[u for u in ['naive-mesh-bridge','gost-mesh'] if subprocess.run(['systemctl','is-active','--quiet',u+'.service']).returncode==0]
-    if len(units)!=1: raise ValueError('Должен быть активен ровно один известный мост.')
-    unit=units[0]+'.service'
-    if output(['systemctl','show',unit,'-p','DropInPaths','--value']): raise ValueError('Есть дополнительные настройки службы (drop-in). Автоматическое изменение остановлено.')
+    if any(a.get('local')==ip for n in nodes for a in n.get('addr_info',[])):raise ValueError('Указан адрес текущего сервера.')
+    text=pathlib.Path('/etc/caddy/Caddyfile').read_text()
+    if re.search(r'(?m)^\s*import\s',text):raise ValueError('Caddy с import не поддерживается переключателем.')
+    ports=re.findall(r'(?m)^\s*upstream\s+socks5://127\.0\.0\.1:([0-9]+)\s*(?:#.*)?$',text)
+    if len(ports)!=1:raise ValueError('Нужен один Caddy upstream на localhost. Сначала настройте сервер 1.')
+    local=ports[0]
+    units=[u+'.service' for u in ['naive-mesh-bridge','gost-mesh'] if subprocess.run(['systemctl','is-active','--quiet',u+'.service']).returncode==0]
+    if len(units)!=1:raise ValueError('Должен быть активен ровно один известный мост.')
+    unit=units[0]
+    if output(['systemctl','show',unit,'-p','DropInPaths','--value']):raise ValueError('Есть drop-in службы. Автоматическое изменение остановлено.')
     path=pathlib.Path(output(['systemctl','show',unit,'-p','FragmentPath','--value']))
-    if path!=pathlib.Path('/etc/systemd/system')/unit or path.is_symlink(): raise ValueError('Необычное расположение службы. Настройки не изменены.')
-    candidate,old=endpoint_patch(path.read_text(),ip,port,local)
-    def probe(target):
-        value=output(['curl','--noproxy','','-4','-fsS','--connect-timeout','10','--max-time','30','--socks5-hostname',target,'https://ifconfig.me'])
-        return str(ipaddress.IPv4Address(value))
-    print('Проверяем новый SOCKS-выход через mesh...',flush=True)
+    if path!=pathlib.Path('/etc/systemd/system')/unit or path.is_symlink():raise ValueError('Необычный файл службы.')
+    candidate,old=patch_endpoint(path.read_text(),ip,port,local)
+    print('Проверяем новый SOCKS-выход...',flush=True)
     public=probe(ip+':'+port)
-    print('Текущий адрес моста: '+old+'; новый: '+ip+':'+port)
-    print('Внешний IPv4 нового выхода: '+public)
-    print('Существующие соединения могут прерваться. Caddy и Realm не изменяются.')
-    if input('Переключить выход? Введите ДА: ').strip() not in ['ДА','да','YES']:
-        print('Отменено. Настройки не изменены.'); return
+    print('Мост: '+old+' -> '+ip+':'+port+'; внешний IPv4: '+public)
+    print('Caddyfile и локальный порт не меняются. Соединения моста могут прерваться.')
+    if input('Переключить? Введите ДА: ').strip() not in ['ДА','да','YES']:
+        print('Отменено.');return
     root=pathlib.Path('/etc/naiveproxy');root.mkdir(exist_ok=True)
-    env=root/'mesh-wizard.env'; marker=root/'mesh-upstream.port'
-    paths=[path,env,marker]
+    env=root/'mesh-wizard.env';marker=root/'mesh-upstream.port';paths=[path,env,marker]
     backup=pathlib.Path(tempfile.mkdtemp(prefix='bobarev-mesh-exit-',dir='/root'))
-    snapshots={p:(p.read_bytes() if p.exists() else None) for p in paths}
+    snapshots={p:p.read_bytes() if p.exists() else None for p in paths}
     for i,p in enumerate(paths):
-        if p.exists(): shutil.copy2(p,backup/(str(i)+'-'+p.name))
+        if p.exists():shutil.copy2(p,backup/(str(i)+'-'+p.name))
     (backup/'paths.txt').write_text('\n'.join(str(p) for p in paths))
     try:
         path.write_text(candidate)
         run(['systemctl','daemon-reload']);run(['systemctl','restart',unit])
         run(['systemctl','is-active','--quiet',unit])
         actual=probe('127.0.0.1:'+local)
-        if actual!=public: raise ValueError('Выход через localhost отличается от проверенного выхода mesh.')
+        if actual!=public:raise ValueError('Внешний IPv4 через мост не совпал с проверенным выходом.')
         et=env.read_text() if env.exists() else ''
         for k,v in [('NM_EXIT',ip),('NM_SOCKS',port),('NM_LOCAL',local)]:
-            et=re.sub(r'(?m)^'+k+r'=.*\n?', '',et)
+            et=re.sub(r'(?m)^'+k+r'=.*\n?','',et)
             et=et.rstrip('\n')+'\n'+k+'='+shlex.quote(v)+'\n'
         env.write_text(et);env.chmod(0o600)
         marker.write_text(local+'\n');marker.chmod(0o600)
@@ -7849,21 +7776,20 @@ def main():
         errors=[]
         for p,data in snapshots.items():
             try:
-                if data is None: p.unlink(missing_ok=True)
-                else: p.write_bytes(data)
-            except Exception as e: errors.append(str(e))
+                if data is None:p.unlink(missing_ok=True)
+                else:p.write_bytes(data)
+            except Exception as e:errors.append(str(e))
         for cmd in [['systemctl','daemon-reload'],['systemctl','restart',unit]]:
-            try: run(cmd)
-            except Exception as e: errors.append(str(e))
-        print('Выполнен откат. Резервная копия: '+str(backup),file=sys.stderr)
-        if errors: print('Ошибки восстановления: '+'; '.join(errors),file=sys.stderr)
+            try:run(cmd)
+            except Exception as e:errors.append(str(e))
+        print('Выполнен откат; резервная копия: '+str(backup),file=sys.stderr)
+        if errors:print('Ошибки восстановления: '+'; '.join(errors),file=sys.stderr)
         raise
-    print('Готово. Выход: '+ip+':'+port+'; внешний IPv4: '+actual)
-    print('Резервная копия: '+str(backup))
+    print('Готово. Внешний IPv4: '+actual+'; резервная копия: '+str(backup))
     print('Проверьте прежний профиль Shadowrocket: https://ifconfig.me')
 
 if __name__=='__main__':
-    try: main()
+    try:main()
     except Exception as e:
         print('Переключение не завершено: '+str(e),file=sys.stderr);sys.exit(1)
 NM_SWITCH_PY
@@ -7874,6 +7800,16 @@ nm_write_entry() {
 cat <<'NM_ENTRY_SCRIPT'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+nm_reload_caddy() {
+ local cb="${CADDY_BIN:-/usr/local/bin/caddy}" cf="${CADDYFILE:-/etc/caddy/Caddyfile}"
+ [[ -x "$cb" ]] || cb=$(command -v caddy) || { echo 'Не найден Caddy.' >&2; return 1; }
+ "$cb" validate --config "$cf" --adapter caddyfile || return 1
+ "$cb" reload --config "$cf" --adapter caddyfile --force || {
+  echo 'Caddy не принял конфигурацию через admin API. Автоматического restart не будет.' >&2
+  return 1
+ }
+}
+
 [[ $EUID -eq 0 ]] || { echo 'Запустите через sudo bash'; exit 1; }
 command -v apt-get >/dev/null || { echo 'Поддерживаются Debian/Ubuntu с systemd'; exit 1; }
 ENTRY_IP=${ENTRY_IP:-10.144.144.1}
@@ -7955,7 +7891,7 @@ cp -a "$CADDYFILE" "$BACKUP"
 rollback() {
  echo "Ошибка. Возвращаем $BACKUP"
  cp -a "$BACKUP" "$CADDYFILE"
- systemctl reload caddy || true
+ nm_reload_caddy || echo 'ВНИМАНИЕ: прежний файл восстановлен, но применить его к Caddy не удалось.' >&2
 }
 trap 'rollback' ERR
 # Изменяем только upstream одного forward_proxy. Не трогаем TLS/auth/route.
@@ -7979,7 +7915,7 @@ with open(p,'w') as f: f.write(s[:start]+block+s[end:])
 PY
 "$CADDY_BIN" fmt --overwrite "$CADDYFILE"
 "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile
-systemctl reload caddy
+nm_reload_caddy
 trap - ERR
 echo "Готово. Бэкап: $BACKUP"
 echo 'Проверьте Shadowrocket: прежний профиль → https://ifconfig.me'
@@ -8101,7 +8037,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.81 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.8.83 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

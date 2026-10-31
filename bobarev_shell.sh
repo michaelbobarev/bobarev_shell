@@ -6037,8 +6037,8 @@ mod_server_audit() {
         else
             cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
         fi
-    elif systemctl is-active --quiet xraymesh.service && systemctl is-active --quiet realm-mesh.service; then
-        cascade_status="${C_GREEN}Сервер 2: XRayMesh + realm-релей — локальные службы запущены${C_RESET}"
+    elif systemctl is-active --quiet xraymesh.service; then
+        cascade_status="${C_GREEN}Сервер 2: XRayMesh — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
         cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
     elif is_naive_active && is_wg_cascade_active; then
@@ -7382,7 +7382,7 @@ nm_prompt() {
 nm_state() { systemctl is-active "$1.service" 2>/dev/null || true; }
 nm_detect_role() {
  local bridge=0 exitnode=0
- [[ "$(nm_state xray-mesh-socks)" != active && "$(nm_state realm-mesh)" != active ]] || exitnode=1
+ [[ "$(nm_state xray-mesh-socks)" != active ]] || exitnode=1
  if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
  if ((bridge && exitnode)); then echo mixed
  elif ((exitnode)); then echo 2
@@ -7396,14 +7396,13 @@ nm_status() {
  echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — настройки не меняются'
  case "$role" in 1) echo 'Сервер 1 — вход (по выбранному мастеру или признакам служб).' ;; 2) echo 'Сервер 2 — выход (по выбранному мастеру или признакам служб).' ;; *) echo 'Назначение сервера не определено однозначно.' ;; esac
  [[ ! -f /etc/naiveproxy/mesh-paused ]] || echo 'NaiveProxy приостановлен. Управление: раздел управления.'
- for unit in xraymesh caddy xray-mesh-socks realm-mesh microsocks-local naive-mesh-bridge gost-mesh; do
+ for unit in xraymesh caddy xray-mesh-socks microsocks-local naive-mesh-bridge gost-mesh; do
   optional=no
   case "$unit" in
    xraymesh) label='Связь между серверами' ;;
    caddy) label='Вход NaiveProxy'; [[ "$role" != 2 ]] || optional=yes ;;
    xray-mesh-socks) label='Xray SOCKS'; [[ "$role" != 1 ]] || optional=yes ;;
    microsocks-local) label='Старый microsocks'; optional=yes ;;
-   realm-mesh) label='Realm-релей выхода'; [[ "$role" != 1 ]] || optional=yes ;;
    naive-mesh-bridge) label='Локальный мост'; [[ "$role" != 2 ]] || optional=yes ;;
    gost-mesh) label='Альтернативный мост'; [[ "$role" != 2 ]] || optional=yes ;;
   esac
@@ -7488,7 +7487,7 @@ nm_apply() {
  [[ "$answer" == YES ]] || return 2
  if [[ "$role" == 2 ]]; then
   if ! command -v ufw >/dev/null || ! LC_ALL=C ufw status | grep -q '^Status: active'; then
-   echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. Realm TCP relay без аутентификации."
+   echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. Xray SOCKS без аутентификации."
    nm_prompt 'ACL уже настроен? Введите ACL-READY' no answer || return 1
    [[ "$answer" == ACL-READY ]] || return 1
   fi
@@ -7595,7 +7594,7 @@ nm_resume() {
 }
 nm_remove_proxy_parts() {
  if nm_bound; then echo 'Сначала переключите NaiveProxy на выход через этот сервер (пункт 3).'; return 1; fi
- echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh, realm-mesh и старый microsocks mesh.'
+ echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh и старый microsocks mesh.'
  echo 'XRayMesh, Caddy, пакеты и правила firewall не удаляются.'
  echo 'На сервере 2 это отключит выход для подключённых к нему клиентов.'
  nm_yes 'Отключить и удалить эти локальные службы?' || return 2

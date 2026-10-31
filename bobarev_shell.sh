@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.3 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.9.4 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -7420,7 +7420,19 @@ nm_status() {
  echo 'Это состояние текущего сервера, не тест всей цепочки.'
 }
 nm_mesh() (
- local tmp rc
+ # Opening the menu must use the installed CLI, never the online installer.
+ local tmp rc installed
+ if [[ $# -eq 0 ]]; then
+  installed=$(type -P xraymesh || true)
+  if [[ -z "$installed" || ! -x "$installed" ]]; then
+   echo 'Установленная команда xraymesh не найдена в PATH.' >&2
+   echo 'Установщик автоматически не запускается. Проверьте: command -v xraymesh' >&2
+   exit 127
+  fi
+  "$installed"
+  rc=$?
+  exit "$rc"
+ fi
  command -v curl >/dev/null || { echo 'Установите curl и ca-certificates.'; exit 1; }
  tmp=$(mktemp -d) || exit 1
  trap 'rm -rf -- "$tmp"' EXIT

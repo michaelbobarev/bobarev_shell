@@ -7976,14 +7976,45 @@ if [ -z "$REALM_BIN" ]; then
 fi
 install -m 0755 "$REALM_BIN" /usr/local/bin/realm
 rm -rf "$REALM_TMP"
+
+# Локальный SOCKS5-выход только на loopback: доступен исключительно Realm.
+if ! ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
+ apt-get install -y microsocks
+ MICROSOCKS_BIN=$(command -v microsocks)
+ LOCAL_UNIT=/etc/systemd/system/microsocks-local.service
+ cat > "$LOCAL_UNIT" <<EOF
+[Unit]
+Description=Local-only SOCKS5 exit for Realm
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=$MICROSOCKS_BIN -i 127.0.0.1 -p $SOCKS_PORT
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ systemctl daemon-reload
+ systemctl enable --now microsocks-local.service
+ sleep 1
+ systemctl is-active --quiet microsocks-local.service || { journalctl -u microsocks-local -n 30 --no-pager; exit 1; }
+fi
 MESH_IF=$(python3 - "$EXIT_IP" <<'PY'
 import json,subprocess,sys
 for n in json.loads(subprocess.check_output(['ip','-j','-4','addr','show'])):
     if any(a.get('local')==sys.argv[1] for a in n.get('addr_info',[])): print(n['ifname']); break
 PY
 )
-if ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
- systemctl is-active --quiet realm-mesh.service || { echo 'Порт занят чужим процессом. Остановка.'; exit 1; }
+if ss -H -ltn "sport = :$SOCKS_PORT" | grep -v '127.0.0.1' | grep -q .; then
+ systemctl is-active --quiet realm-mesh.service || { echo 'Mesh-порт занят чужим процессом. Остановка.'; exit 1; }
 fi
 mkdir -p /etc/realm
 UNIT=/etc/systemd/system/realm-mesh.service
@@ -8039,6 +8070,7 @@ sleep 2
 systemctl is-active --quiet realm-mesh.service || { journalctl -u realm-mesh -n 30 --no-pager; exit 1; }
 ss -ltnp "sport = :$SOCKS_PORT"
 echo "Готово. Realm слушает $EXIT_IP:$SOCKS_PORT и пересылает TCP на $REALM_REMOTE."
+echo "Локальный SOCKS5-выход microsocks слушает только 127.0.0.1:$SOCKS_PORT."
 echo 'Проверка прямого IPv4 этого сервера:'
 curl -4 -fsS --connect-timeout 10 --max-time 30 https://ifconfig.me; echo
 

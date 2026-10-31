@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.2 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.9.3 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6037,8 +6037,8 @@ mod_server_audit() {
         else
             cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
         fi
-    elif systemctl is-active --quiet xraymesh.service && systemctl is-active --quiet xray-mesh-socks.service; then
-        cascade_status="${C_GREEN}Сервер 2: XRayMesh + Xray SOCKS — локальные службы запущены${C_RESET}"
+    elif systemctl is-active --quiet xraymesh.service && systemctl is-active --quiet realm-mesh.service; then
+        cascade_status="${C_GREEN}Сервер 2: XRayMesh + realm-релей — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
         cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
     elif is_naive_active && is_wg_cascade_active; then
@@ -7382,7 +7382,7 @@ nm_prompt() {
 nm_state() { systemctl is-active "$1.service" 2>/dev/null || true; }
 nm_detect_role() {
  local bridge=0 exitnode=0
- [[ "$(nm_state xray-mesh-socks)" != active ]] || exitnode=1
+ [[ "$(nm_state xray-mesh-socks)" != active && "$(nm_state realm-mesh)" != active ]] || exitnode=1
  if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active || -f /etc/naiveproxy/mesh-upstream.port ]]; then bridge=1; fi
  if ((bridge && exitnode)); then echo mixed
  elif ((exitnode)); then echo 2
@@ -7395,13 +7395,15 @@ nm_status() {
  [[ -n "$role" ]] || role=$(nm_detect_role)
  echo 'ЛОКАЛЬНАЯ ДИАГНОСТИКА — настройки не меняются'
  case "$role" in 1) echo 'Сервер 1 — вход (по выбранному мастеру или признакам служб).' ;; 2) echo 'Сервер 2 — выход (по выбранному мастеру или признакам служб).' ;; *) echo 'Назначение сервера не определено однозначно.' ;; esac
- [[ ! -f /etc/naiveproxy/mesh-paused ]] || echo 'NaiveProxy приостановлен. Управление: пункт 11.'
- for unit in xraymesh caddy xray-mesh-socks naive-mesh-bridge gost-mesh; do
+ [[ ! -f /etc/naiveproxy/mesh-paused ]] || echo 'NaiveProxy приостановлен. Управление: раздел управления.'
+ for unit in xraymesh caddy xray-mesh-socks realm-mesh microsocks-local naive-mesh-bridge gost-mesh; do
   optional=no
   case "$unit" in
    xraymesh) label='Связь между серверами' ;;
    caddy) label='Вход NaiveProxy'; [[ "$role" != 2 ]] || optional=yes ;;
-   xray-mesh-socks) label='Xray SOCKS выхода'; [[ "$role" != 1 ]] || optional=yes ;;
+   xray-mesh-socks) label='Xray SOCKS'; [[ "$role" != 1 ]] || optional=yes ;;
+   microsocks-local) label='Старый microsocks'; optional=yes ;;
+   realm-mesh) label='Realm-релей выхода'; [[ "$role" != 1 ]] || optional=yes ;;
    naive-mesh-bridge) label='Локальный мост'; [[ "$role" != 2 ]] || optional=yes ;;
    gost-mesh) label='Альтернативный мост'; [[ "$role" != 2 ]] || optional=yes ;;
   esac
@@ -7474,7 +7476,7 @@ nm_apply() {
  [[ "$answer" == YES ]] || return 2
  if [[ "$role" == 2 ]]; then
   if ! command -v ufw >/dev/null || ! LC_ALL=C ufw status | grep -q '^Status: active'; then
-   echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. Xray SOCKS без аутентификации."
+   echo "Ограничьте firewall/ACL: $NM_ENTRY -> $NM_EXIT:$NM_SOCKS. Realm TCP relay без аутентификации."
    nm_prompt 'ACL уже настроен? Введите ACL-READY' no answer || return 1
    [[ "$answer" == ACL-READY ]] || return 1
   fi
@@ -7581,7 +7583,7 @@ nm_resume() {
 }
 nm_remove_proxy_parts() {
  if nm_bound; then echo 'Сначала переключите NaiveProxy на выход через этот сервер (пункт 3).'; return 1; fi
- echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh, Xray SOCKS, realm-mesh и microsocks.'
+ echo 'Удаляются только известные локальные службы моста и выхода: socat/GOST mesh, realm-mesh и старый microsocks mesh.'
  echo 'XRayMesh, Caddy, пакеты и правила firewall не удаляются.'
  echo 'На сервере 2 это отключит выход для подключённых к нему клиентов.'
  nm_yes 'Отключить и удалить эти локальные службы?' || return 2
@@ -7600,12 +7602,12 @@ nm_lifecycle() {
  while true; do
   if ! smart_menu 'Управление каскадом' 'Действия выполняются только на текущем сервере.
 Возврат прямого выхода выполняйте на сервере 1.' 22 "$WT_WIDTH" 7 choice \
-   '1' 'Приостановить NaiveProxy (без прямого выхода)' \
-   '2' 'Возобновить NaiveProxy после паузы' \
-   '3' 'Отключить каскад: выход через этот сервер' \
-   '4' 'Удалить локальные службы моста / SOCKS' \
-   '5' 'Остановить XRayMesh до следующего запуска' \
-   '6' 'Полностью удалить XRayMesh и его туннели' \
+   '1' 'Пауза NaiveProxy' \
+   '2' 'Возобновить NaiveProxy' \
+   '3' 'Прямой выход (сервер 1)' \
+   '4' 'Удаление локальных служб...' \
+   '5' 'Остановить XRayMesh...' \
+   '6' 'Удалить XRayMesh...' \
    '0' 'Вернуться в меню'; then break; fi
   case "$choice" in
    0) break ;;
@@ -7649,40 +7651,56 @@ nm_wizard() {
   if nm_yes 'Показать код подключения сервера 1?'; then nm_mesh invite || return 1; fi
  else echo 'Проверьте внешний IP через Shadowrocket.'; fi
 }
-manage_naive_mesh_menu() {
- local action height rows intro
+nm_tools_menu() {
+ local c
  while true; do
-  intro='Сначала сервер 2 (выход), затем сервер 1 (вход).'
-  if [[ -f /etc/naiveproxy/mesh-paused ]]; then intro='NaiveProxy на паузе. Возобновить или отключить: пункт 11.'
-  elif nm_bound; then intro='NaiveProxy связан с mesh. Управление и отключение: пункт 11.'
-  elif nm_ready; then intro='XRayMesh запущен. Проверка: пункт 1; управление: пункт 11.'; fi
-  height="${WT_HEIGHT:-27}"; rows=$((height-13)); ((rows>=3)) || rows=3
-  if ! smart_menu 'NaiveProxy + XRayMesh' "$intro
-Клиент -> сервер 1 -> сервер 2 -> интернет." "$height" "$WT_WIDTH" "$rows" action \
-   '1' 'Локальная диагностика' \
-   '2' 'Настроить сервер 2 — выход' \
-   '3' 'Настроить сервер 1 — вход' \
-   '4' 'Создать / изменить узел сети' \
-   '5' 'Показать код подключения' \
-   '6' 'Подключиться по коду' \
-   '7' 'Настроить NaiveProxy / автономный режим' \
-   '8' 'Открыть меню XRayMesh' \
-   '9' 'Пользователи и ссылки NaiveProxy' \
-   '11' 'Отключить / возобновить / удалить' \
-   '12' 'Выбрать выходной сервер (mesh-IP)' \
-   '0' 'Вернуться в меню'; then break; fi
-  case "$action" in
+  if ! smart_menu 'Сеть XRayMesh' 'Изменения только после подтверждения.' 20 "$WT_WIDTH" 6 c \
+   1 'Создать / изменить узел' 2 'Показать код' 3 'Войти по коду' 4 'Меню XRayMesh' 0 'Назад'; then break; fi
+  case "$c" in
+   0) break ;; 1) if nm_yes 'Изменить узел?'; then nm_mesh setup-node || true; fi; pause_enter ;;
+   2) nm_mesh invite || true; pause_enter ;;
+   3) if nm_yes 'Подключиться к сети?'; then nm_mesh join || true; fi; pause_enter ;;
+   4) nm_mesh || true; pause_enter ;;
+  esac
+ done
+}
+nm_checks_menu() {
+ local c
+ while true; do
+  if ! smart_menu 'Проверка' 'SOCKS-тесты проверяют выход, но не клиентский NaiveProxy.' 20 "$WT_WIDTH" 5 c \
+   1 'Службы и сеть' 2 'SOCKS на сервере 2' 3 'Мост на сервере 1' 4 'Журналы служб' 0 'Назад'; then break; fi
+  case "$c" in
    0) break ;; 1) nm_status; pause_enter ;;
+   2|3) nm_load
+    if [[ "$c" == 2 ]]; then target="$NM_EXIT:$NM_SOCKS"; else target="127.0.0.1:$NM_LOCAL"; fi
+    curl --noproxy '' -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "$target" https://ifconfig.me || echo 'Проверка не пройдена'
+    echo; pause_enter ;;
+   4) journalctl -u caddy -u naive-mesh-bridge -u xray-mesh-socks -u xraymesh -n 60 --no-pager || true; pause_enter ;;
+  esac
+ done
+}
+manage_naive_mesh_menu() {
+ local action
+ while true; do
+  if ! smart_menu 'NaiveProxy + XRayMesh' 'Настройка: сначала сервер 2, затем сервер 1.
+Обновление меню не меняет работающие службы.' 23 "$WT_WIDTH" 9 action \
+   1 'Проверка и журналы' \
+   2 'Сервер 2: выход SOCKS' \
+   3 'Сервер 1: вход NaiveProxy' \
+   4 'Выбрать выходной сервер' \
+   5 'Пользователи и ссылки' \
+   6 'Сеть и коды подключения' \
+   7 'Автономный NaiveProxy' \
+   8 'Пауза / выход / удаление' \
+   0 'Назад'; then break; fi
+  case "$action" in
+   0) break ;; 1) nm_checks_menu ;;
    2) nm_wizard 2 || echo 'Мастер остановлен'; pause_enter ;;
    3) nm_wizard 1 || echo 'Мастер остановлен'; pause_enter ;;
-   4) if nm_yes 'Изменить узел сети?'; then nm_mesh setup-node || echo 'Настройка не завершена'; nm_status; fi; pause_enter ;;
-   5) nm_mesh invite || echo 'Код не получен'; pause_enter ;;
-   6) if nm_yes 'Подключиться к сети?'; then nm_mesh join || echo 'Подключение не завершено'; nm_status; fi; pause_enter ;;
-   7) setup_standalone_naive ;;
-   8) if nm_yes 'Открыть официальный XRayMesh?'; then nm_mesh || echo 'Ошибка запуска'; fi; pause_enter ;;
-   9) manage_naive_users_menu ;;
-   11) nm_lifecycle ;;
-   12) nm_select_exit || echo 'Выбор выхода не завершён или отменён'; pause_enter ;;
+   4) nm_select_exit || echo 'Выбор отменён или не завершён'; pause_enter ;;
+   5) manage_naive_users_menu ;; 6) nm_tools_menu ;;
+   7) if nm_yes 'Настроить автономный NaiveProxy (изменит конфигурацию входа)?'; then setup_standalone_naive; fi ;;
+   8) nm_lifecycle ;;
   esac
  done
 }
@@ -7692,7 +7710,7 @@ nm_select_exit() (
  nm_load
  local selected_ip="$NM_EXIT" selected_port="$NM_SOCKS" tmp
  echo 'ВЫБОР ВЫХОДА — на входном сервере 1'
- echo 'На выбранном mesh-узле должен работать SOCKS-выход (пункт 2).'
+ echo 'На выбранном mesh-узле должен работать SOCKS-выход (настройка сервера 2).'
  nm_prompt 'Mesh IPv4 выходного сервера' "$NM_EXIT" selected_ip || exit 1
  nm_prompt 'SOCKS-порт выхода' "$NM_SOCKS" selected_port || exit 1
  tmp=$(mktemp -d) || exit 1
@@ -7732,7 +7750,7 @@ def main():
     if not port.isdecimal() or not 1024<=int(port)<=65535:raise ValueError('Порт: 1024..65535.')
     run(['systemctl','is-active','--quiet','xraymesh.service'])
     run(['systemctl','is-active','--quiet','caddy.service'])
-    if pathlib.Path('/etc/naiveproxy/mesh-paused').exists():raise ValueError('Сначала возобновите каскад, пункт 11.')
+    if pathlib.Path('/etc/naiveproxy/mesh-paused').exists():raise ValueError('Сначала возобновите каскад, раздел управления.')
     nodes=json.loads(output(['ip','-j','-4','address','show']))
     if any(a.get('local')==ip for n in nodes for a in n.get('addr_info',[])):raise ValueError('Указан адрес текущего сервера.')
     text=pathlib.Path('/etc/caddy/Caddyfile').read_text()
@@ -7953,82 +7971,47 @@ PY
 }
 
 check_local_ip "$EXIT_IP"
-apt-get update
-apt-get install -y curl unzip ca-certificates
-ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-case "$ARCH" in
- amd64|x86_64) XRAY_ZIP=Xray-linux-64.zip ;;
- arm64|aarch64) XRAY_ZIP=Xray-linux-arm64-v8a.zip ;;
- *) echo "Не поддерживаемая архитектура: $ARCH"; exit 1 ;;
-esac
-if [[ ! -x /usr/local/bin/xray ]]; then
- XRAY_TMP=$(mktemp -d)
- if ! curl -fsSL --retry 2 "https://github.com/XTLS/Xray-core/releases/latest/download/$XRAY_ZIP" -o "$XRAY_TMP/xray.zip"; then
-  rm -rf "$XRAY_TMP"
-  echo 'Не удалось скачать Xray-core из GitHub releases.'; exit 1
- fi
- unzip -qo "$XRAY_TMP/xray.zip" -d "$XRAY_TMP"
- if [[ -f "$XRAY_TMP/xray" ]]; then
-  install -m 0755 "$XRAY_TMP/xray" /usr/local/bin/xray
- else
-  rm -rf "$XRAY_TMP"
-  echo 'Бинарник xray не найден в архиве.'; exit 1
- fi
- rm -rf "$XRAY_TMP"
+# Existing unrelated services are never stopped automatically.
+if ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
+ systemctl is-active --quiet xray-mesh-socks.service || { echo 'Порт занят другой службой. Она сохранена. Выберите свободный порт или выполните миграцию вручную.'; exit 1; }
 fi
+apt-get install -y curl unzip ca-certificates
+if [[ ! -x /usr/local/bin/xray ]]; then
+ case "$(dpkg --print-architecture)" in
+ amd64) asset=Xray-linux-64.zip ;; arm64) asset=Xray-linux-arm64-v8a.zip ;; *) echo 'Архитектура не поддерживается'; exit 1 ;; esac
+ tmp=$(mktemp -d)
+ trap 'rm -rf -- "$tmp"' EXIT
+ curl -fSL --retry 2 "https://github.com/XTLS/Xray-core/releases/latest/download/$asset" -o "$tmp/xray.zip"
+ unzip -qo "$tmp/xray.zip" -d "$tmp"
+ install -m 755 "$tmp/xray" /usr/local/bin/xray
+fi
+mkdir -p /etc/xray
+python3 - "$EXIT_IP" "$SOCKS_PORT" <<'PY'
+import json,sys,pathlib
+p=pathlib.Path('/etc/xray/mesh-socks.json')
+if p.exists():
+ import shutil,time
+ shutil.copy2(p,str(p)+'.bak.'+str(time.time_ns()))
+c={'log':{'loglevel':'warning'},'inbounds':[{'listen':sys.argv[1],'port':int(sys.argv[2]),'protocol':'socks','settings':{'auth':'noauth','udp':False}}],'outbounds':[{'protocol':'freedom','settings':{'domainStrategy':'UseIPv4'}}]}
+p.write_text(json.dumps(c,indent=2)+'\n');p.chmod(0o600)
+PY
+/usr/local/bin/xray run -test -c /etc/xray/mesh-socks.json
 MESH_IF=$(python3 - "$EXIT_IP" <<'PY'
 import json,subprocess,sys
 for n in json.loads(subprocess.check_output(['ip','-j','-4','addr','show'])):
-    if any(a.get('local')==sys.argv[1] for a in n.get('addr_info',[])): print(n['ifname']); break
+ if any(a.get('local')==sys.argv[1] for a in n.get('addr_info',[])):print(n['ifname']);break
 PY
 )
-if ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
- systemctl is-active --quiet xray-mesh-socks.service || { echo 'Mesh-порт занят чужим процессом. Остановка.'; exit 1; }
+if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
+ ufw insert 1 deny in to "$EXIT_IP" port "$SOCKS_PORT" proto tcp
+ ufw insert 1 allow in on "$MESH_IF" from "$ENTRY_IP" to "$EXIT_IP" port "$SOCKS_PORT" proto tcp
 fi
-mkdir -p /etc/xray
-UNIT=/etc/systemd/system/xray-mesh-socks.service
-[[ ! -f $UNIT ]] || cp -a "$UNIT" "$UNIT.bak.$(date +%s)"
-cat > /etc/xray/mesh-socks.json <<EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "listen": "$EXIT_IP",
-      "port": $SOCKS_PORT,
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": true
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "UseIPv4"
-      }
-    }
-  ]
-}
-EOF
-chmod 600 /etc/xray/mesh-socks.json
-cat > "$UNIT" <<EOF
+cat > /etc/systemd/system/xray-mesh-socks.service <<'EOF'
 [Unit]
-Description=Xray SOCKS exit bound to XRayMesh address only
+Description=Xray SOCKS exit for XRayMesh
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
-
 [Service]
-Type=simple
 ExecStart=/usr/local/bin/xray run -c /etc/xray/mesh-socks.json
 Restart=always
 RestartSec=5
@@ -8036,32 +8019,15 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-RestrictAddressFamilies=AF_INET AF_INET6
-
 [Install]
 WantedBy=multi-user.target
 EOF
-# Не включаем UFW и не меняем SSH/default policy.
-# Порядок: разрешение выше запрета, включая запреты из старых скриптов.
-if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
- ufw insert 1 deny in to "$EXIT_IP" port "$SOCKS_PORT" proto tcp
- ufw insert 1 allow in on "$MESH_IF" from "$ENTRY_IP" to "$EXIT_IP" port "$SOCKS_PORT" proto tcp
-else
- echo "ВНИМАНИЕ: UFW неактивен/отсутствует. Ограничьте доступ к $EXIT_IP:$SOCKS_PORT адресом $ENTRY_IP в вашем firewall/mesh ACL."
-fi
 systemctl daemon-reload
-systemctl disable --now realm-mesh.service 2>/dev/null || true
-systemctl disable --now microsocks-local.service 2>/dev/null || true
-systemctl enable --now xray-mesh-socks.service
+systemctl enable xray-mesh-socks.service
 systemctl restart xray-mesh-socks.service
-sleep 2
-systemctl is-active --quiet xray-mesh-socks.service || { journalctl -u xray-mesh-socks -n 30 --no-pager; exit 1; }
-ss -ltnp "sport = :$SOCKS_PORT"
-echo "Готово. Xray SOCKS слушает $EXIT_IP:$SOCKS_PORT и выходит в интернет напрямую."
-echo 'Проверка SOCKS через mesh-адрес:'
-curl -4 -fsS --connect-timeout 10 --max-time 30 --socks5-hostname "$EXIT_IP:$SOCKS_PORT" https://ifconfig.me; echo
-echo 'Проверка прямого IPv4 этого сервера:'
-curl -4 -fsS --connect-timeout 10 --max-time 30 https://ifconfig.me; echo
+systemctl is-active --quiet xray-mesh-socks.service
+echo "Xray SOCKS: $EXIT_IP:$SOCKS_PORT. Старые службы сохранены."
+echo 'Проверку с mesh-адреса выполните на сервере 1 (меню Проверка).'
 
 NM_EXIT_SCRIPT
 }

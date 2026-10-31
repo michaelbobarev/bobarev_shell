@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.7 (NaiveProxy + Tailscale Mullvad Exit Edition)
+# Версия: 3.9.8 (NaiveProxy + Tailscale Mullvad Exit Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -8231,9 +8231,9 @@ while true; do
     "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
     "22" "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" \
     "23" "🔗 NaiveProxy + XRayMesh" \
-    "24" "🔍 Аудит системы 1" \
-    "25" "🩺 Аудит системы 2 и каскадные пары" \
-    "26" "🌍 NaiveProxy → Tailscale Mullvad Exit" \
+    "24" "🌍 NaiveProxy → Tailscale Mullvad Exit" \
+    "25" "🔍 Аудит системы 1" \
+    "26" "🩺 Аудит системы 2 и каскадные пары" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -8268,9 +8268,9 @@ while true; do
         21) manage_cascade_xray_menu ;;
         22) setup_standalone_naive ;;
         23) manage_naive_mesh_menu ;;
-        24) mod_server_audit; pause_enter ;;
-        25) mod_network_cascade_audit ;;
-        26) manage_naive_mullvad_menu ;;
+        24) manage_naive_mullvad_menu ;;
+        25) mod_server_audit; pause_enter ;;
+        26) mod_network_cascade_audit ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

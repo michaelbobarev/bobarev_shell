@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.10.0 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.10.1 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6244,6 +6244,75 @@ mod_server_audit() {
 
 # 18. Универсальный режим локального маршрутизатора (с поддержкой SBC-клиента WireGuard/WARP)
 mod_router_sbc() {
+ local choice='' state='' state2=''
+ while true; do
+  state='не установлен'
+  state2='не запущен'
+  if [[ -f /etc/bobarev-router-v2/config ]]; then
+   state='установлен'
+   state2="$(systemctl is-active bobarev-router-v2.service 2>/dev/null || echo unknown)/$(systemctl is-active bobarev-router-dhcp.service 2>/dev/null || echo unknown)"
+  fi
+  smart_menu 'Режим локального маршрутизатора' \
+   "Состояние: $state. Службы: $state2.\nМастер настроит LAN, выход, DHCP и NAT пошагово. Базовая сеть, SSH и авторизация VPN не сбрасываются." \
+   20 "$WT_WIDTH" 7 choice \
+   1 'Статус и диагностика' \
+   2 'Мастер настройки' \
+   3 'Запустить / перезапустить' \
+   4 'Остановить' \
+   5 'Удалить настройки маршрутизатора' \
+   0 'Назад' || return 0
+  case "$choice" in
+   0) return 0 ;;
+   1)
+    echo '=== Конфигурация ==='
+    [[ -f /etc/bobarev-router-v2/config ]] && cat /etc/bobarev-router-v2/config || echo 'Не установлено.'
+    echo '=== Службы ==='
+    systemctl status bobarev-router-v2.service --no-pager -l || true
+    systemctl status bobarev-router-dhcp.service --no-pager -l || true
+    echo '=== DHCP-сокет ==='
+    ss -lunp | grep ':67' || true
+    echo '=== Маршрутизация ==='
+    ip -4 rule || true
+    if [[ -f /etc/bobarev-router-v2/config ]]; then
+     source /etc/bobarev-router-v2/config
+     if [[ "${OUT:-}" == "tailscale0" ]]; then
+      ip -4 route show table 52 | head -n 3 || true
+     else
+      ip -4 route show table 199 2>/dev/null || true
+     fi
+    fi
+    echo '=== NAT ==='
+    iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
+    pause_enter ;;
+   2) mod_router_sbc_setup; return 0 ;;
+   3)
+    [[ -f /etc/bobarev-router-v2/config ]] || { echo 'Сначала выполните мастер настройки.'; pause_enter; continue; }
+    systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true
+    systemctl status bobarev-router-v2.service --no-pager -l || true
+    systemctl status bobarev-router-dhcp.service --no-pager -l || true
+    pause_enter ;;
+   4)
+    systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service || true
+    echo 'Маршрутизатор и DHCP остановлены.'
+    pause_enter ;;
+   5)
+    [[ -f /etc/bobarev-router-v2/config ]] || { echo 'Маршрутизатор не установлен.'; pause_enter; continue; }
+    nm_yes 'Удалить настройки LAN-маршрутизатора? Конфигурация будет сохранена в /root.' || continue
+    br_snapshot || true
+    systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || true
+    local d="/root/bobarev-router-removed-$(date +%Y%m%d-%H%M%S)"
+    mkdir -m 700 "$d"
+    cp -a /etc/bobarev-router-v2 "$d/" 2>/dev/null || true
+    cp -a /etc/systemd/system/bobarev-router-v2.service.d "$d/" 2>/dev/null || true
+    rm -rf /etc/bobarev-router-v2 /etc/systemd/system/bobarev-router-v2.service.d
+    systemctl daemon-reload
+    echo "Настройки удалены. Резервная копия: $d"
+    pause_enter ;;
+  esac
+ done
+}
+
+mod_router_sbc_setup() {
  local lan_if='' out_if='' lan_ip='192.168.199.1' wan_if='' answer='' items=() iface
  MODULE_CANCELED=false
  wan_if=$(get_wan_if)
@@ -6370,13 +6439,33 @@ UNIT
  fi
  systemctl daemon-reload
  systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service
+
+ if [[ "$out_if" == "tailscale0" ]]; then
+  mkdir -p /etc/systemd/system/bobarev-router-v2.service.d
+  cat > /etc/systemd/system/bobarev-router-v2.service.d/override.conf <<EOF
+[Unit]
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+ExecStartPre=/bin/sleep 5
+ExecStartPost=-/sbin/ip rule del pref 11990 iif $lan_if lookup 52
+ExecStartPost=/sbin/ip rule add pref 11990 iif $lan_if lookup 52
+EOF
+  ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
+  ip rule add pref 11990 iif "$lan_if" lookup 52
+ fi
+
  if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
   echo 'Ошибка применения. Проверьте journalctl -u bobarev-router-v2 -u bobarev-router-dhcp; резервная копия сохранена.'
   return 1
  fi
- echo 'Настройки применены, но доступ в интернет ещё требует проверки.'
+ echo 'Настройки применены.'
+ if [[ "$out_if" == "tailscale0" ]]; then
+  echo 'LAN-клиенты направлены через Tailscale exit node (правило 11990).'
+ fi
  echo "Google Wi-Fi: WAN DHCP, LAN другая подсеть (например 192.168.86.0/24). Обновите WAN-аренду Google Wi-Fi."
- echo 'После ufw reload перезапустите bobarev-router-v2.service.'
+ echo 'Проверьте LAN-клиент: https://ifconfig.me'
 }
 
 br_snapshot() {
@@ -6437,10 +6526,8 @@ manage_naive_mullvad_menu() {
 }
 
 mod_network_reset() {
- local selected='' item='' unit='' answer='' backup='' ts_exit='' ts_adv=''
+ local selected='' item='' unit='' ts_exit='' ts_adv=''
  local -a items=()
-
- # Полное сканирование текущего состояния маршрутизации и надстроек.
  echo 'Сканирование сетевых настроек...'
  echo '--- Интерфейсы ---'
  ip -br address || true
@@ -6463,7 +6550,6 @@ mod_network_reset() {
  echo 'Базовая ОС, SSH, пользователи, ключи и авторизация VPN сохраняются.'
  echo 'Это не заводской сброс. Неизвестные старые правила показываются, но автоматически не удаляются.'
  echo ''
-
  if [[ -f /etc/systemd/system/bobarev-router-v2.service ]]; then
   items+=('LAN_ROUTER' 'Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
  fi
@@ -6481,19 +6567,15 @@ mod_network_reset() {
   state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
   items+=("$unit" "Остановить службу [$state]" OFF)
  done
-
  ((${#items[@]})) || { echo 'Нет распознанных компонентов для безопасного отключения.'; return 0; }
-
  selected=$(whiptail --title 'Сброс сетевых настроек' --checklist \
   'Пробел — выбрать. Отключаются только выбранные маршрутизация, NAT/MASQUERADE и службы. Конфиги, пакеты, SSH и авторизация VPN сохраняются.' \
   24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
  [[ -n "$selected" ]] || return 0
-
  echo 'Будут отключены:'
  for item in $selected; do echo "  ${item//\"/}"; done
  nm_yes 'Подтвердить выбранный сброс?' || return 0
  br_snapshot || return 1
-
  for item in $selected; do
   item=${item//\"/}
   case "$item" in
@@ -6515,7 +6597,6 @@ mod_network_reset() {
     echo "Служба $item остановлена и отключена." ;;
   esac
  done
-
  echo 'Сброс завершён. Конфигурации сохранены для повторного включения.'
 }
 
@@ -8282,7 +8363,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.8.83 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.10.1 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -8394,7 +8475,7 @@ while true; do
         14) mod_desktop_apps; pause_enter ;;
         15) mod_hdmi_reset; pause_enter ;;
         16) mod_boot_diag; pause_enter ;;
-        17) mod_router_sbc; pause_enter ;;
+        17) mod_router_sbc ;;
         18) mod_backup_manager; pause_enter ;;
         19) mod_direct_wg_cascade ;;
         20) manage_cascade_hysteria_menu ;;

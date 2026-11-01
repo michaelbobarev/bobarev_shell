@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.11.3 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.11.4 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6389,7 +6389,7 @@ PY
         return 0
        fi
       else
-       echo -e "${C_YELLOW}За 60 секунд default в table 52 не появился.${C_RESET}"
+       echo -e "${C_YELLOW}За 20 секунд default в table 52 не появился.${C_RESET}"
        tailscale set --exit-node="" || true
        pause_enter
        return 0
@@ -6569,7 +6569,7 @@ ts_is_online() {
 
 ts_wait_exit_node() {
  local i
- for i in $(seq 1 60); do
+ for i in $(seq 1 20); do
   ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && return 0
   sleep 1
  done
@@ -6577,9 +6577,7 @@ ts_wait_exit_node() {
 }
 
 ts_exit_node_works() {
- local out
- out="$(/usr/bin/curl -4 --noproxy '*' --connect-timeout 8 --max-time 20 -fsS https://1.1.1.1/cdn-cgi/trace 2>/dev/null)" || return 1
- grep -q '^ip=' <<<"$out"
+ /usr/bin/curl -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1
 }
 
 manage_naive_mullvad_menu() {
@@ -6634,13 +6632,12 @@ EOF
        fi
       else
        echo -e "${C_YELLOW}Маршрут появился, но интернет через exit node не проходит.${C_RESET}"
-       echo 'Вероятные причины: недоступен выбранный Mullvad-узел, нет активной подписки Mullvad или блокируется UDP.'
-       echo 'Откатываю exit node, чтобы не потерять доступ к серверу.'
+       echo 'Откатываю exit node, чтобы сохранить доступ к серверу.'
        tailscale set --exit-node="" || true
        echo -e "${C_YELLOW}Exit node отключён. Сервер снова использует прямой WAN.${C_RESET}"
       fi
      else
-      echo -e "${C_YELLOW}За 60 секунд default в table 52 не появился.${C_RESET}"
+      echo -e "${C_YELLOW}За 20 секунд default в table 52 не появился.${C_RESET}"
       echo 'Откатываю exit node.'
       tailscale set --exit-node="" || true
       echo -e "${C_YELLOW}Exit node отключён.${C_RESET}"
@@ -8521,7 +8518,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.11.3 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.11.4 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

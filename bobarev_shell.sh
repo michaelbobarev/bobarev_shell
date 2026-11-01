@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.10.3 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.10.4 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -85,7 +85,7 @@ verify_sha256() {
     [ -z "$expected" ] && return 0
     local act_sha=$(sha256sum "$file" | awk '{print $1}')
     if [ "$act_sha" != "$expected" ]; then
-        echo -e "${C_RED}❌ Ошибка: контрольная сумма SHA256 файла $file не совпала!${C_RESET}"
+        echo -e "${C_RED} Ошибка: контрольная сумма SHA256 файла $file не совпала!${C_RESET}"
         return 1
     fi
     return 0
@@ -305,13 +305,13 @@ apply_wan_exit_nat() {
         iptables -t nat -A POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip"
         ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j SNAT --to-source $pub_ip"
         if [ "$quiet" != "true" ]; then
-            echo -e "${C_BLUE}ℹ️ Обнаружена маска /32 на интерфейсе $wan_dev: закреплена постоянная привязка SNAT ($pub_ip).${C_RESET}"
+            echo -e "${C_BLUE}ℹ Обнаружена маска /32 на интерфейсе $wan_dev: закреплена постоянная привязка SNAT ($pub_ip).${C_RESET}"
         fi
     else
         iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
         ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j MASQUERADE"
         if [ "$quiet" != "true" ]; then
-            echo -e "${C_BLUE}ℹ️ Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
+            echo -e "${C_BLUE}ℹ Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
         fi
     fi
     return 0
@@ -323,7 +323,7 @@ select_and_apply_routed_interfaces() {
 
     local candidate_ifs=$(ip -br link show 2>/dev/null | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' | grep -vE "^(lo|${wan_dev}|docker.*|veth.*|br-.*)$" || echo "")
     if [ -z "$candidate_ifs" ]; then
-        echo -e "${C_BLUE}ℹ️ Дополнительные интерфейсы не обнаружены (базовая маршрутизация для $wan_dev включена).${C_RESET}"
+        echo -e "${C_BLUE}ℹ Дополнительные интерфейсы не обнаружены (базовая маршрутизация для $wan_dev включена).${C_RESET}"
         return 0
     fi
 
@@ -343,7 +343,7 @@ select_and_apply_routed_interfaces() {
         for sif in $selected_ifs; do
             silent_run ufw route allow in on "$sif" out on "$wan_dev" comment "Route $sif to $wan_dev"
             silent_run ufw route allow in on "$wan_dev" out on "$sif" comment "Route $wan_dev to $sif"
-            echo -e "${C_BLUE}ℹ️ Разрешена сквозная маршрутизация: $sif <-> $wan_dev.${C_RESET}"
+            echo -e "${C_BLUE}ℹ Разрешена сквозная маршрутизация: $sif <-> $wan_dev.${C_RESET}"
         done
     fi
     return 0
@@ -431,13 +431,13 @@ TS_EOF
         flush_and_reload_nat
         clean_tailscale_iptables_chains
         if [ "$quiet" != "true" ]; then
-            echo -e "${C_GREEN}✅ Приоритет сетевых правил передан брандмауэру UFW (системный режим).${C_RESET}"
+            echo -e "${C_GREEN} Приоритет сетевых правил передан брандмауэру UFW (системный режим).${C_RESET}"
         fi
     else
         silent_run tailscale set --netfilter-mode=on
         flush_and_reload_nat
         if [ "$quiet" != "true" ]; then
-            echo -e "${C_BLUE}ℹ️ Приоритет сетевых правил оставлен Tailscale (встроенный авто-режим).${C_RESET}"
+            echo -e "${C_BLUE}ℹ Приоритет сетевых правил оставлен Tailscale (встроенный авто-режим).${C_RESET}"
         fi
     fi
     return 0
@@ -493,7 +493,7 @@ CAMO_EOF
 ensure_go_and_build_caddy_naive() {
     export DEBIAN_FRONTEND=noninteractive
     if ! command -v curl &>/dev/null || ! command -v wget &>/dev/null || ! command -v git &>/dev/null || ! command -v htpasswd &>/dev/null; then
-        echo -e "${C_BLUE}📦 Доустановка утилит сборки Caddy (git, openssl, apache2-utils)...${C_RESET}"
+        echo -e "${C_BLUE} Доустановка утилит сборки Caddy (git, openssl, apache2-utils)...${C_RESET}"
         apt-get update -qq
         apt-get install -yq curl wget git tar unzip openssl ca-certificates apache2-utils >/dev/null 2>&1
     fi
@@ -513,7 +513,7 @@ ensure_go_and_build_caddy_naive() {
     local build_tmp_dir=$(mktemp -d /root/.caddy-build-XXXXXX)
 
     if [ "$need_go" = true ]; then
-        echo -e "${C_BLUE}📦 Установка компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
+        echo -e "${C_BLUE} Установка компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
         local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
         local exp_sha="$GO_SHA256_AMD64"
         if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
@@ -527,7 +527,7 @@ ensure_go_and_build_caddy_naive() {
         local act_sha=$(sha256sum "$go_tmp" | awk '{print $1}')
         if [ "$act_sha" != "$exp_sha" ]; then
             rm -rf "$build_tmp_dir"
-            echo -e "${C_RED}❌ Ошибка: контрольная сумма SHA256 архива Go не совпала!${C_RESET}"
+            echo -e "${C_RED} Ошибка: контрольная сумма SHA256 архива Go не совпала!${C_RESET}"
             return 1
         fi
         rm -rf /usr/local/go
@@ -535,16 +535,16 @@ ensure_go_and_build_caddy_naive() {
         rm -f "$go_tmp"
         echo 'export PATH="/usr/local/go/bin:$PATH"' > /etc/profile.d/go.sh
         export PATH="/usr/local/go/bin:$PATH"
-        echo -e "${C_GREEN}✅ Компилятор Go ${GO_VERSION_PIN} успешно установлен.${C_RESET}"
+        echo -e "${C_GREEN} Компилятор Go ${GO_VERSION_PIN} успешно установлен.${C_RESET}"
     fi
 
     if [ -x "$CADDY_BIN" ] && { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
         rm -rf "$build_tmp_dir"
-        echo -e "${C_GREEN}✅ Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
+        echo -e "${C_GREEN} Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
         return 0
     fi
 
-    echo -e "${C_BLUE}🔨 Сборка Caddy ${CADDY_VERSION_PIN} с модулем klzgrad/forwardproxy@naive (занимает 3-10 минут)...${C_RESET}"
+    echo -e "${C_BLUE} Сборка Caddy ${CADDY_VERSION_PIN} с модулем klzgrad/forwardproxy@naive (занимает 3-10 минут)...${C_RESET}"
     export GOPATH="/root/go"
     export GOCACHE="/root/.cache/go-build"
     export GOTMPDIR="$build_tmp_dir"
@@ -566,16 +566,16 @@ ensure_go_and_build_caddy_naive() {
     unset GOTMPDIR TMPDIR
 
     if [ ! -f "$CADDY_BIN" ]; then
-        echo -e "${C_RED}❌ Ошибка сборки: бинарный файл $CADDY_BIN не был создан (проверьте наличие свободного места на диске df -h).${C_RESET}"
+        echo -e "${C_RED} Ошибка сборки: бинарный файл $CADDY_BIN не был создан (проверьте наличие свободного места на диске df -h).${C_RESET}"
         return 1
     fi
 
     chmod +x "$CADDY_BIN"
     if ! { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
-        echo -e "${C_RED}❌ Ошибка сборки: модуль http.handlers.forward_proxy не найден в Caddy.${C_RESET}"
+        echo -e "${C_RED} Ошибка сборки: модуль http.handlers.forward_proxy не найден в Caddy.${C_RESET}"
         return 1
     fi
-    echo -e "${C_GREEN}✅ Caddy ${CADDY_VERSION_PIN} + NaiveProxy успешно собран!${C_RESET}"
+    echo -e "${C_GREEN} Caddy ${CADDY_VERSION_PIN} + NaiveProxy успешно собран!${C_RESET}"
     return 0
 }
 
@@ -687,7 +687,7 @@ SVC_EOF
     fi
     sleep 1
     if ! systemctl is-active --quiet caddy.service; then
-        echo -e "${C_RED}❌ Ошибка запуска caddy.service! Проверка синтаксиса Caddyfile:${C_RESET}"
+        echo -e "${C_RED} Ошибка запуска caddy.service! Проверка синтаксиса Caddyfile:${C_RESET}"
         /usr/local/bin/caddy validate --config "$CADDYFILE" 2>&1 || true
         journalctl -u caddy.service -n 10 --no-pager 2>/dev/null || true
     fi
@@ -707,7 +707,7 @@ add_or_update_naive_user() {
 
     local b_hash=$(printf '%s\n' "$u_pass" | htpasswd -niBC 12 "$u_name" 2>/dev/null | cut -d: -f2)
     if [ -z "$b_hash" ]; then
-        echo -e "${C_RED}❌ Не удалось создать bcrypt-хеш пароля.${C_RESET}"
+        echo -e "${C_RED} Не удалось создать bcrypt-хеш пароля.${C_RESET}"
         return 1
     fi
 
@@ -722,7 +722,7 @@ add_or_update_naive_user() {
 
 delete_naive_user_interactive() {
     if [ ! -s "$NAIVE_PASS_FILE" ]; then
-        echo -e "${C_YELLOW}⚠️ Список пользователей NaiveProxy пуст.${C_RESET}"
+        echo -e "${C_YELLOW} Список пользователей NaiveProxy пуст.${C_RESET}"
         return 0
     fi
 
@@ -735,7 +735,7 @@ delete_naive_user_interactive() {
     done < "$NAIVE_PASS_FILE"
 
     if [ "$count" -eq 0 ]; then
-        echo -e "${C_YELLOW}⚠️ Пользователи не найдены.${C_RESET}"
+        echo -e "${C_YELLOW} Пользователи не найдены.${C_RESET}"
         return 0
     fi
 
@@ -743,7 +743,7 @@ delete_naive_user_interactive() {
     local box_h=$((list_h + 8))
     local del_u=""
     if ! smart_menu "Удаление пользователя NaiveProxy" "Выберите пользователя для удаления:" $box_h $WT_WIDTH $list_h "del_u" "${menu_items[@]}" || [ -z "$del_u" ]; then
-        echo -e "${C_YELLOW}↩️ Удаление отменено.${C_RESET}"
+        echo -e "${C_YELLOW} Удаление отменено.${C_RESET}"
         return 0
     fi
 
@@ -751,13 +751,13 @@ delete_naive_user_interactive() {
         sed -i "/^${del_u}:/d" "$NAIVE_USERS_FILE" 2>/dev/null || true
         sed -i "/^${del_u}:/d" "$NAIVE_PASS_FILE" 2>/dev/null || true
         render_naive_caddyfile
-        echo -e "${C_GREEN}✅ Пользователь '$del_u' успешно удален, конфигурация Caddy перезагружена без обрыва связи!${C_RESET}"
+        echo -e "${C_GREEN} Пользователь '$del_u' успешно удален, конфигурация Caddy перезагружена без обрыва связи!${C_RESET}"
     fi
 }
 
 manage_naive_users_menu() {
     if [ ! -f "$CADDYFILE" ]; then
-        echo -e "${C_YELLOW}⚠️ Сначала настройте Сервер 1 (Вход в РФ).${C_RESET}"
+        echo -e "${C_YELLOW} Сначала настройте Сервер 1 (Вход в РФ).${C_RESET}"
         return 0
     fi
 
@@ -768,10 +768,10 @@ manage_naive_users_menu() {
 
         local u_choice
         if ! smart_menu "Управление пользователями NaiveProxy" "\nАктивных пользователей: $u_cnt\nВыберите действие:" 15 $WT_WIDTH 4 "u_choice" \
-        "1" "➕ Добавить или изменить пользователя" \
-        "2" "🗑️ Удалить пользователя из списка" \
-        "3" "📋 Показать ссылки всех пользователей" \
-        "0" "🔙 Вернуться назад" || [ "$u_choice" = "0" ]; then
+        "1" " Добавить или изменить пользователя" \
+        "2" " Удалить пользователя из списка" \
+        "3" " Показать ссылки всех пользователей" \
+        "0" " Вернуться назад" || [ "$u_choice" = "0" ]; then
             break
         fi
 
@@ -788,7 +788,7 @@ manage_naive_users_menu() {
                     if [ "$MODULE_CANCELED" = false ] && [ -n "$new_p" ]; then
                         add_or_update_naive_user "$new_u" "$new_p"
                         render_naive_caddyfile
-                        echo -e "${C_GREEN}✅ Пользователь $new_u сохранен, конфигурация Caddy обновлена!${C_RESET}"
+                        echo -e "${C_GREEN} Пользователь $new_u сохранен, конфигурация Caddy обновлена!${C_RESET}"
                         print_naive_shadowrocket_links
                     fi
                 fi
@@ -928,7 +928,7 @@ TUNE_EOF
 
 print_naive_shadowrocket_links() {
     if [ ! -f /etc/default/bobarev-cascade ] || [ ! -s "$NAIVE_PASS_FILE" ]; then
-        echo -e "${C_YELLOW}⚠️ Пользователи NaiveProxy еще не созданы или Сервер 1 не настроен.${C_RESET}"
+        echo -e "${C_YELLOW} Пользователи NaiveProxy еще не созданы или Сервер 1 не настроен.${C_RESET}"
         return 0
     fi
     # shellcheck disable=SC1091
@@ -940,7 +940,7 @@ print_naive_shadowrocket_links() {
         show_real=true
     fi
 
-    echo -e "\n${C_CYAN}📋 === ГОТОВЫЕ ССЫЛКИ ДЛЯ SHADOWROCKET ===${C_RESET}"
+    echo -e "\n${C_CYAN} === ГОТОВЫЕ ССЫЛКИ ДЛЯ SHADOWROCKET ===${C_RESET}"
     while IFS=: read -r u p; do
         [ -z "$u" ] || [ -z "$p" ] && continue
         local disp_p="********"
@@ -949,14 +949,14 @@ print_naive_shadowrocket_links() {
             disp_p="$p"
             b64_str=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64)
         fi
-        echo -e "\n👤 Пользователь: ${C_BOLD}${u}${C_RESET} (Сервер: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
-        echo -e "  • ${C_GREEN}🚀 ОСНОВНАЯ ССЫЛКА HTTP/2 (Мультиплексирование в 1 клик, рекомендуется для YouTube и стриминга):${C_RESET}"
+        echo -e "\n Пользователь: ${C_BOLD}${u}${C_RESET} (Сервер: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
+        echo -e "  • ${C_GREEN} ОСНОВНАЯ ССЫЛКА HTTP/2 (Мультиплексирование в 1 клик, рекомендуется для YouTube и стриминга):${C_RESET}"
         echo -e "    ${C_BOLD}${C_GREEN}http2://${b64_str}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
         echo -e "  • ${C_BLUE}Резервная ссылка HTTPS + Padding (классический формат, требует ручного включения HTTP2 в TLS):${C_RESET}"
         echo -e "    ${C_BLUE}https://${u}:${disp_p}@${dom}:443?padding=true#${dom}-${u}${C_RESET}"
     done < "$NAIVE_PASS_FILE"
 
-    echo -e "\n${C_BLUE}💡 Почему основная ссылка http2:// работает быстрее и стабильнее чем https://:${C_RESET}"
+    echo -e "\n${C_BLUE} Почему основная ссылка http2:// работает быстрее и стабильнее чем https://:${C_RESET}"
     echo -e "  • Схема ${C_BOLD}http2://${C_RESET} жестко фиксирует протокол ${C_GREEN}HTTP/2${C_RESET} в самой ссылке — тумблер в Shadowrocket никогда не выключается сам!"
     echo -e "  • Все видеопотоки YouTube и Apple Music идут внутри одного постоянного мультиплексированного TLS-соединения без пауз."
 }
@@ -1058,7 +1058,7 @@ RU_SVC_EOF
 
 
 setup_hybrid_wg_routing() {
-    echo -e "${C_CYAN}🔒 === НАСТРОЙКА ГИБРИДНОГО ШЛЮЗА: NAIVEPROXY + TAILSCALE EXIT NODE -> WG0 ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА ГИБРИДНОГО ШЛЮЗА: NAIVEPROXY + TAILSCALE EXIT NODE -> WG0 ===${C_RESET}"
     ensure_wg_kernel_modules
     
     local ssh_p="22"
@@ -1100,14 +1100,14 @@ setup_hybrid_wg_routing() {
     rm -f "$tmp_wg"
 
     if [ -z "$priv" ] || [ -z "$addr" ] || [ -z "$pub" ] || [ -z "$ep" ]; then
-        echo -e "${C_RED}❌ Ошибка: В введенной конфигурации отсутствуют обязательные поля (PrivateKey, Address, PublicKey или Endpoint)!${C_RESET}"
+        echo -e "${C_RED} Ошибка: В введенной конфигурации отсутствуют обязательные поля (PrivateKey, Address, PublicKey или Endpoint)!${C_RESET}"
         return 1
     fi
 
     local psk_line=""
     [ -n "$psk" ] && psk_line="PresharedKey = $psk"
 
-    echo -e "${C_BLUE}⚙️ Формирование безопасного профиля /etc/wireguard/wg0.conf с FwMark = 51820...${C_RESET}"
+    echo -e "${C_BLUE} Формирование безопасного профиля /etc/wireguard/wg0.conf с FwMark = 51820...${C_RESET}"
     mkdir -p /etc/wireguard
     cat << EOF > /etc/wireguard/wg0.conf
 [Interface]
@@ -1187,12 +1187,12 @@ PersistentKeepalive = $keepalive
 EOF
     chmod 600 /etc/wireguard/wg0.conf
 
-    echo -e "${C_BLUE}🚀 Запуск и включение автозагрузки WireGuard (wg0)...${C_RESET}"
+    echo -e "${C_BLUE} Запуск и включение автозагрузки WireGuard (wg0)...${C_RESET}"
     silent_run systemctl daemon-reload
     systemctl reset-failed wg-quick@wg0 2>/dev/null || true
     systemctl enable wg-quick@wg0 >/dev/null 2>&1 || true
     if ! systemctl restart wg-quick@wg0; then
-        echo -e "${C_YELLOW}⚠️ Повторная инициализация интерфейса wg0...${C_RESET}"
+        echo -e "${C_YELLOW} Повторная инициализация интерфейса wg0...${C_RESET}"
         ip link del dev wg0 2>/dev/null || true
         systemctl restart wg-quick@wg0
     fi
@@ -1218,7 +1218,7 @@ EOF
         systemctl restart caddy.service || true
     fi
 
-    echo -e "${C_BLUE}⚡ Проверка подключения и внешнего IP...${C_RESET}"
+    echo -e "${C_BLUE} Проверка подключения и внешнего IP...${C_RESET}"
     local test_ip=""
     for i in {1..5}; do
         test_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
@@ -1228,7 +1228,7 @@ EOF
     [ -z "$test_ip" ] && test_ip=$(curl -4 -s --max-time 5 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте пир WireGuard")
 
     echo -e "
-${C_GREEN}✅ Гибридный шлюз успешно активирован!${C_RESET}"
+${C_GREEN} Гибридный шлюз успешно активирован!${C_RESET}"
     echo -e "  • Исходящий IP туннеля (WireGuard wg0): ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     echo -e "  • Клиенты NaiveProxy (Shadowrocket) и Tailscale Exit Node выходят в интернет через: ${C_BOLD}wg0${C_RESET}"
     echo -e "  • Входящие подключения к серверу и SSH защищены и работают напрямую через: ${C_BOLD}ens3${C_RESET}"
@@ -1236,7 +1236,7 @@ ${C_GREEN}✅ Гибридный шлюз успешно активирован!
 }
 
 disable_hybrid_wg_routing() {
-    echo -e "${C_YELLOW}🛑 Отключение туннеля wg0 и возврат к прямому выходу в интернет...${C_RESET}"
+    echo -e "${C_YELLOW} Отключение туннеля wg0 и возврат к прямому выходу в интернет...${C_RESET}"
     silent_run systemctl stop wg-quick@wg0
     silent_run systemctl disable wg-quick@wg0
     silent_run wg-quick down wg0 2>/dev/null || true
@@ -1267,7 +1267,7 @@ disable_hybrid_wg_routing() {
     if systemctl is-active --quiet caddy.service 2>/dev/null; then
         systemctl restart caddy.service || true
     fi
-    echo -e "${C_GREEN}✅ Туннель wg0 отключен. NaiveProxy переведен на прямой выход в интернет.${C_RESET}"
+    echo -e "${C_GREEN} Туннель wg0 отключен. NaiveProxy переведен на прямой выход в интернет.${C_RESET}"
 }
 
 setup_standalone_naive() {
@@ -1301,21 +1301,21 @@ setup_standalone_naive() {
 
         local sc_choice=""
         if [ "$is_configured" = true ]; then
-            if ! smart_menu "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" "
+            if ! smart_menu " Автономный NaiveProxy (+ WG Dual-Gateway)" "
 Статус: $c_state
 Активных пользователей: $u_cnt
-Выберите действие:" 18 $WT_WIDTH 6 "sc_choice"             "1" "📋 Показать ссылки Shadowrocket"             "2" "👤 Управление пользователями"             "3" "🚀 Подключить / Обновить туннель WireGuard (wg0 -> Выход)"             "4" "🌍 Переключить на прямой выход в интернет (отключить wg0)"             "5" "🔧 Перенастроить домен и NaiveProxy (без изменения выхода)"             "6" "🛑 Остановить и удалить NaiveProxy"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+Выберите действие:" 18 $WT_WIDTH 6 "sc_choice"             "1" " Показать ссылки Shadowrocket"             "2" " Управление пользователями"             "3" " Подключить / Обновить туннель WireGuard (wg0 -> Выход)"             "4" " Переключить на прямой выход в интернет (отключить wg0)"             "5" " Перенастроить домен и NaiveProxy (без изменения выхода)"             "6" " Остановить и удалить NaiveProxy"             "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
         else
-            if ! smart_menu "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" "
+            if ! smart_menu " Автономный NaiveProxy (+ WG Dual-Gateway)" "
 Статус: $c_state
 
 Поддерживает 2 режима выхода:
  • Прямой выход в интернет с этого VPS.
  • WireGuard wg0 — отдельное дополнение после настройки NaiveProxy.
 
-Выберите действие:" 16 $WT_WIDTH 2 "sc_choice"             "1" "🚀 Настроить автономный NaiveProxy (прямой выход)"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+Выберите действие:" 16 $WT_WIDTH 2 "sc_choice"             "1" " Настроить автономный NaiveProxy (прямой выход)"             "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
             [ "$sc_choice" = "1" ] && sc_choice="5"
@@ -1339,10 +1339,10 @@ setup_standalone_naive() {
                 pause_enter
                 ;;
             5)
-                echo -e "${C_CYAN}🌐 === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
+                echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
 
                 if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
-                    echo -e "${C_YELLOW}⚠️ Освобождение портов 80/443 от предыдущих каскадных служб (Hysteria/Xray/DERP)...${C_RESET}"
+                    echo -e "${C_YELLOW} Освобождение портов 80/443 от предыдущих каскадных служб (Hysteria/Xray/DERP)...${C_RESET}"
                     silent_run systemctl stop hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
                     silent_run systemctl disable hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
                 fi
@@ -1422,12 +1422,12 @@ EOF
                     silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
                     silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
                     silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
-                    echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
+                    echo -e "${C_GREEN} Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
                 fi
 
-                echo -e "${C_BLUE}ℹ️ Режим выхода сохранён: ${cur_out}. WireGuard wg0 настраивается отдельно через пункт 3.${C_RESET}"
+                echo -e "${C_BLUE}ℹ Режим выхода сохранён: ${cur_out}. WireGuard wg0 настраивается отдельно через пункт 3.${C_RESET}"
 
-                echo -e "${C_GREEN}✅ Настройка автономного NaiveProxy успешно завершена!${C_RESET}"
+                echo -e "${C_GREEN} Настройка автономного NaiveProxy успешно завершена!${C_RESET}"
                 print_naive_shadowrocket_links
                 pause_enter
                 ;;
@@ -1439,7 +1439,7 @@ EOF
                     rm -f /etc/caddy/Caddyfile /etc/default/bobarev-cascade
                     rm -rf "$NAIVE_DIR" "$WEBROOT" "$LOG_DIR"
                     silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN}✅ Служба NaiveProxy полностью остановлена и удалена.${C_RESET}"
+                    echo -e "${C_GREEN} Служба NaiveProxy полностью остановлена и удалена.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -1449,7 +1449,7 @@ EOF
 
 
 setup_cascade_server1_ru() {
-    echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
     if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
         return 0
     fi
@@ -1486,20 +1486,20 @@ setup_cascade_server1_ru() {
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
 
     local ts_peers=$(tailscale status 2>/dev/null | awk 'NR>1 {print $1 " (" $2 ")"}' | tr '\n' ' ' || echo "")
-    [ -n "$ts_peers" ] && echo -e "${C_BLUE}ℹ️ Доступные узлы в вашей сети Tailscale: $ts_peers${C_RESET}"
+    [ -n "$ts_peers" ] && echo -e "${C_BLUE}ℹ Доступные узлы в вашей сети Tailscale: $ts_peers${C_RESET}"
 
     local exit_ts_ip=""
     prompt_default "4/4. Введите Tailscale IP вашего Зарубежного Сервера 2 (например, 100.x.y.z):" "${saved_exit:-}" exit_ts_ip
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
 
     if is_derp_active; then
-        echo -e "${C_YELLOW}⚠️ Внимание: служба личного DERP на порту 443 остановлена, так как порт 443 передается NaiveProxy (Caddy).${C_RESET}"
+        echo -e "${C_YELLOW} Внимание: служба личного DERP на порту 443 остановлена, так как порт 443 передается NaiveProxy (Caddy).${C_RESET}"
         silent_run systemctl stop derper.service
         silent_run systemctl disable derper.service
     fi
 
     if is_wg_cascade_active; then
-        echo -e "${C_BLUE}ℹ️ Отключение прямого моста wg-cascade (переход на Tailscale-маршрут)...${C_RESET}"
+        echo -e "${C_BLUE}ℹ Отключение прямого моста wg-cascade (переход на Tailscale-маршрут)...${C_RESET}"
         silent_run systemctl stop wg-quick@wg-cascade.service
         silent_run systemctl disable wg-quick@wg-cascade.service
     fi
@@ -1529,16 +1529,16 @@ EOF
         silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
         silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
         silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
-        echo -e "${C_GREEN}✅ Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
+        echo -e "${C_GREEN} Порты 80/tcp, 443/tcp и 443/udp открыты в UFW.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN}✅ Сервер 1 (Вход в РФ на базе NaiveProxy + Tailscale [MTU 1280, MSS 1140]) успешно настроен и запущен!${C_RESET}"
+    echo -e "${C_GREEN} Сервер 1 (Вход в РФ на базе NaiveProxy + Tailscale [MTU 1280, MSS 1140]) успешно настроен и запущен!${C_RESET}"
     print_naive_shadowrocket_links
 }
 
 ensure_warp_installed_and_configured() {
     if ! command -v wg &>/dev/null || ! command -v iptables &>/dev/null || ! command -v curl &>/dev/null; then
-        echo -e "${C_BLUE}📦 Установка пакетов wireguard-tools, iptables и curl...${C_RESET}"
+        echo -e "${C_BLUE} Установка пакетов wireguard-tools, iptables и curl...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -yq wireguard-tools iptables curl >/dev/null 2>&1
@@ -1551,7 +1551,7 @@ ensure_warp_installed_and_configured() {
     fi
 
     if [ ! -x /usr/local/bin/wgcf ]; then
-        echo -e "${C_BLUE}⬇️ Скачивание утилиты wgcf для генерации профиля Cloudflare WARP...${C_RESET}"
+        echo -e "${C_BLUE} Скачивание утилиты wgcf для генерации профиля Cloudflare WARP...${C_RESET}"
 
         local wgcf_sha=""
         case "$wgcf_arch" in
@@ -1567,7 +1567,7 @@ ensure_warp_installed_and_configured() {
 
         if [ -n "$wgcf_sha" ]; then
             if ! verify_sha256 "/usr/local/bin/wgcf" "$wgcf_sha"; then
-                echo -e "${C_RED}❌ Ошибка: SHA256 для wgcf не совпал! Файл удален.${C_RESET}"
+                echo -e "${C_RED} Ошибка: SHA256 для wgcf не совпал! Файл удален.${C_RESET}"
                 rm -f /usr/local/bin/wgcf
                 return 1
             fi
@@ -1578,7 +1578,7 @@ ensure_warp_installed_and_configured() {
     mkdir -p /etc/wireguard
     local need_patch=false
     if [ ! -f /etc/wireguard/warp.conf ] || prompt_yn "Профиль /etc/wireguard/warp.conf уже существует. Сгенерировать новый профиль WARP?" "false"; then
-        echo -e "${C_BLUE}🔑 Регистрация аккаунта Cloudflare WARP и создание конфигурации...${C_RESET}"
+        echo -e "${C_BLUE} Регистрация аккаунта Cloudflare WARP и создание конфигурации...${C_RESET}"
         (
             cd /root
             rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null || true
@@ -1646,14 +1646,14 @@ EOF
 }
 
 setup_cascade_server2_warp() {
-    echo -e "${C_CYAN}🌍 === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
     local exit_choice=""
     if ! smart_menu "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" "\nКак выпускать трафик из Tailscale в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" "☁️ Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
+    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
+    "2" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
         return 0
     fi
 
@@ -1672,9 +1672,9 @@ EOF
     apply_foreign_exit_mode "$exit_mode"
 
     local my_ts_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "100.x.y.z")
-    echo -e "${C_GREEN}✅ Сервер 2 (Зарубежный выход Tailscale, режим: $exit_mode) успешно запущен!${C_RESET}"
-    echo -e "${C_BLUE}📌 Ваш Tailscale IP этого сервера: ${C_BOLD}${my_ts_ip}${C_RESET}"
-    echo -e "${C_YELLOW}⚠️ Не забудьте в админ-панели Tailscale (https://login.tailscale.com/admin/machines) включить галочку 'Use as exit node' для этого сервера, а на Сервере 1 (РФ) указать IP ${my_ts_ip}!${C_RESET}"
+    echo -e "${C_GREEN} Сервер 2 (Зарубежный выход Tailscale, режим: $exit_mode) успешно запущен!${C_RESET}"
+    echo -e "${C_BLUE} Ваш Tailscale IP этого сервера: ${C_BOLD}${my_ts_ip}${C_RESET}"
+    echo -e "${C_YELLOW} Не забудьте в админ-панели Tailscale (https://login.tailscale.com/admin/machines) включить галочку 'Use as exit node' для этого сервера, а на Сервере 1 (РФ) указать IP ${my_ts_ip}!${C_RESET}"
 }
 
 manage_cascade_naive_ts_warp() {
@@ -1701,13 +1701,13 @@ manage_cascade_naive_ts_warp() {
 
         local c_choice
         if ! smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 "c_choice" \
-        "1" "🚀 Сервер 1 (РФ): NaiveProxy -> Tailscale" \
-        "2" "🌍 Сервер 2 (Зарубеж): Tailscale -> Выход" \
-        "3" "👤 Управление пользователями NaiveProxy" \
-        "4" "📋 Показать ссылки Shadowrocket" \
-        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
-        "6" "🛑 Остановить компоненты каскада" \
-        "0" "🔙 Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
+        "1" " Сервер 1 (РФ): NaiveProxy -> Tailscale" \
+        "2" " Сервер 2 (Зарубеж): Tailscale -> Выход" \
+        "3" " Управление пользователями NaiveProxy" \
+        "4" " Показать ссылки Shadowrocket" \
+        "5" " Переключить выход: Чистый IP <-> WARP" \
+        "6" " Остановить компоненты каскада" \
+        "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -1738,7 +1738,7 @@ manage_cascade_naive_ts_warp() {
                     silent_run tailscale set --exit-node=
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /etc/wireguard/wg-cascade.conf
                     silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN}✅ Службы каскада остановлены и отключены.${C_RESET}"
+                    echo -e "${C_GREEN} Службы каскада остановлены и отключены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -1779,13 +1779,13 @@ check_required_ports_free() {
             local proto=$(echo "$line" | awk '{print $1}')
             local proc_info=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "ядерный модуль / неизвестный процесс")
             local pid_info=$(echo "$line" | grep -oP 'pid=\K[0-9]+' || echo "-")
-            echo -e "${C_RED}❌ Внимание: Порт ${p}/${proto} уже занят сторонним процессом '${proc_info}' (PID: ${pid_info})!${C_RESET}"
+            echo -e "${C_RED} Внимание: Порт ${p}/${proto} уже занят сторонним процессом '${proc_info}' (PID: ${pid_info})!${C_RESET}"
             conflict_found=true
         fi
     done
 
     if [ "$conflict_found" = true ]; then
-        echo -e "${C_YELLOW}⚠️ Пожалуйста, освободите указанные порты (остановите/удалите конфликтующий процесс) и запустите настройку заново.${C_RESET}"
+        echo -e "${C_YELLOW} Пожалуйста, освободите указанные порты (остановите/удалите конфликтующий процесс) и запустите настройку заново.${C_RESET}"
         return 1
     fi
     return 0
@@ -1795,7 +1795,7 @@ ensure_udp2raw_installed() {
     if [ -x "$UDP2RAW_BIN" ]; then
         return 0
     fi
-    echo -e "${C_BLUE}⬇️ Скачивание и установка движка обфускации заголовков udp2raw...${C_RESET}"
+    echo -e "${C_BLUE} Скачивание и установка движка обфускации заголовков udp2raw...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -yq curl wget tar iptables
@@ -1805,7 +1805,7 @@ ensure_udp2raw_installed() {
 
     if ! wget -q --tries=3 --timeout=30 "$u2r_url" -O "${tmp_u2r}/udp2raw.tar.gz"; then
         rm -rf "$tmp_u2r"
-        echo -e "${C_RED}❌ Ошибка скачивания архива udp2raw с GitHub.${C_RESET}"
+        echo -e "${C_RED} Ошибка скачивания архива udp2raw с GitHub.${C_RESET}"
         return 1
     fi
 
@@ -1833,7 +1833,7 @@ ensure_udp2raw_installed() {
         chmod +x "$UDP2RAW_BIN"
     fi
     rm -rf "$tmp_u2r"
-    echo -e "${C_GREEN}✅ Движок побитовой маскировки udp2raw успешно установлен.${C_RESET}"
+    echo -e "${C_GREEN} Движок побитовой маскировки udp2raw успешно установлен.${C_RESET}"
     return 0
 }
 
@@ -1841,7 +1841,7 @@ ensure_hysteria_installed() {
     if [ -x "/usr/local/bin/hysteria" ]; then
         return 0
     fi
-    echo -e "${C_BLUE}⬇️ Скачивание и установка Hysteria 2...${C_RESET}"
+    echo -e "${C_BLUE} Скачивание и установка Hysteria 2...${C_RESET}"
     local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     local h_arch="amd64"
     if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
@@ -1850,11 +1850,11 @@ ensure_hysteria_installed() {
 
     local h_url="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${h_arch}"
     if ! curl -fsSL "$h_url" -o /usr/local/bin/hysteria; then
-        echo -e "${C_RED}❌ Ошибка скачивания Hysteria!${C_RESET}"
+        echo -e "${C_RED} Ошибка скачивания Hysteria!${C_RESET}"
         return 1
     fi
     chmod +x /usr/local/bin/hysteria
-    echo -e "${C_GREEN}✅ Hysteria 2 успешно установлена.${C_RESET}"
+    echo -e "${C_GREEN} Hysteria 2 успешно установлена.${C_RESET}"
     return 0
 }
 
@@ -1944,7 +1944,7 @@ apply_foreign_exit_mode() {
     done
 
     if [ "$exit_mode" = "direct" ]; then
-        echo -e "${C_BLUE}🌍 Включение режима ПРЯМОГО ВЫХОДА (Чистый IP зарубежного сервера без WARP)...${C_RESET}"
+        echo -e "${C_BLUE} Включение режима ПРЯМОГО ВЫХОДА (Чистый IP зарубежного сервера без WARP)...${C_RESET}"
         silent_run systemctl stop wg-quick@warp.service
         silent_run systemctl disable wg-quick@warp.service
         ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
@@ -1971,7 +1971,7 @@ apply_foreign_exit_mode() {
             silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'WAN Direct to Tailscale'
         fi
     else
-        echo -e "${C_BLUE}☁️ Включение режима CLOUDFLARE WARP на выходе Зарубежного сервера...${C_RESET}"
+        echo -e "${C_BLUE} Включение режима CLOUDFLARE WARP на выходе Зарубежного сервера...${C_RESET}"
         ensure_warp_installed_and_configured
         ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
@@ -2038,8 +2038,8 @@ toggle_foreign_warp_menu() {
     [ "$cur_mode" = "warp" ] && def_item="2"
 
     if ! smart_menu "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" "\nТекущий режим выхода: $cur_human\n\nРаботает для всех каскадов (WG-мост, Hysteria 2, Xray REALITY и Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 "m_choice" \
-    "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" "☁️ Cloudflare WARP (Маскировка выходного IP под Cloudflare)"; then
+    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
+    "2" " Cloudflare WARP (Маскировка выходного IP под Cloudflare)"; then
         return 0
     fi
 
@@ -2052,11 +2052,11 @@ toggle_foreign_warp_menu() {
     [ -z "$wan_dev" ] && wan_dev="ens3"
     if [ "$target_mode" = "direct" ]; then
         local my_ip=$(curl -4 -s --interface "$wan_dev" --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-        echo -e "\n${C_GREEN}✅ WARP отключен! Теперь трафик (и из WG-моста, и из Tailscale) выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-Прямой IP сервера}${C_RESET}"
-        echo -e "${C_BLUE}💡 Подсказка: Без двойного шифрования WARP сайт speed.cloudflare.com и Speedtest работают на полной скорости канала!${C_RESET}"
+        echo -e "\n${C_GREEN} WARP отключен! Теперь трафик (и из WG-моста, и из Tailscale) выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-Прямой IP сервера}${C_RESET}"
+        echo -e "${C_BLUE} Подсказка: Без двойного шифрования WARP сайт speed.cloudflare.com и Speedtest работают на полной скорости канала!${C_RESET}"
     else
         local w_ip=$(curl -4 -s --interface warp --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-        echo -e "\n${C_GREEN}✅ Cloudflare WARP включен! Выходной IP каскада: ${C_BOLD}${w_ip:-Cloudflare WARP}${C_RESET}"
+        echo -e "\n${C_GREEN} Cloudflare WARP включен! Выходной IP каскада: ${C_BOLD}${w_ip:-Cloudflare WARP}${C_RESET}"
     fi
 }
 
@@ -2123,15 +2123,15 @@ EOF
     systemctl restart bobarev-udp2raw.service || true
     sleep 3
     if ! systemctl is-active --quiet bobarev-udp2raw.service; then
-        echo -e "${C_RED}❌ Служба udp2raw НЕ запустилась! Последние строки журнала:${C_RESET}"
+        echo -e "${C_RED} Служба udp2raw НЕ запустилась! Последние строки журнала:${C_RESET}"
         journalctl -u bobarev-udp2raw.service -n 15 --no-pager 2>/dev/null | sed "s/\x1b\[[0-9;]*m//g" || true
         return 1
     fi
-    echo -e "${C_GREEN}✅ Служба udp2raw запущена (режим: $obfs_mode).${C_RESET}"
+    echo -e "${C_GREEN} Служба udp2raw запущена (режим: $obfs_mode).${C_RESET}"
 }
 
 setup_direct_wg_server2_foreign() {
-    echo -e "${C_CYAN}🌍 === ШАГ 1: НАСТРОЙКА ЗАРУБЕЖНОГО СЕРВЕРА 2 (WG-BRIDGE + ANTI-DPI) ===${C_RESET}"
+    echo -e "${C_CYAN} === ШАГ 1: НАСТРОЙКА ЗАРУБЕЖНОГО СЕРВЕРА 2 (WG-BRIDGE + ANTI-DPI) ===${C_RESET}"
     enable_routing_optimizations || true
     apply_naive_tcp_tuning_profile "balanced"
 
@@ -2145,9 +2145,9 @@ setup_direct_wg_server2_foreign() {
 
     local obfs_choice=""
     if ! smart_menu "2/3. Защита заголовков WireGuard от ТСПУ" "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 "obfs_choice" \
-    "1" "🔒 FakeTCP Маскировка (Рекомендуется — полностью мимикрирует под TCP-поток)" \
-    "2" "🛡️ UDP-XOR Маскировка (Резервный вариант)" \
-    "3" "⚡ Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"; then
+    "1" " FakeTCP Маскировка (Рекомендуется — полностью мимикрирует под TCP-поток)" \
+    "2" " UDP-XOR Маскировка (Резервный вариант)" \
+    "3" " Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"; then
         return 0
     fi
 
@@ -2160,8 +2160,8 @@ setup_direct_wg_server2_foreign() {
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2" "\nКак выпускать трафик в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим в любой момент в Пункте 5 меню каскада):" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" "☁️ Через Cloudflare WARP (Скрывает IP сервера за IP Cloudflare)"; then
+    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
+    "2" " Через Cloudflare WARP (Скрывает IP сервера за IP Cloudflare)"; then
         return 0
     fi
 
@@ -2173,7 +2173,7 @@ setup_direct_wg_server2_foreign() {
         silent_run systemctl disable wg-quick@warp.service
     fi
 
-    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade и старых правил...${C_RESET}"
+    echo -e "${C_BLUE} Очистка предыдущих настроек моста wg-cascade и старых правил...${C_RESET}"
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade
     ip link del dev wg-cascade 2>/dev/null || true
@@ -2253,7 +2253,7 @@ EOF
     systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
     systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
     if ! systemctl restart wg-quick@wg-cascade.service; then
-        echo -e "${C_YELLOW}⚠️ Повторная инициализация интерфейса wg-cascade после принудительной зачистки...${C_RESET}"
+        echo -e "${C_YELLOW} Повторная инициализация интерфейса wg-cascade после принудительной зачистки...${C_RESET}"
         ip link del dev wg-cascade 2>/dev/null || true
         systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
         systemctl start wg-quick@wg-cascade.service
@@ -2307,29 +2307,29 @@ WG_BRIDGE_TOKEN_3="$bridge_token_3"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "\n${C_GREEN}✅ Зарубежный Сервер 2 (Мост wg-cascade [MTU 1280, MSS 1240, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "\n${C_CYAN}🔑 === ИНДИВИДУАЛЬНЫЕ ТОКЕНЫ ДЛЯ ПОДКЛЮЧЕНИЯ РОССИЙСКИХ СЕРВЕРОВ ===${C_RESET}"
-    echo -e "${C_YELLOW}💡 Используйте свой отдельный токен для каждого РФ-сервера, чтобы они работали одновременно без конфликта IP!${C_RESET}"
+    echo -e "\n${C_GREEN} Зарубежный Сервер 2 (Мост wg-cascade [MTU 1280, MSS 1240, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
+    echo -e "\n${C_CYAN} === ИНДИВИДУАЛЬНЫЕ ТОКЕНЫ ДЛЯ ПОДКЛЮЧЕНИЯ РОССИЙСКИХ СЕРВЕРОВ ===${C_RESET}"
+    echo -e "${C_YELLOW} Используйте свой отдельный токен для каждого РФ-сервера, чтобы они работали одновременно без конфликта IP!${C_RESET}"
     echo -e "\n  • ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
     echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_1}${C_RESET}"
     echo -e "\n  • ${C_BOLD}Токен #2 (для 2-го РФ-сервера, IP 10.200.200.3):${C_RESET}"
     echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_2}${C_RESET}"
     echo -e "\n  • ${C_BOLD}Токен #3 (резервный для 3-го РФ-сервера, IP 10.200.200.4):${C_RESET}"
     echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_3}${C_RESET}\n"
-    echo -e "${C_BLUE}📌 Как подключить РФ-серверы:${C_RESET}"
+    echo -e "${C_BLUE} Как подключить РФ-серверы:${C_RESET}"
     echo -e "  1. На первом РФ-сервере -> Пункт 19 -> Пункт 2 -> вставьте Токен #1."
     echo -e "  2. На втором РФ-сервере -> Пункт 19 -> Пункт 2 -> вставьте Токен #2."
 }
 
 setup_direct_wg_server1_ru() {
-    echo -e "${C_CYAN}🚀 === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY -> WG + ANTI-DPI) ===${C_RESET}"
+    echo -e "${C_CYAN} === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY -> WG + ANTI-DPI) ===${C_RESET}"
     if ! check_required_ports_free "ru" "80" "443" "51889"; then
         return 0
     fi
     enable_routing_optimizations || true
 
     if ! command -v wg &>/dev/null || ! command -v iptables &>/dev/null || ! command -v curl &>/dev/null || ! command -v python3 &>/dev/null; then
-        echo -e "${C_BLUE}📦 Установка пакетов wireguard-tools, iptables, curl и python3...${C_RESET}"
+        echo -e "${C_BLUE} Установка пакетов wireguard-tools, iptables, curl и python3...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -yq wireguard-tools iptables curl python3 >/dev/null 2>&1
@@ -2386,7 +2386,7 @@ except Exception:
     [ -z "$s1_tun_ip" ] && s1_tun_ip="10.200.200.2"
 
     if [ -z "${s2_ip:-}" ] || [ -z "${s2_port:-}" ] || [ -z "${s2_pub:-}" ] || [ -z "${s1_priv:-}" ] || [ -z "${psk:-}" ]; then
-        echo -e "${C_RED}❌ Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
+        echo -e "${C_RED} Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
         return 1
     fi
 
@@ -2399,7 +2399,7 @@ except Exception:
     local obfs_human="UDP-XOR"
     [ "$obfs_mode" = "faketcp" ] && obfs_human="FakeTCP"
     [ "$obfs_mode" = "none" ] && obfs_human="Чистый WireGuard (без udp2raw)"
-    echo -e "${C_BLUE}ℹ️ Режим маскировки взят из токена Сервера 2: ${obfs_human} (${obfs_mode}).${C_RESET}"
+    echo -e "${C_BLUE}ℹ Режим маскировки взят из токена Сервера 2: ${obfs_human} (${obfs_mode}).${C_RESET}"
     local n_dom=""
     prompt_default "2/4. Введите ваш домен на этом РФ-сервере (A-запись DNS):" "${saved_dom:-ru.yourdomain.com}" n_dom
     if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
@@ -2420,12 +2420,12 @@ except Exception:
         if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
         add_or_update_naive_user "$n_user" "$n_pass"
     else
-        echo -e "${C_GREEN}ℹ️ Существующие пользователи NaiveProxy сохранены!${C_RESET}"
+        echo -e "${C_GREEN}ℹ Существующие пользователи NaiveProxy сохранены!${C_RESET}"
     fi
 
     ensure_go_and_build_caddy_naive || return 1
 
-    echo -e "${C_BLUE}🧹 Очистка предыдущих настроек моста wg-cascade и старых маршрутов...${C_RESET}"
+    echo -e "${C_BLUE} Очистка предыдущих настроек моста wg-cascade и старых маршрутов...${C_RESET}"
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade
     ip link del dev wg-cascade 2>/dev/null || true
@@ -2520,7 +2520,7 @@ EOF
     systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
     systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
     if ! systemctl restart wg-quick@wg-cascade.service; then
-        echo -e "${C_YELLOW}⚠️ Повторная инициализация интерфейса wg-cascade после глубокой зачистки...${C_RESET}"
+        echo -e "${C_YELLOW} Повторная инициализация интерфейса wg-cascade после глубокой зачистки...${C_RESET}"
         ip link del dev wg-cascade 2>/dev/null || true
         systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
         systemctl start wg-quick@wg-cascade.service
@@ -2550,8 +2550,8 @@ EOF
     fi
     disable_ufw_strict_rpfilter
 
-    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1280, MSS 1240 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
-    echo -e "${C_BLUE}⚡ Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
+    echo -e "\n${C_GREEN} Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1280, MSS 1240 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
+    echo -e "${C_BLUE} Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
     for i in {1..10}; do
         ping -c 1 -W 1 10.200.200.1 >/dev/null 2>&1 || true
         if wg show wg-cascade latest-handshakes 2>/dev/null | grep -qE "[1-9][0-9]{2,}"; then
@@ -2632,7 +2632,7 @@ EOF
 }
 
 setup_cascade_hysteria_server2_foreign() {
-    echo -e "${C_CYAN}🌍 === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): HYSTERIA 2 -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): HYSTERIA 2 -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_hysteria_installed || return 1
     enable_routing_optimizations || true
     apply_naive_tcp_tuning_profile "balanced"
@@ -2650,8 +2650,8 @@ setup_cascade_hysteria_server2_foreign() {
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Hysteria 2)" "\nКак выпускать трафик из Hysteria 2 в интернет?" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" "☁️ Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)" \
-    "2" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"; then
+    "1" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)" \
+    "2" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"; then
         return 0
     fi
 
@@ -2690,7 +2690,7 @@ SVC_EOF
     sleep 2
 
     if ! systemctl is-active --quiet hysteria-server.service; then
-        echo -e "${C_RED}❌ Служба hysteria-server НЕ запустилась! Журнал ошибок:${C_RESET}"
+        echo -e "${C_RED} Служба hysteria-server НЕ запустилась! Журнал ошибок:${C_RESET}"
         journalctl -u hysteria-server.service -n 15 --no-pager || true
         return 1
     fi
@@ -2729,8 +2729,8 @@ SERVER_PUB_IPV6="$pub_ipv6"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "\n${C_GREEN}✅ Сервер 2 (Hysteria 2 [порт: $h_port/udp, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "\n${C_CYAN}🔑 ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
+    echo -e "\n${C_GREEN} Сервер 2 (Hysteria 2 [порт: $h_port/udp, выход: $exit_mode]) успешно запущен!${C_RESET}"
+    echo -e "\n${C_CYAN} ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
     echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
     echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}"
     if [ -n "$bridge_token_v6" ]; then
@@ -2741,7 +2741,7 @@ EOF
 }
 
 setup_cascade_hysteria_server1_ru() {
-    echo -e "${C_CYAN}🚀 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> HYSTERIA 2 ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> HYSTERIA 2 ===${C_RESET}"
     ensure_hysteria_installed || return 1
     enable_routing_optimizations || true
 
@@ -2764,7 +2764,7 @@ setup_cascade_hysteria_server1_ru() {
     IFS='|' read -r s2_ip s2_port s2_pass <<< "$decoded"
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ]; then
-        echo -e "${C_RED}❌ Ошибка: Неверный формат Токена Hysteria 2!${C_RESET}"
+        echo -e "${C_RED} Ошибка: Неверный формат Токена Hysteria 2!${C_RESET}"
         return 1
     fi
 
@@ -2788,14 +2788,14 @@ setup_cascade_hysteria_server1_ru() {
         if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
         add_or_update_naive_user "$n_user" "$n_pass"
     else
-        echo -e "${C_GREEN}ℹ️ Существующие пользователи NaiveProxy сохранены!${C_RESET}"
+        echo -e "${C_GREEN}ℹ Существующие пользователи NaiveProxy сохранены!${C_RESET}"
     fi
 
     ensure_go_and_build_caddy_naive || return 1
 
     # Отключаем перехват маршрутов от Каскада 1 (wg-cascade / udp2raw) и Tailscale Exit Node,
     # чтобы трафик шел строго по цепочке: Caddy (NaiveProxy) -> socks5://127.0.0.1:1080 (Hysteria 2 Client) -> Сервер 2
-    echo -e "${C_BLUE}🧹 Очистка конфликтующих маршрутов wg-cascade и старых экземпляров Hysteria...${C_RESET}"
+    echo -e "${C_BLUE} Очистка конфликтующих маршрутов wg-cascade и старых экземпляров Hysteria...${C_RESET}"
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service hysteria-server.service hysteria-client.service
     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade
@@ -2860,7 +2860,7 @@ SVC_EOF
     sleep 2
 
     if ! systemctl is-active --quiet hysteria-client.service; then
-        echo -e "${C_RED}❌ Служба hysteria-client НЕ запустилась! Журнал:${C_RESET}"
+        echo -e "${C_RED} Служба hysteria-client НЕ запустилась! Журнал:${C_RESET}"
         journalctl -u hysteria-client.service -n 15 --no-pager || true
         return 1
     fi
@@ -2886,12 +2886,12 @@ EOF
         silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
     fi
 
-    echo -e "${C_BLUE}⚡ Проверка выходного IP через локальный SOCKS5-мост Hysteria 2 (127.0.0.1:1080)...${C_RESET}"
+    echo -e "${C_BLUE} Проверка выходного IP через локальный SOCKS5-мост Hysteria 2 (127.0.0.1:1080)...${C_RESET}"
     local test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
     if [ -z "$test_ip" ]; then
         test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность UDP-порта ${s2_port} на Сервере 2")
     fi
-    echo -e "\n${C_GREEN}✅ Каскад 2 (NaiveProxy -> Hysteria 2 SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
+    echo -e "\n${C_GREEN} Каскад 2 (NaiveProxy -> Hysteria 2 SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "  • Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     print_naive_shadowrocket_links
 }
@@ -2911,15 +2911,15 @@ manage_cascade_hysteria_menu() {
         fi
 
         local c_choice
-        if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" "🌍 Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
-        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
-        "3" "👤 Управление пользователями NaiveProxy" \
-        "4" "📋 Показать ссылки Shadowrocket" \
-        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
-        "6" "🔑 Показать токен подключения" \
-        "7" "🛑 Остановить службу Hysteria 2" \
-        "0" "🔙 Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
+        if ! smart_menu " Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
+        "1" " Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
+        "2" " Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
+        "3" " Управление пользователями NaiveProxy" \
+        "4" " Показать ссылки Shadowrocket" \
+        "5" " Переключить выход: Чистый IP <-> WARP" \
+        "6" " Показать токен подключения" \
+        "7" " Остановить службу Hysteria 2" \
+        "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -2935,7 +2935,7 @@ manage_cascade_hysteria_menu() {
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${HYSTERIA_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN}🔑 Токены Hysteria 2 для подключения Сервера 1 (РФ):${C_RESET}\n"
+                        echo -e "${C_CYAN} Токены Hysteria 2 для подключения Сервера 1 (РФ):${C_RESET}\n"
                         echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
                         echo -e "    ${C_BOLD}${C_GREEN}${HYSTERIA_TOKEN}${C_RESET}\n"
                         if [ -n "${HYSTERIA_TOKEN_V6:-}" ]; then
@@ -2943,7 +2943,7 @@ manage_cascade_hysteria_menu() {
                             echo -e "    ${C_BOLD}${C_CYAN}${HYSTERIA_TOKEN_V6}${C_RESET}\n"
                         fi
                     else
-                        echo -e "${C_YELLOW}⚠️ Токен Hysteria 2 еще не создан на этом сервере.${C_RESET}"
+                        echo -e "${C_YELLOW} Токен Hysteria 2 еще не создан на этом сервере.${C_RESET}"
                     fi
                 fi
                 pause_enter
@@ -2957,7 +2957,7 @@ manage_cascade_hysteria_menu() {
                         sed -i 's/CASCADE_ROLE="ru_hysteria_entry"/CASCADE_ROLE="none"/' /etc/default/bobarev-cascade 2>/dev/null || true
                         render_naive_caddyfile 2>/dev/null || true
                     fi
-                    echo -e "${C_GREEN}✅ Службы Hysteria 2 остановлены и отключены.${C_RESET}"
+                    echo -e "${C_GREEN} Службы Hysteria 2 остановлены и отключены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -2973,7 +2973,7 @@ ensure_xray_installed() {
     if [ -x "/usr/local/bin/xray" ]; then
         return 0
     fi
-    echo -e "${C_BLUE}⬇️ Скачивание и установка Xray-core с официального репозитория XTLS...${C_RESET}"
+    echo -e "${C_BLUE} Скачивание и установка Xray-core с официального репозитория XTLS...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -yq curl wget unzip ca-certificates >/dev/null 2>&1
@@ -2989,7 +2989,7 @@ ensure_xray_installed() {
 
     if ! curl -fsSL "$x_url" -o "${tmp_xray}/xray.zip"; then
         rm -rf "$tmp_xray"
-        echo -e "${C_RED}❌ Ошибка скачивания архива Xray-core с GitHub.${C_RESET}"
+        echo -e "${C_RED} Ошибка скачивания архива Xray-core с GitHub.${C_RESET}"
         return 1
     fi
 
@@ -2999,11 +2999,11 @@ ensure_xray_installed() {
         chmod +x /usr/local/bin/xray
     else
         rm -rf "$tmp_xray"
-        echo -e "${C_RED}❌ Бинарник xray не найден в распакованном архиве!${C_RESET}"
+        echo -e "${C_RED} Бинарник xray не найден в распакованном архиве!${C_RESET}"
         return 1
     fi
     rm -rf "$tmp_xray"
-    echo -e "${C_GREEN}✅ Xray-core успешно установлен: $(/usr/local/bin/xray version 2>/dev/null | head -n 1 || echo "готов")${C_RESET}"
+    echo -e "${C_GREEN} Xray-core успешно установлен: $(/usr/local/bin/xray version 2>/dev/null | head -n 1 || echo "готов")${C_RESET}"
     return 0
 }
 
@@ -3186,7 +3186,7 @@ EOF
 }
 
 setup_cascade_xray_server2_foreign() {
-    echo -e "${C_CYAN}🌍 === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): XRAY REALITY -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): XRAY REALITY -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_xray_installed || return 1
     enable_routing_optimizations || true
     apply_naive_tcp_tuning_profile "balanced"
@@ -3202,7 +3202,7 @@ setup_cascade_xray_server2_foreign() {
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Xray REALITY)" "
-Как выпускать трафик из Xray в интернет?" 16 $WT_WIDTH 2 "exit_choice"     "1" "🌍 Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"     "2" "☁️ Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
+Как выпускать трафик из Xray в интернет?" 16 $WT_WIDTH 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"     "2" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
         return 0
     fi
 
@@ -3217,7 +3217,7 @@ setup_cascade_xray_server2_foreign() {
     local x_short_id=$(openssl rand -hex 8)
 
     if [ -z "$x_priv" ] || [ -z "$x_pub" ]; then
-        echo -e "${C_RED}❌ Ошибка генерации ключей x25519 через бинарник xray!${C_RESET}"
+        echo -e "${C_RED} Ошибка генерации ключей x25519 через бинарник xray!${C_RESET}"
         return 1
     fi
 
@@ -3231,7 +3231,7 @@ setup_cascade_xray_server2_foreign() {
     sleep 2
 
     if ! systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_RED}❌ Служба bobarev-xray НЕ запустилась! Журнал ошибок:${C_RESET}"
+        echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал ошибок:${C_RESET}"
         journalctl -u bobarev-xray.service -n 15 --no-pager || true
         return 1
     fi
@@ -3274,8 +3274,8 @@ SERVER_PUB_IPV6="$pub_ipv6"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "\n${C_GREEN}✅ Сервер 2 (Xray VLESS-REALITY [порт: $x_port/tcp, SNI: $x_sni, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "\n${C_CYAN}🔑 ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
+    echo -e "\n${C_GREEN} Сервер 2 (Xray VLESS-REALITY [порт: $x_port/tcp, SNI: $x_sni, выход: $exit_mode]) успешно запущен!${C_RESET}"
+    echo -e "\n${C_CYAN} ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
     echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
     echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}"
     if [ -n "$bridge_token_v6" ]; then
@@ -3286,7 +3286,7 @@ EOF
 }
 
 setup_cascade_xray_server1_ru() {
-    echo -e "${C_CYAN}🚀 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> XRAY REALITY ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> XRAY REALITY ===${C_RESET}"
     ensure_xray_installed || return 1
     enable_routing_optimizations || true
 
@@ -3311,7 +3311,7 @@ setup_cascade_xray_server1_ru() {
     IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni <<< "$decoded"
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_uuid" ] || [ -z "$s2_pub" ]; then
-        echo -e "${C_RED}❌ Ошибка: Неверный формат Токена Xray REALITY! Скопируйте свежий токен с Сервера 2.${C_RESET}"
+        echo -e "${C_RED} Ошибка: Неверный формат Токена Xray REALITY! Скопируйте свежий токен с Сервера 2.${C_RESET}"
         return 1
     fi
 
@@ -3335,12 +3335,12 @@ setup_cascade_xray_server1_ru() {
         if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
         add_or_update_naive_user "$n_user" "$n_pass"
     else
-        echo -e "${C_GREEN}ℹ️ Существующие пользователи NaiveProxy сохранены!${C_RESET}"
+        echo -e "${C_GREEN}ℹ Существующие пользователи NaiveProxy сохранены!${C_RESET}"
     fi
 
     ensure_go_and_build_caddy_naive || return 1
 
-    echo -e "${C_BLUE}🧹 Очистка конфликтующих служб и старых маршрутов...${C_RESET}"
+    echo -e "${C_BLUE} Очистка конфликтующих служб и старых маршрутов...${C_RESET}"
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade 2>/dev/null || true
@@ -3366,7 +3366,7 @@ setup_cascade_xray_server1_ru() {
     sleep 2
 
     if ! systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_RED}❌ Служба bobarev-xray (клиент) НЕ запустилась! Журнал:${C_RESET}"
+        echo -e "${C_RED} Служба bobarev-xray (клиент) НЕ запустилась! Журнал:${C_RESET}"
         journalctl -u bobarev-xray.service -n 15 --no-pager || true
         return 1
     fi
@@ -3390,13 +3390,13 @@ EOF
         silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
     fi
 
-    echo -e "${C_BLUE}⚡ Проверка выходного IP через локальный SOCKS5-мост Xray REALITY (127.0.0.1:10808)...${C_RESET}"
+    echo -e "${C_BLUE} Проверка выходного IP через локальный SOCKS5-мост Xray REALITY (127.0.0.1:10808)...${C_RESET}"
     local test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:10808 --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
     if [ -z "$test_ip" ]; then
         test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:10808 --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность TCP-порта ${s2_port} на Сервере 2")
     fi
     echo -e "
-${C_GREEN}✅ Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
+${C_GREEN} Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "  • Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     print_naive_shadowrocket_links
 }
@@ -3422,15 +3422,15 @@ manage_cascade_xray_menu() {
         fi
 
         local c_choice
-        if ! smart_menu "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" "🌍 Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
-        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
-        "3" "👤 Управление пользователями NaiveProxy" \
-        "4" "📋 Показать ссылки Shadowrocket" \
-        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
-        "6" "🔑 Показать токен подключения" \
-        "7" "🛑 Остановить службы Xray" \
-        "0" "🔙 Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
+        if ! smart_menu " Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
+        "1" " Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
+        "2" " Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
+        "3" " Управление пользователями NaiveProxy" \
+        "4" " Показать ссылки Shadowrocket" \
+        "5" " Переключить выход: Чистый IP <-> WARP" \
+        "6" " Показать токен подключения" \
+        "7" " Остановить службы Xray" \
+        "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -3446,7 +3446,7 @@ manage_cascade_xray_menu() {
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${XRAY_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN}🔑 Токены Xray REALITY для подключения Сервера 1 (РФ):${C_RESET}\n"
+                        echo -e "${C_CYAN} Токены Xray REALITY для подключения Сервера 1 (РФ):${C_RESET}\n"
                         echo -e "  • ${C_BOLD}Основной токен (IPv4):${C_RESET}"
                         echo -e "    ${C_BOLD}${C_GREEN}${XRAY_TOKEN}${C_RESET}\n"
                         if [ -n "${XRAY_TOKEN_V6:-}" ]; then
@@ -3454,7 +3454,7 @@ manage_cascade_xray_menu() {
                             echo -e "    ${C_BOLD}${C_CYAN}${XRAY_TOKEN_V6}${C_RESET}\n"
                         fi
                     else
-                        echo -e "${C_YELLOW}⚠️ Токен Xray REALITY еще не создан на этом сервере.${C_RESET}"
+                        echo -e "${C_YELLOW} Токен Xray REALITY еще не создан на этом сервере.${C_RESET}"
                     fi
                 fi
                 pause_enter
@@ -3468,7 +3468,7 @@ manage_cascade_xray_menu() {
                         sed -i 's/CASCADE_ROLE="ru_xray_entry"/CASCADE_ROLE="none"/' /etc/default/bobarev-cascade 2>/dev/null || true
                         render_naive_caddyfile 2>/dev/null || true
                     fi
-                    echo -e "${C_GREEN}✅ Службы Xray остановлены и отключены.${C_RESET}"
+                    echo -e "${C_GREEN} Службы Xray остановлены и отключены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -3499,15 +3499,15 @@ mod_direct_wg_cascade() {
         fi
 
         local dc_choice
-        if ! smart_menu "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" "\nСтатус моста: $d_status\nВыберите действие:" 18 $WT_WIDTH 7 "dc_choice" \
-        "1" "🌍 Сервер 2 (Зарубеж): WG-мост + Anti-DPI" \
-        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> WG-мост" \
-        "3" "👤 Управление пользователями NaiveProxy" \
-        "4" "📋 Показать ссылки Shadowrocket" \
-        "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
-        "6" "🔑 Показать токен подключения" \
-        "7" "🛑 Остановить каскад и мост" \
-        "0" "🔙 Вернуться в главное меню" || [ "$dc_choice" = "0" ]; then
+        if ! smart_menu " Каскад 1: NaiveProxy + WireGuard + WARP" "\nСтатус моста: $d_status\nВыберите действие:" 18 $WT_WIDTH 7 "dc_choice" \
+        "1" " Сервер 2 (Зарубеж): WG-мост + Anti-DPI" \
+        "2" " Сервер 1 (РФ): NaiveProxy -> WG-мост" \
+        "3" " Управление пользователями NaiveProxy" \
+        "4" " Показать ссылки Shadowrocket" \
+        "5" " Переключить выход: Чистый IP <-> WARP" \
+        "6" " Показать токен подключения" \
+        "7" " Остановить каскад и мост" \
+        "0" " Вернуться в главное меню" || [ "$dc_choice" = "0" ]; then
             break
         fi
 
@@ -3537,8 +3537,8 @@ mod_direct_wg_cascade() {
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${WG_BRIDGE_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN}🔑 Токены соединения Зарубежного Сервера 2 (Режим обфускации: ${WG_OBFS_MODE:-udp}):${C_RESET}"
-                        echo -e "${C_YELLOW}💡 Используйте отдельный токен для каждого РФ-сервера:${C_RESET}"
+                        echo -e "${C_CYAN} Токены соединения Зарубежного Сервера 2 (Режим обфускации: ${WG_OBFS_MODE:-udp}):${C_RESET}"
+                        echo -e "${C_YELLOW} Используйте отдельный токен для каждого РФ-сервера:${C_RESET}"
                         echo -e "\n  • ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
                         echo -e "    ${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN}${C_RESET}"
                         if [ -n "${WG_BRIDGE_TOKEN_2:-}" ]; then
@@ -3551,10 +3551,10 @@ mod_direct_wg_cascade() {
                         fi
                         echo ""
                     else
-                        echo -e "${C_YELLOW}⚠️ На этом сервере еще не генерировался токен Сервера 2 (выполните Шаг 1).${C_RESET}"
+                        echo -e "${C_YELLOW} На этом сервере еще не генерировался токен Сервера 2 (выполните Шаг 1).${C_RESET}"
                     fi
                 else
-                    echo -e "${C_YELLOW}⚠️ Каскад еще не настроен.${C_RESET}"
+                    echo -e "${C_YELLOW} Каскад еще не настроен.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -3575,7 +3575,7 @@ mod_direct_wg_cascade() {
                     clean_duplicate_cascade_iptables
                     rm -f /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
                     silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN}✅ Прямой мост wg-cascade, хвосты интерфейса и служба udp2raw полностью зачищены.${C_RESET}"
+                    echo -e "${C_GREEN} Прямой мост wg-cascade, хвосты интерфейса и служба udp2raw полностью зачищены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -3590,7 +3590,7 @@ print_derp_json_snippet() {
     local d_ip="${2:-ВАШ_IP_СЕРВЕРА}"
     local is_real="${3:-false}"
 
-    echo -e "\n${C_CYAN}📋 === БЛОК derpMap ДЛЯ КОНСОЛИ TAILSCALE ===${C_RESET}"
+    echo -e "\n${C_CYAN} === БЛОК derpMap ДЛЯ КОНСОЛИ TAILSCALE ===${C_RESET}"
     echo -e "Откройте: ${C_BLUE}https://login.tailscale.com/admin/acls/file${C_RESET} (Access controls -> JSON editor)"
     echo -e "и добавьте этот блок перед последней закрывающей скобкой ${C_BOLD}}${C_RESET}:\n"
     cat << DERP_JSON_EOF
@@ -3629,11 +3629,11 @@ print_derp_json_snippet() {
   }
 DERP_JSON_EOF
     if [ "$is_real" = "true" ]; then
-        echo -e "\n${C_GREEN}✅ В код подставлены ваш реальный домен ($d_domain) и IP-адрес ($d_ip) — можно сразу копировать!${C_RESET}"
+        echo -e "\n${C_GREEN} В код подставлены ваш реальный домен ($d_domain) и IP-адрес ($d_ip) — можно сразу копировать!${C_RESET}"
     else
-        echo -e "\n${C_YELLOW}⚠️ Показан обезличенный шаблон. Не забудьте заменить 'derp.yourdomain.com' и 'ВАШ_IP_СЕРВЕРА' на ваши реальные данные!${C_RESET}"
+        echo -e "\n${C_YELLOW} Показан обезличенный шаблон. Не забудьте заменить 'derp.yourdomain.com' и 'ВАШ_IP_СЕРВЕРА' на ваши реальные данные!${C_RESET}"
     fi
-    echo -e "\n${C_BLUE}💡 Команды проверки на клиентах после сохранения ACL:${C_RESET}"
+    echo -e "\n${C_BLUE} Команды проверки на клиентах после сохранения ACL:${C_RESET}"
     echo -e "  • ${C_GREEN}tailscale netcheck${C_RESET}"
     echo -e "  • ${C_GREEN}tailscale debug derp 900${C_RESET}"
 }
@@ -3681,25 +3681,25 @@ manage_custom_derp() {
 
         local d_choice
         if ! smart_menu "Личный ретранслятор (DERP)" "\nСтатус: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 "d_choice" \
-        "1" "🚀 Установить / Обновить DERP (Cloudflare + STUN)" \
-        "2" "📋 Показать JSON-код (derpMap) для консоли" \
-        "3" "🔑 Редактировать сертификаты Cloudflare" \
-        "4" "🛑 Остановить и удалить службу DERP" \
-        "0" "🔙 Вернуться назад" || [ "$d_choice" = "0" ]; then
+        "1" " Установить / Обновить DERP (Cloudflare + STUN)" \
+        "2" " Показать JSON-код (derpMap) для консоли" \
+        "3" " Редактировать сертификаты Cloudflare" \
+        "4" " Остановить и удалить службу DERP" \
+        "0" " Вернуться назад" || [ "$d_choice" = "0" ]; then
             break
         fi
 
         clear
         case "$d_choice" in
             1)
-                echo -e "${C_CYAN}📡 === УСТАНОВКА ЛИЧНОГО РЕТРАНСЛЯТОРА DERP (CLOUDFLARE + STUN) ===${C_RESET}"
+                echo -e "${C_CYAN} === УСТАНОВКА ЛИЧНОГО РЕТРАНСЛЯТОРА DERP (CLOUDFLARE + STUN) ===${C_RESET}"
                 ensure_tailscale_installed || true
 
                 local d_dom=""
                 prompt_default "Введите ваш поддомен для DERP (например, derp.yourdomain.com):" "$saved_domain" d_dom
                 if [ "$MODULE_CANCELED" = true ] || [ -z "$d_dom" ]; then continue; fi
 
-                echo -e "${C_BLUE}📦 Установка компилятора Go и сборка актуального бинарника derper...${C_RESET}"
+                echo -e "${C_BLUE} Установка компилятора Go и сборка актуального бинарника derper...${C_RESET}"
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update -qq
                 apt-get install -yq golang git nano
@@ -3723,11 +3723,11 @@ manage_custom_derp() {
                 unset GOTMPDIR TMPDIR
 
                 if [ ! -x /usr/local/bin/derper ]; then
-                    echo -e "${C_RED}❌ Ошибка: не удалось собрать бинарник /usr/local/bin/derper.${C_RESET}"
+                    echo -e "${C_RED} Ошибка: не удалось собрать бинарник /usr/local/bin/derper.${C_RESET}"
                     pause_enter
                     continue
                 fi
-                echo -e "${C_GREEN}✅ Бинарник /usr/local/bin/derper успешно скомпилирован.${C_RESET}"
+                echo -e "${C_GREEN} Бинарник /usr/local/bin/derper успешно скомпилирован.${C_RESET}"
 
                 mkdir -p /etc/derp/certs
                 local crt_file="/etc/derp/certs/${d_dom}.crt"
@@ -3755,7 +3755,7 @@ DERP_HTTPS_PORT="443"
 DERP_STUN_PORT="3478"
 EOF
 
-                echo -e "${C_BLUE}⚙️ Создание и запуск защищенной системной службы derper.service...${C_RESET}"
+                echo -e "${C_BLUE} Создание и запуск защищенной системной службы derper.service...${C_RESET}"
                 cat << EOF > /etc/systemd/system/derper.service
 [Unit]
 Description=Tailscale DERP Relay Server ($d_dom)
@@ -3780,13 +3780,13 @@ EOF
                 if command -v ufw &>/dev/null; then
                     silent_run ufw allow 443/tcp comment 'DERP HTTPS Relay'
                     silent_run ufw allow 3478/udp comment 'DERP Local STUN'
-                    echo -e "${C_GREEN}✅ Порты 443/tcp (DERP HTTPS) и 3478/udp (STUN) открыты в UFW.${C_RESET}"
+                    echo -e "${C_GREEN} Порты 443/tcp (DERP HTTPS) и 3478/udp (STUN) открыты в UFW.${C_RESET}"
                 fi
 
                 if is_derp_active; then
-                    echo -e "${C_GREEN}✅ Служба личного ретранслятора DERP успешно запущена и защищена флагом --verify-clients!${C_RESET}"
+                    echo -e "${C_GREEN} Служба личного ретранслятора DERP успешно запущена и защищена флагом --verify-clients!${C_RESET}"
                 else
-                    echo -e "${C_YELLOW}⚠️ Служба derper не запустилась. Проверьте правильность сертификатов и не занят ли порт 443:${C_RESET}"
+                    echo -e "${C_YELLOW} Служба derper не запустилась. Проверьте правильность сертификатов и не занят ли порт 443:${C_RESET}"
                     journalctl -u derper.service -n 10 --no-pager || true
                 fi
 
@@ -3803,7 +3803,7 @@ EOF
                 nano "/etc/derp/certs/${saved_domain}.key"
                 chmod 600 "/etc/derp/certs/${saved_domain}.key" 2>/dev/null || true
                 silent_run systemctl restart derper.service
-                echo -e "${C_GREEN}✅ Сертификаты обновлены, служба derper перезапущена.${C_RESET}"
+                echo -e "${C_GREEN} Сертификаты обновлены, служба derper перезапущена.${C_RESET}"
                 pause_enter
                 ;;
             4)
@@ -3816,7 +3816,7 @@ EOF
                         silent_run ufw delete allow 443/tcp
                         silent_run ufw delete allow 3478/udp
                     fi
-                    echo -e "${C_GREEN}✅ Служба DERP удалена, порты 443/tcp и 3478/udp закрыты в UFW.${C_RESET}"
+                    echo -e "${C_GREEN} Служба DERP удалена, порты 443/tcp и 3478/udp закрыты в UFW.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -3833,29 +3833,29 @@ print_network_health_summary() {
 
     echo -e "\n${C_CYAN}--- Сводка сетевого здоровья (Маршрутизация и Туннели) ---${C_RESET}"
     if [ "$ip_fwd" = "1" ]; then
-        echo -e "  • Форвардинг пакетов (IPv4): ${C_GREEN}✅ Включен (net.ipv4.ip_forward = 1)${C_RESET}"
+        echo -e "  • Форвардинг пакетов (IPv4): ${C_GREEN} Включен (net.ipv4.ip_forward = 1)${C_RESET}"
     else
-        echo -e "  • Форвардинг пакетов (IPv4): ${C_RED}❌ Выключен (маршрутизация пакетов отключена)${C_RESET}"
+        echo -e "  • Форвардинг пакетов (IPv4): ${C_RED} Выключен (маршрутизация пакетов отключена)${C_RESET}"
     fi
 
     if [ "$nf_mode" = "off" ]; then
-        echo -e "  • Приоритет правил фаервола: ${C_GREEN}✅ Брандмауэр UFW (системный режим)${C_RESET}"
+        echo -e "  • Приоритет правил фаервола: ${C_GREEN} Брандмауэр UFW (системный режим)${C_RESET}"
     elif [ "$nf_mode" = "on" ]; then
-        echo -e "  • Приоритет правил фаервола: ${C_BLUE}ℹ️  Tailscale (встроенный авто-режим)${C_RESET}"
+        echo -e "  • Приоритет правил фаервола: ${C_BLUE}ℹ  Tailscale (встроенный авто-режим)${C_RESET}"
     fi
 
     if [ "$nat_count" -eq 1 ]; then
-        echo -e "  • Трансляция NAT на выходе:  ${C_GREEN}✅ Активна на $wan_dev (1 чистое правило без дубликатов)${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_GREEN} Активна на $wan_dev (1 чистое правило без дубликатов)${C_RESET}"
     elif [ "$nat_count" -gt 1 ]; then
-        echo -e "  • Трансляция NAT на выходе:  ${C_YELLOW}⚠️  Активна на $wan_dev, но дубликатов: $nat_count (рекомендуется очистка)${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_YELLOW}  Активна на $wan_dev, но дубликатов: $nat_count (рекомендуется очистка)${C_RESET}"
     else
-        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Не используется на $wan_dev (режим обычного узла без шлюза)${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ  Не используется на $wan_dev (режим обычного узла без шлюза)${C_RESET}"
     fi
 
     local extra_ifs=$(ip -br link show 2>/dev/null | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' | grep -vE "^(lo|${wan_dev}|docker.*|veth.*|br-.*)$" || echo "")
     for eif in $extra_ifs; do
         local e_ip=$(ip -4 -o addr show dev "$eif" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "без IP")
-        echo -e "  • Активный интерфейс ($eif): ${C_GREEN}✅ IP: $e_ip (транзит разрешен)${C_RESET}"
+        echo -e "  • Активный интерфейс ($eif): ${C_GREEN} IP: $e_ip (транзит разрешен)${C_RESET}"
     done
     return 0
 }
@@ -3950,7 +3950,7 @@ ETHTOOL_SVC_EOF
         silent_run systemctl stop netfilter-persistent 2>/dev/null
         silent_run systemctl disable netfilter-persistent 2>/dev/null
         silent_run apt-get purge -yq iptables-persistent netfilter-persistent
-        echo -e "${C_BLUE}ℹ️ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
+        echo -e "${C_BLUE}ℹ Удален конфликтующий пакет iptables-persistent (управление возвращено UFW).${C_RESET}"
     fi
 
     disable_ufw_strict_rpfilter
@@ -3968,7 +3968,7 @@ ETHTOOL_SVC_EOF
     fi
     tune_fq_qdisc_interfaces
 
-    echo -e "${C_GREEN}✅ Аппаратное ускорение (GRO с защитой от зависаний) и фиксация MTU (MSS Clamping) включены.${C_RESET}"
+    echo -e "${C_GREEN} Аппаратное ускорение (GRO с защитой от зависаний) и фиксация MTU (MSS Clamping) включены.${C_RESET}"
 }
 
 is_port_free() {
@@ -3996,7 +3996,7 @@ get_interface_subnet() {
 
 ensure_tailscale_installed() {
     if ! command -v tailscale &>/dev/null; then
-        echo -e "${C_BLUE}📦 Установка пакета Tailscale в систему...${C_RESET}"
+        echo -e "${C_BLUE} Установка пакета Tailscale в систему...${C_RESET}"
         curl -fsSL https://tailscale.com/install.sh | sh
 
         mkdir -p /etc/systemd/system/tailscaled.service.d
@@ -4021,11 +4021,11 @@ TS_EOF
 
     if is_tailscale_authenticated; then
         local current_ip=$(tailscale ip -4 2>/dev/null || echo "100.x.x.x")
-        echo -e "${C_GREEN}✅ Узел уже подключен к сети (IP: $current_ip).${C_RESET}"
+        echo -e "${C_GREEN} Узел уже подключен к сети (IP: $current_ip).${C_RESET}"
         return 0
     fi
 
-    echo -e "${C_CYAN}🔑 Первичное подключение узла...${C_RESET}"
+    echo -e "${C_CYAN} Первичное подключение узла...${C_RESET}"
     local authkey=""
     prompt_clean "Ключ авторизации (Оставьте пустым для входа по ссылке)" authkey
     if [ "$MODULE_CANCELED" = true ]; then
@@ -4036,7 +4036,7 @@ TS_EOF
     if [ -n "$authkey" ]; then
         silent_run tailscale up --authkey="$authkey" --force-reauth
     else
-        echo -e "${C_BLUE}ℹ️ Запрос ссылки авторизации... Скопируйте ссылку, которая появится ниже:${C_RESET}"
+        echo -e "${C_BLUE}ℹ Запрос ссылки авторизации... Скопируйте ссылку, которая появится ниже:${C_RESET}"
         tailscale up --force-reauth || true
         echo ""
         whiptail --title "Авторизация" --msgbox "Если вы перешли по ссылке выше и подтвердили авторизацию в браузере, нажмите ОК для продолжения настройки." 10 $WT_WIDTH
@@ -4044,10 +4044,10 @@ TS_EOF
 
     if is_tailscale_authenticated; then
         silent_run tailscale set --auto-update
-        echo -e "${C_GREEN}✅ Узел успешно подключен.${C_RESET}"
+        echo -e "${C_GREEN} Узел успешно подключен.${C_RESET}"
         return 0
     else
-        echo -e "${C_YELLOW}⚠️ Узел еще не авторизован в сети Tailscale.${C_RESET}"
+        echo -e "${C_YELLOW} Узел еще не авторизован в сети Tailscale.${C_RESET}"
         return 1
     fi
 }
@@ -4074,7 +4074,7 @@ prompt_default() {
         printf -v "$var_name" "%s" "${val:-$default_val}"
         return 0
     else
-        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
+        echo -e "${C_YELLOW} Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
@@ -4088,7 +4088,7 @@ prompt_clean() {
         printf -v "$var_name" "%s" "$val"
         return 0
     else
-        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
+        echo -e "${C_YELLOW} Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
@@ -4117,31 +4117,31 @@ backup_file() {
     local file="$1"
     if [ -f "$file" ] && [ ! -f "${file}.bak" ]; then
         cp "$file" "${file}.bak"
-        echo -e "${C_BLUE}💾 Создана резервная копия: ${file}.bak${C_RESET}"
+        echo -e "${C_BLUE} Создана резервная копия: ${file}.bak${C_RESET}"
     fi
 }
 
 
 
 check_system_resources() {
-    echo -e "${C_CYAN}🔍 Проверка системных ресурсов...${C_RESET}"
+    echo -e "${C_CYAN} Проверка системных ресурсов...${C_RESET}"
     local free_disk=$(df / --output=avail | tail -1 | tr -d ' ')
     local free_mem=$(free -m 2>/dev/null | awk '/^Mem:/ {print $4}' || echo "0")
     local total_swap=$(free -m 2>/dev/null | awk '/^Swap:/ {print $2}' || echo "0")
     local all_ok=true
 
     if [ "$free_disk" -lt 1048576 ]; then
-        echo -e "${C_RED}❌ Ошибка: Недостаточно места на диске (минимум 1ГБ требуется для сборки Caddy).${C_RESET}"
+        echo -e "${C_RED} Ошибка: Недостаточно места на диске (минимум 1ГБ требуется для сборки Caddy).${C_RESET}"
         return 1
     fi
 
     # Если уже активен Swap (например, >= 512MB) или свободной ОЗУ >= 512МБ, то все в норме и не нужно спрашивать повторно
     if [ "$free_mem" -lt 512 ] && [ "${total_swap:-0}" -lt 512 ] && ! swapon --show 2>/dev/null | grep -qE "swapfile|swap"; then
-        echo -e "${C_YELLOW}⚠️ Внимание: Малый объем свободной ОЗУ ($free_mem МБ) и отсутствует Swap.${C_RESET}"
-        echo -e "${C_BLUE}ℹ️ Для стабильной сборки Caddy рекомендуется создать Swap-файл (2 ГБ).${C_RESET}"
+        echo -e "${C_YELLOW} Внимание: Малый объем свободной ОЗУ ($free_mem МБ) и отсутствует Swap.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Для стабильной сборки Caddy рекомендуется создать Swap-файл (2 ГБ).${C_RESET}"
 
         if prompt_yn "Создать постоянный Swap-файл (2 ГБ) для обеспечения стабильной работы и сборки?" "true"; then
-            echo -e "${C_BLUE}⚙️ Создание Swap-файла...${C_RESET}"
+            echo -e "${C_BLUE} Создание Swap-файла...${C_RESET}"
             silent_run swapoff /swapfile 2>/dev/null || true
             rm -f /swapfile
             silent_run fallocate -l 2G /swapfile || silent_run dd if=/dev/zero of=/swapfile bs=1M count=2048
@@ -4151,13 +4151,13 @@ check_system_resources() {
             if ! grep -q "/swapfile" /etc/fstab; then
                 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null 2>&1 || true
             fi
-            echo -e "${C_GREEN}✅ Swap-файл (2 ГБ) успешно создан и активирован.${C_RESET}"
+            echo -e "${C_GREEN} Swap-файл (2 ГБ) успешно создан и активирован.${C_RESET}"
         else
-            echo -e "${C_RED}⚠️ Сборка может завершиться ошибкой Out of Memory!${C_RESET}"
+            echo -e "${C_RED} Сборка может завершиться ошибкой Out of Memory!${C_RESET}"
             all_ok=false
         fi
     else
-        echo -e "${C_GREEN}✅ Ресурсы в норме (ОЗУ / Swap активен).${C_RESET}"
+        echo -e "${C_GREEN} Ресурсы в норме (ОЗУ / Swap активен).${C_RESET}"
     fi
     return 0
 }
@@ -4171,20 +4171,20 @@ pause_enter() {
 }
 
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${C_RED}❌ Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).${C_RESET}" >&2
+    echo -e "${C_RED} Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).${C_RESET}" >&2
     exit 1
 fi
 
 if ! check_system_resources; then
-    echo -e "${C_RED}❌ Критическая ошибка ресурсов. Запуск невозможен.${C_RESET}"
+    echo -e "${C_RED} Критическая ошибка ресурсов. Запуск невозможен.${C_RESET}"
     exit 1
 fi
 
 if ! command -v whiptail &>/dev/null; then
-    echo -e "${C_BLUE}📦 Интерфейс whiptail не обнаружен. Автоматическая установка...${C_RESET}"
+    echo -e "${C_BLUE} Интерфейс whiptail не обнаружен. Автоматическая установка...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq && apt-get install -yq whiptail >/dev/null 2>&1 || {
-        echo -e "${C_RED}❌ Не удалось установить whiptail. Выполните вручную: apt update && apt install whiptail${C_RESET}" >&2
+        echo -e "${C_RED} Не удалось установить whiptail. Выполните вручную: apt update && apt install whiptail${C_RESET}" >&2
         exit 1
     }
 fi
@@ -4195,7 +4195,7 @@ fi
 
 # 1. Часовой пояс и синхронизация времени
 mod_timezone() {
-    echo -e "${C_CYAN}🌐 === 1/21. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
+    echo -e "${C_CYAN} === 1/21. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Europe/Moscow")
     echo "Текущий часовой пояс: $current_tz"
     local tz=""
@@ -4204,12 +4204,12 @@ mod_timezone() {
 
     silent_run timedatectl set-timezone "$tz"
     silent_run timedatectl set-ntp true
-    echo -e "${C_GREEN}✅ Часовой пояс установлен в $tz, автоматическая синхронизация точного времени включена.${C_RESET}"
+    echo -e "${C_GREEN} Часовой пояс установлен в $tz, автоматическая синхронизация точного времени включена.${C_RESET}"
 }
 
 # 2. Имя хоста
 mod_hostname() {
-    echo -e "${C_CYAN}📌 === 2/21. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
+    echo -e "${C_CYAN} === 2/21. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
     echo "Текущее имя хоста: $(hostname)"
     
     local default_brand_host="Server-VPS"
@@ -4239,24 +4239,24 @@ mod_hostname() {
         fi
     fi
     silent_run sed -i 's/preserve_hostname: false/preserve_hostname: true/g' /etc/cloud/cloud.cfg
-    echo -e "${C_GREEN}✅ Имя сервера чисто обновлено на $new_host.${C_RESET}"
+    echo -e "${C_GREEN} Имя сервера чисто обновлено на $new_host.${C_RESET}"
 }
 
 # 3. Обновление пакетов
 mod_apt_update() {
-    echo -e "${C_CYAN}📦 === 3/21. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
+    echo -e "${C_CYAN} === 3/21. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
 
     if [ -f /etc/gai.conf ]; then
         sed -i 's/^#\s*precedence ::ffff:0:0\/96\s\+100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf 2>/dev/null || true
-        echo -e "${C_BLUE}ℹ️ Включен приоритет IPv4 над IPv6 (защита от зависаний apt и curl).${C_RESET}"
+        echo -e "${C_BLUE}ℹ Включен приоритет IPv4 над IPv6 (защита от зависаний apt и curl).${C_RESET}"
     fi
 
     apt-get update && apt-get upgrade -yq
 
     local zram_pkg="zram-tools"
     if [ -f /etc/default/armbian-zram ] || [ -f /etc/init.d/armbian-zram ]; then
-        echo -e "${C_BLUE}ℹ️ Обнаружен встроенный менеджер памяти Armbian. Сторонняя утилита zram-tools пропущена.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Обнаружен встроенный менеджер памяти Armbian. Сторонняя утилита zram-tools пропущена.${C_RESET}"
         zram_pkg=""
     fi
 
@@ -4269,7 +4269,7 @@ Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot "false";
 UNATTENDED_EOF
-        echo -e "${C_BLUE}ℹ️ Включена автоочистка старых ядер при фоновых обновлениях безопасности.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Включена автоочистка старых ядер при фоновых обновлениях безопасности.${C_RESET}"
     fi
 
     apt-get autoremove -yq && apt-get clean
@@ -4282,28 +4282,28 @@ PERCENT=50
 PRIORITY=100
 ZRAM_EOF
         silent_run systemctl restart zramswap
-        echo -e "${C_GREEN}✅ Сжатие оперативной памяти zRAM (алгоритм zstd, 50% RAM) активировано.${C_RESET}"
+        echo -e "${C_GREEN} Сжатие оперативной памяти zRAM (алгоритм zstd, 50% RAM) активировано.${C_RESET}"
     fi
 
     local current_target=$(systemctl get-default)
     echo "Текущий режим загрузки: $current_target"
 
     if [ "$current_target" = "graphical.target" ]; then
-        if prompt_yn "⚠️ Обнаружена графическая оболочка ($(get_system_type_short)). Переключить систему в консольный режим работы?" "false"; then
+        if prompt_yn " Обнаружена графическая оболочка ($(get_system_type_short)). Переключить систему в консольный режим работы?" "false"; then
             systemctl set-default multi-user.target
-            echo -e "${C_BLUE}ℹ️ Режим загрузки изменен на консольный.${C_RESET}"
+            echo -e "${C_BLUE}ℹ Режим загрузки изменен на консольный.${C_RESET}"
         else
             if [ "$MODULE_CANCELED" = true ]; then return 0; fi
         fi
     else
         systemctl set-default multi-user.target
     fi
-    echo -e "${C_GREEN}✅ Система успешно обновлена, базовые утилиты установлены.${C_RESET}"
+    echo -e "${C_GREEN} Система успешно обновлена, базовые утилиты установлены.${C_RESET}"
 }
 
 # 4. Пользователь и Sudo (с гарантированным приоритетом 99-zzz- в /etc/sudoers.d)
 mod_user_setup() {
-    echo -e "${C_CYAN}👤 === 4/21. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
+    echo -e "${C_CYAN} === 4/21. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
     local active_user=$(get_active_user)
     local username=""
     prompt_default "Имя администратора:" "$active_user" username
@@ -4319,27 +4319,27 @@ mod_user_setup() {
         if ! id "$username" &>/dev/null; then
             useradd -m -s /bin/bash "$username" || true
         fi
-        echo -e "${C_GREEN}✅ Учетная запись $username создана.${C_RESET}"
+        echo -e "${C_GREEN} Учетная запись $username создана.${C_RESET}"
     fi
     
     groupadd -f sudo 2>/dev/null || true
     usermod -aG sudo "$username" || true
-    echo -e "${C_BLUE}ℹ️ Пользователь $username добавлен в группу администраторов (sudo).${C_RESET}"
+    echo -e "${C_BLUE}ℹ Пользователь $username добавлен в группу администраторов (sudo).${C_RESET}"
 
     local pass
     if ! pass=$(whiptail --title "Пароль" --passwordbox "Введите новый пароль для $username (пусто - отмена):" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
         echo -e "${C_YELLOW}ℹ Смена пароля отменена.${C_RESET}"
     elif [ -z "$pass" ]; then
-        echo -e "${C_YELLOW}ℹ️ Смена пароля пропущена.${C_RESET}"
+        echo -e "${C_YELLOW}ℹ Смена пароля пропущена.${C_RESET}"
     else
         local pass_confirm
         if ! pass_confirm=$(whiptail --title "Подтверждение" --passwordbox "Повторите пароль:" 10 $WT_WIDTH 3>&1 1>&2 2>&3); then
-            echo -e "${C_RED}❌ Отмена. Пароль не изменен.${C_RESET}"
+            echo -e "${C_RED} Отмена. Пароль не изменен.${C_RESET}"
         elif [ "$pass" != "$pass_confirm" ]; then
-            echo -e "${C_RED}❌ Введенные пароли не совпадают. Попробуйте снова.${C_RESET}"
+            echo -e "${C_RED} Введенные пароли не совпадают. Попробуйте снова.${C_RESET}"
         else
             echo "$username:$pass" | chpasswd
-            echo -e "${C_GREEN}✅ Пароль успешно установлен.${C_RESET}"
+            echo -e "${C_GREEN} Пароль успешно установлен.${C_RESET}"
         fi
     fi
 
@@ -4370,21 +4370,21 @@ mod_user_setup() {
         if command -v visudo &>/dev/null && visudo -c -f "$sudo_tmp" >/dev/null 2>&1; then
             mv "$sudo_tmp" "/etc/sudoers.d/99-zzz-$username"
             chmod 0440 "/etc/sudoers.d/99-zzz-$username"
-            echo -e "${C_GREEN}✅ Беспарольный доступ (NOPASSWD) включен с максимальным приоритетом (99-zzz-$username).${C_RESET}"
+            echo -e "${C_GREEN} Беспарольный доступ (NOPASSWD) включен с максимальным приоритетом (99-zzz-$username).${C_RESET}"
         else
             rm -f "$sudo_tmp"
-            echo -e "${C_RED}❌ Ошибка синтаксиса sudoers! Файл не был создан.${C_RESET}"
+            echo -e "${C_RED} Ошибка синтаксиса sudoers! Файл не был создан.${C_RESET}"
             return 1
         fi
     else
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-        echo "ℹ️ Система будет запрашивать пароль при каждом повышении прав (через группу %sudo)."
+        echo "ℹ Система будет запрашивать пароль при каждом повышении прав (через группу %sudo)."
     fi
 }
 
 # 5. SSH-ключи
 mod_ssh_key() {
-    echo -e "${C_CYAN}🔑 === 5/21. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN} === 5/21. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
     local active_user=$(get_active_user)
     local target_user=""
     prompt_default "Для какого пользователя привязать ключ?" "$active_user" target_user
@@ -4411,7 +4411,7 @@ mod_ssh_key() {
 
     if [ -z "$pubkey" ]; then
         if ! pubkey=$(whiptail --title "Ввод ключа" --inputbox "Вставьте ваш публичный ключ безопасности (ssh-ed25519, ssh-rsa и т.д.):" 10 $WT_WIDTH 3>&1 1>&2 2>&3) || [ -z "$pubkey" ]; then
-            echo -e "${C_YELLOW}↩️ Отмена. Возврат в главное меню...${C_RESET}"
+            echo -e "${C_YELLOW} Отмена. Возврат в главное меню...${C_RESET}"
             MODULE_CANCELED=true
             return 0
         fi
@@ -4420,22 +4420,22 @@ mod_ssh_key() {
     if [ -n "$pubkey" ]; then
         local mode_choice
         if ! smart_menu "Параметры сохранения" "Выберите действие:" 12 $WT_WIDTH 2 "mode_choice" \
-        "1" "➕ Добавить ключ в существующий список" \
-        "2" "🔄 Полностью перезаписать список ключей"; then
-            echo -e "${C_YELLOW}↩️ Отмена сохранения.${C_RESET}"
+        "1" " Добавить ключ в существующий список" \
+        "2" " Полностью перезаписать список ключей"; then
+            echo -e "${C_YELLOW} Отмена сохранения.${C_RESET}"
             MODULE_CANCELED=true
             return 0
         fi
 
         if [ "$mode_choice" = "2" ]; then
             echo "$pubkey" > "$target_home/.ssh/authorized_keys"
-            echo -e "${C_GREEN}✅ Файл с ключами перезаписан.${C_RESET}"
+            echo -e "${C_GREEN} Файл с ключами перезаписан.${C_RESET}"
         else
             if ! grep -qF "$pubkey" "$target_home/.ssh/authorized_keys" 2>/dev/null; then
                 echo "$pubkey" >> "$target_home/.ssh/authorized_keys"
-                echo -e "${C_GREEN}✅ Ключ успешно добавлен.${C_RESET}"
+                echo -e "${C_GREEN} Ключ успешно добавлен.${C_RESET}"
             else
-                echo -e "${C_BLUE}ℹ️ Этот ключ уже привязан к профилю.${C_RESET}"
+                echo -e "${C_BLUE}ℹ Этот ключ уже привязан к профилю.${C_RESET}"
             fi
         fi
     fi
@@ -4444,12 +4444,12 @@ mod_ssh_key() {
     chmod 700 "$target_home/.ssh"
     silent_run chmod 600 "$target_home/.ssh/authorized_keys"
     chown -R "$target_user:$target_user" "$target_home/.ssh"
-    echo -e "${C_GREEN}✅ Права доступа к директории ключей проверены и настроены.${C_RESET}"
+    echo -e "${C_GREEN} Права доступа к директории ключей проверены и настроены.${C_RESET}"
 }
 
 # 6. Конфигурация SSH (с поддержкой полной Zero-Trust изоляции на tailscale0)
 mod_ssh_config() {
-    echo -e "${C_CYAN}🔒 === 6/21. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN} === 6/21. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
 
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
@@ -4492,22 +4492,22 @@ mod_ssh_config() {
         if whiptail --title "Подтверждение" --yesno "Отключить авторизацию по паролю\n(разрешить доступ ТОЛЬКО по привязанным ключам)?" 11 $WT_WIDTH; then
             pass_auth_val="no"
             kbd_auth_val="no"
-            echo -e "${C_GREEN}✅ Выбрано: Вход по паролю будет отключен.${C_RESET}"
+            echo -e "${C_GREEN} Выбрано: Вход по паролю будет отключен.${C_RESET}"
         else
-            echo -e "${C_YELLOW}⚠️ Выбрано: Вход по паролю оставлен включенным.${C_RESET}"
+            echo -e "${C_YELLOW} Выбрано: Вход по паролю оставлен включенным.${C_RESET}"
         fi
     else
         whiptail --msgbox "Внимание: На сервере не найдено ни одного привязанного ключа безопасности!\nВход по паролю ОСТАЕТСЯ ВКЛЮЧЕННЫМ для предотвращения полной потери доступа." 11 $WT_WIDTH
-        echo -e "${C_YELLOW}⚠️ Вход по паролю сохранен.${C_RESET}"
+        echo -e "${C_YELLOW} Вход по паролю сохранен.${C_RESET}"
     fi
 
     local disable_root="no"
     if whiptail --title "Подтверждение" --yesno "Запретить прямой вход для пользователя root по SSH?" 11 $WT_WIDTH; then
         disable_root="no"
-        echo -e "${C_GREEN}✅ Выбрано: Вход для root запрещен.${C_RESET}"
+        echo -e "${C_GREEN} Выбрано: Вход для root запрещен.${C_RESET}"
     else
         disable_root="yes"
-        echo -e "${C_YELLOW}⚠️ Выбрано: Вход для root разрешен.${C_RESET}"
+        echo -e "${C_YELLOW} Выбрано: Вход для root разрешен.${C_RESET}"
     fi
 
     local conf_dir="/etc/ssh/sshd_config.d"
@@ -4528,7 +4528,7 @@ mod_ssh_config() {
         ts_restrict_comment="# SSH Public Access"
     fi
 
-    echo -e "${C_BLUE}🧹 Резервное копирование и очистка сторонних конфигураций SSH...${C_RESET}"
+    echo -e "${C_BLUE} Резервное копирование и очистка сторонних конфигураций SSH...${C_RESET}"
     rm -rf "${conf_bak_dir:?}"/* 2>/dev/null || true
     cp -a "$conf_dir"/*.conf "$conf_bak_dir"/ 2>/dev/null || true
     rm -f "$conf_dir"/*.conf 2>/dev/null
@@ -4587,13 +4587,13 @@ SSH_HARDENING_EOF
                     silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
                     silent_run ufw delete allow in on tailscale0
                     silent_run ufw delete allow "$port"/tcp
-                    echo -e "${C_GREEN}✅ Полная изоляция (Zero-Trust): на tailscale0 открыт только порт SSH ($port/tcp).${C_RESET}"
+                    echo -e "${C_GREEN} Полная изоляция (Zero-Trust): на tailscale0 открыт только порт SSH ($port/tcp).${C_RESET}"
                 else
-                    echo -e "${C_BLUE}ℹ️ Правило изоляции сохранено. Оно вступит в силу при включении брандмауэра (Модуль 8).${C_RESET}"
+                    echo -e "${C_BLUE}ℹ Правило изоляции сохранено. Оно вступит в силу при включении брандмауэра (Модуль 8).${C_RESET}"
                 fi
             else
                 sed -i 's/# SSH via Tailscale only/# SSH Public Access/' "$conf_file"
-                echo -e "${C_YELLOW}⚠️ Узел Tailscale не авторизован! Для предотвращения блокировки сервера оставлен публичный доступ к SSH ($port).${C_RESET}"
+                echo -e "${C_YELLOW} Узел Tailscale не авторизован! Для предотвращения блокировки сервера оставлен публичный доступ к SSH ($port).${C_RESET}"
                 silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
             fi
         else
@@ -4607,12 +4607,12 @@ SSH_HARDENING_EOF
                 silent_run apt-get update
                 silent_run apt-get install -yq sshguard
                 silent_run systemctl enable --now sshguard
-                echo -e "${C_GREEN}✅ Защита от перебора паролей (sshguard) активирована.${C_RESET}"
+                echo -e "${C_GREEN} Защита от перебора паролей (sshguard) активирована.${C_RESET}"
             fi
         fi
-        echo -e "${C_GREEN}✅ Служба удаленного доступа успешно перезапущена с абсолютным приоритетом параметров.${C_RESET}"
+        echo -e "${C_GREEN} Служба удаленного доступа успешно перезапущена с абсолютным приоритетом параметров.${C_RESET}"
     else
-        echo -e "${C_RED}❌ Ошибка применения параметров безопасности! Выполнен откат изменений...${C_RESET}"
+        echo -e "${C_RED} Ошибка применения параметров безопасности! Выполнен откат изменений...${C_RESET}"
         rm -f "$conf_file"
         cp -a "$conf_bak_dir"/*.conf "$conf_dir"/ 2>/dev/null || true
         rm -rf "$conf_bak_dir" 2>/dev/null || true
@@ -4622,7 +4622,7 @@ SSH_HARDENING_EOF
 
 # 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6 форвардингом)
 mod_hardening() {
-    echo -e "${C_CYAN}🔒 === 7/21. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
+    echo -e "${C_CYAN} === 7/21. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
     sed -i -E '/^\s*(net\.core\.(rmem|wmem)_(max|default)|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc)\s*=/d' /etc/sysctl.conf 2>/dev/null || true
     backup_file "/etc/sysctl.d/99-zzz-server-hardening.conf"
@@ -4631,11 +4631,11 @@ mod_hardening() {
     local icmp_ignore=0
     if prompt_yn "Скрыть сервер от пингов (отключить ответы на ICMP Echo / ping)?" "false"; then
         icmp_ignore=1
-        echo -e "${C_BLUE}ℹ️ Ответы на ICMP-пинги будут отключены.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Ответы на ICMP-пинги будут отключены.${C_RESET}"
     else
         if [ "$MODULE_CANCELED" = true ]; then return 0; fi
         icmp_ignore=0
-        echo -e "${C_BLUE}ℹ️ Стандартные ответы на ICMP-пинги сохранены (рекомендуется для мониторинга).${C_RESET}"
+        echo -e "${C_BLUE}ℹ Стандартные ответы на ICMP-пинги сохранены (рекомендуется для мониторинга).${C_RESET}"
     fi
 
     silent_run modprobe tcp_bbr
@@ -4698,15 +4698,15 @@ HARDENING_EOF
             echo "RuntimeWatchdogSec=15s" >> /etc/systemd/system.conf
         fi
         silent_run systemctl daemon-reexec
-        echo -e "${C_GREEN}✅ Аппаратный таймер защиты от зависаний (Watchdog 15s) для мини-ПК активирован.${C_RESET}"
+        echo -e "${C_GREEN} Аппаратный таймер защиты от зависаний (Watchdog 15s) для мини-ПК активирован.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN}✅ Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
+    echo -e "${C_GREEN} Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
 }
 
 # 8. Firewall UFW (сохраняет правила личного DERP, Каскада NaiveProxy/WARP/WG-Cascade и открывает 41641/udp при наличии Tailscale)
 mod_ufw() {
-    echo -e "${C_CYAN}🧱 === 8/21. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
+    echo -e "${C_CYAN} === 8/21. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     
     local active_ssh_port="22"
@@ -4717,7 +4717,7 @@ mod_ufw() {
     active_ssh_port="${active_ssh_port//[^0-9]/}"
     local port="${active_ssh_port:-22}"
 
-    echo -e "${C_BLUE}ℹ️ Автоматически определен порт SSH: $port${C_RESET}"
+    echo -e "${C_BLUE}ℹ Автоматически определен порт SSH: $port${C_RESET}"
 
     remove_ufw_docker_protection
     silent_run ufw delete allow in on tailscale0
@@ -4756,10 +4756,10 @@ mod_ufw() {
 
     local do_restrict=false
     if [ "$is_ts_restricted_in_mod6" = true ]; then
-        echo -e "${C_BLUE}ℹ️ Ограничение удаленного доступа применено автоматически.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Ограничение удаленного доступа применено автоматически.${C_RESET}"
         do_restrict=true
     elif [ "$is_public_in_mod6" = true ]; then
-        echo -e "${C_BLUE}ℹ️ Публичный доступ к SSH сохранен автоматически.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Публичный доступ к SSH сохранен автоматически.${C_RESET}"
         do_restrict=false
     elif prompt_yn "Разрешить вход по SSH только через закрытую сеть (с полной изоляцией остальных портов)?" "true"; then
         do_restrict=true
@@ -4771,7 +4771,7 @@ mod_ufw() {
         ensure_ufw_mangle_tcpmss
         if is_tailscale_web_active; then
             silent_run ufw allow in on tailscale0 to any port 5252 proto tcp comment 'Tailscale Web UI'
-            echo -e "${C_BLUE}ℹ️ Обнаружен активный веб-интерфейс: открыт порт 5252/tcp на tailscale0.${C_RESET}"
+            echo -e "${C_BLUE}ℹ Обнаружен активный веб-интерфейс: открыт порт 5252/tcp на tailscale0.${C_RESET}"
         fi
         if prompt_yn "Передать приоритет управления сетевыми правилами системе (UFW)?" "true"; then
             chosen_nf_mode="off"
@@ -4784,7 +4784,7 @@ mod_ufw() {
     if [ -f /etc/default/bobarev-derp ] || is_derp_active; then
         silent_run ufw allow 443/tcp comment 'DERP HTTPS Relay'
         silent_run ufw allow 3478/udp comment 'DERP Local STUN'
-        echo -e "${C_BLUE}ℹ️ Восстановлены правила UFW для личного ретранслятора DERP (443/tcp и 3478/udp).${C_RESET}"
+        echo -e "${C_BLUE}ℹ Восстановлены правила UFW для личного ретранслятора DERP (443/tcp и 3478/udp).${C_RESET}"
     fi
 
     if [ -f /etc/wireguard/warp.conf ] || is_warp_active; then
@@ -4793,14 +4793,14 @@ mod_ufw() {
         silent_run ufw route allow in on wg-cascade out on warp comment 'WG Cascade to WARP'
         silent_run ufw route allow in on warp out on wg-cascade comment 'WARP to WG Cascade'
         ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
-        echo -e "${C_BLUE}ℹ️ Восстановлены правила транзита UFW для туннеля Cloudflare WARP.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Восстановлены правила транзита UFW для туннеля Cloudflare WARP.${C_RESET}"
     fi
 
     if [ -f /etc/wireguard/wg0.conf ] || is_wg0_active; then
         silent_run ufw route allow in on tailscale0 out on wg0 comment 'Tailscale to wg0 exit'
         silent_run ufw route allow in on wg0 out on tailscale0 comment 'wg0 to Tailscale return'
         ensure_ufw_nat_rule "-A POSTROUTING -o wg0 -j MASQUERADE"
-        echo -e "${C_BLUE}ℹ️ Восстановлены правила транзита UFW и NAT для шлюза WireGuard (wg0).${C_RESET}"
+        echo -e "${C_BLUE}ℹ Восстановлены правила транзита UFW и NAT для шлюза WireGuard (wg0).${C_RESET}"
     fi
 
     if [ -f /etc/default/bobarev-cascade ]; then
@@ -4826,14 +4826,14 @@ mod_ufw() {
                 silent_run ufw route deny in on "$ROUTER_LAN_IF" out on "$netdev" comment 'Kill Switch'
                 ks_human="включена"
             fi
-            echo -e "${C_BLUE}ℹ️ Восстановлен профиль роутера: сеть $ROUTER_LAN_IF направлена в $ROUTER_OUT_IF (защита от утечки IP: $ks_human).${C_RESET}"
+            echo -e "${C_BLUE}ℹ Восстановлен профиль роутера: сеть $ROUTER_LAN_IF направлена в $ROUTER_OUT_IF (защита от утечки IP: $ks_human).${C_RESET}"
         fi
     fi
 
     if [ -n "$netdev" ]; then
         if prompt_yn "Запретить контейнерам Docker обходить брандмауэр из внешней сети?" "true"; then
             apply_ufw_docker_protection "$netdev"
-            echo -e "${C_GREEN}✅ Защита контейнеров Docker снаружи включена.${C_RESET}"
+            echo -e "${C_GREEN} Защита контейнеров Docker снаружи включена.${C_RESET}"
         fi
     fi
 
@@ -4843,14 +4843,14 @@ mod_ufw() {
             silent_run ufw allow in on tailscale0 to any port "$port" proto tcp comment 'SSH via Tailscale only'
             silent_run ufw delete allow in on tailscale0
             silent_run ufw delete allow "$port"/tcp
-            echo -e "${C_GREEN}✅ Полная изоляция (Zero-Trust): открыт только порт SSH ($port/tcp) внутри закрытой сети.${C_RESET}"
+            echo -e "${C_GREEN} Полная изоляция (Zero-Trust): открыт только порт SSH ($port/tcp) внутри закрытой сети.${C_RESET}"
         else
             silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
-            echo -e "${C_YELLOW}⚠️ Узел Tailscale не авторизован! Во избежание потери доступа порт SSH ($port) оставлен открытым публично.${C_RESET}"
+            echo -e "${C_YELLOW} Узел Tailscale не авторизован! Во избежание потери доступа порт SSH ($port) оставлен открытым публично.${C_RESET}"
         fi
     else
         silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
-        echo -e "${C_GREEN}✅ Брандмауэр настроен: порт SSH ($port) открыт публично.${C_RESET}"
+        echo -e "${C_GREEN} Брандмауэр настроен: порт SSH ($port) открыт публично.${C_RESET}"
     fi
 
     if is_naive_active; then
@@ -4879,7 +4879,7 @@ mod_ufw() {
     if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
         /usr/local/bin/bobarev-router-up.sh || true
     fi
-    echo -e "${C_GREEN}✅ Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
+    echo -e "${C_GREEN} Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
     print_network_health_summary
 }
 
@@ -4890,18 +4890,18 @@ mod_lock_root() {
         if prompt_yn "Заблокировать прямой доступ для суперпользователя (root)?" "true"; then
             if [ $(getent group sudo | cut -d: -f4 | tr ',' ' ' | wc -w) -gt 0 ]; then
                 silent_run passwd -l root
-                echo -e "${C_GREEN}✅ Доступ для суперпользователя заблокирован.${C_RESET}"
+                echo -e "${C_GREEN} Доступ для суперпользователя заблокирован.${C_RESET}"
             fi
         fi
         return 0
     fi
 
-    echo -e "${C_CYAN}🔐 === 9/21. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
+    echo -e "${C_CYAN} === 9/21. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
     local root_choice
     if ! smart_menu "Системный доступ" "Выберите желаемое действие:" 12 $WT_WIDTH 2 "root_choice" \
-    "1" "🔐 Заблокировать" \
-    "2" "🔓 Разблокировать"; then
+    "1" " Заблокировать" \
+    "2" " Разблокировать"; then
         MODULE_CANCELED=true
         return 0
     fi
@@ -4910,12 +4910,12 @@ mod_lock_root() {
         1)
             if [ $(getent group sudo | cut -d: -f4 | tr ',' ' ' | wc -w) -gt 0 ]; then
                 silent_run passwd -l root
-                echo -e "${C_GREEN}✅ Доступ для суперпользователя заблокирован.${C_RESET}"
+                echo -e "${C_GREEN} Доступ для суперпользователя заблокирован.${C_RESET}"
             else
-                echo -e "${C_YELLOW}⚠️ В системе нет других администраторов! Блокировка отменена для сохранения контроля.${C_RESET}"
+                echo -e "${C_YELLOW} В системе нет других администраторов! Блокировка отменена для сохранения контроля.${C_RESET}"
             fi
             ;;
-        2) silent_run passwd -u root; echo -e "${C_GREEN}✅ Доступ для суперпользователя разблокирован.${C_RESET}" ;;
+        2) silent_run passwd -u root; echo -e "${C_GREEN} Доступ для суперпользователя разблокирован.${C_RESET}" ;;
     esac
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
@@ -4926,7 +4926,7 @@ mod_tailscale() {
     DEFAULT_WAN_IF=$(get_wan_if)
     if [ "$mode" = "auto" ]; then
         if command -v tailscale &>/dev/null; then
-            echo -e "${C_BLUE}ℹ️ Пакет Tailscale уже установлен. Применение дополнительных настроек...${C_RESET}"
+            echo -e "${C_BLUE}ℹ Пакет Tailscale уже установлен. Применение дополнительных настроек...${C_RESET}"
             ensure_tailscale_installed || true
             enable_routing_optimizations || true
         else
@@ -4937,7 +4937,7 @@ mod_tailscale() {
                 if command -v ufw &>/dev/null; then
                     silent_run ufw delete allow 41641/udp
                 fi
-                echo -e "${C_YELLOW}⏭️ Установка Tailscale пропущена пользователем.${C_RESET}"
+                echo -e "${C_YELLOW}⏭ Установка Tailscale пропущена пользователем.${C_RESET}"
                 return 0
             fi
         fi
@@ -4963,18 +4963,18 @@ mod_tailscale() {
 
         local ts_choice
         if ! smart_menu "Настройка закрытой сети" "" 19 $WT_WIDTH 12 "ts_choice" \
-        "1" "🔑 Авторизация" \
-        "2" "🌐 Настройка шлюза" \
-        "3" "🔀 Трансляция локальных сетей" \
-        "4" "📥 Прием маршрутов" \
-        "5" "🔒 Стелс-режим" \
-        "6" "⚡ Ускорение и MSS Clamping" \
-        "7" "💻 Локальный веб-интерфейс" \
-        "8" "🔧 Приоритет сетевых правил" \
-        "9" "📡 Личный ретранслятор (DERP)" \
-        "10" "🔗 Каскад: NaiveProxy + Tailscale + WARP" \
-        "11" "🔄 Полный сброс" \
-        "0" "🔙 Вернуться назад"; then
+        "1" " Авторизация" \
+        "2" " Настройка шлюза" \
+        "3" " Трансляция локальных сетей" \
+        "4" " Прием маршрутов" \
+        "5" " Стелс-режим" \
+        "6" " Ускорение и MSS Clamping" \
+        "7" " Локальный веб-интерфейс" \
+        "8" " Приоритет сетевых правил" \
+        "9" " Личный ретранслятор (DERP)" \
+        "10" " Каскад: NaiveProxy + Tailscale + WARP" \
+        "11" " Полный сброс" \
+        "0" " Вернуться назад"; then
             break
         fi
 
@@ -5002,13 +5002,13 @@ mod_tailscale() {
             2)
                 local en_choice
                 if smart_menu "Настройка шлюза" "Действие:" 12 $WT_WIDTH 4 "en_choice" \
-                "1" "🌐 Назначить этот сервер шлюзом" \
-                "2" "❌ Отключить трансляцию шлюза" \
-                "3" "🔗 Подключиться к удаленному шлюзу" \
-                "4" "🔙 Отключиться от шлюза"; then
+                "1" " Назначить этот сервер шлюзом" \
+                "2" " Отключить трансляцию шлюза" \
+                "3" " Подключиться к удаленному шлюзу" \
+                "4" " Отключиться от шлюза"; then
                     case "$en_choice" in
                         1) 
-                            echo -e "${C_BLUE}⚙️ Настройка сервера в качестве сетевого шлюза...${C_RESET}"
+                            echo -e "${C_BLUE} Настройка сервера в качестве сетевого шлюза...${C_RESET}"
                             sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
                             disable_ufw_strict_rpfilter
 
@@ -5034,11 +5034,11 @@ mod_tailscale() {
                             set_tailscale_netfilter_priority "$active_nf" "true"
                             disable_ufw_strict_rpfilter
 
-                            echo -e "${C_GREEN}✅ Сервер успешно настроен как шлюз (правила защищены от перезагрузки)!${C_RESET}"
+                            echo -e "${C_GREEN} Сервер успешно настроен как шлюз (правила защищены от перезагрузки)!${C_RESET}"
                             print_network_health_summary
                             
-                            whiptail --title "⚠️ ВАЖНО: Активация в панели Tailscale" --msgbox \
-"Сервер объявлен шлюзом, форвардинг и правила NAT/SNAT закреплены!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n💡 Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
+                            whiptail --title " ВАЖНО: Активация в панели Tailscale" --msgbox \
+"Сервер объявлен шлюзом, форвардинг и правила NAT/SNAT закреплены!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
                             ;;
                         2) 
                             silent_run tailscale set --advertise-exit-node=false
@@ -5053,17 +5053,17 @@ mod_tailscale() {
                                     silent_run ufw reload
                                 fi
                             fi
-                            echo -e "${C_GREEN}✅ Функция шлюза Tailscale отключена.${C_RESET}" 
+                            echo -e "${C_GREEN} Функция шлюза Tailscale отключена.${C_RESET}" 
                             ;;
                         3)
                             local target_ip=""
                             prompt_clean "IP-адрес или имя удаленного шлюза:" target_ip
                             if [ -n "$target_ip" ]; then
                                 silent_run tailscale set --exit-node="$target_ip" --exit-node-allow-lan-access
-                                echo -e "${C_GREEN}✅ Весь трафик перенаправлен через выбранный узел.${C_RESET}"
+                                echo -e "${C_GREEN} Весь трафик перенаправлен через выбранный узел.${C_RESET}"
                             fi
                             ;;
-                        4) silent_run tailscale set --exit-node=; echo -e "${C_GREEN}✅ Перенаправление трафика отключено.${C_RESET}" ;;
+                        4) silent_run tailscale set --exit-node=; echo -e "${C_GREEN} Перенаправление трафика отключено.${C_RESET}" ;;
                     esac
                     pause_enter
                 fi
@@ -5071,8 +5071,8 @@ mod_tailscale() {
             3)
                 local tr_choice
                 if smart_menu "Трансляция локальных сетей" "Действие:" 11 $WT_WIDTH 2 "tr_choice" \
-                "1" "🌐 Включить трансляцию (Задать подсеть)" \
-                "2" "❌ Отключить трансляцию"; then
+                "1" " Включить трансляцию (Задать подсеть)" \
+                "2" " Отключить трансляцию"; then
                     case "$tr_choice" in
                         1)
                             local sub=$(get_interface_subnet "$DEFAULT_WAN_IF")
@@ -5081,12 +5081,12 @@ mod_tailscale() {
                             prompt_default "Сетевой диапазон для трансляции:" "${sub}.0/24" r_input
                             if [ "$MODULE_CANCELED" = false ] && [ -n "$r_input" ]; then
                                 silent_run tailscale set --advertise-routes="$r_input"
-                                echo -e "${C_GREEN}✅ Выбранный диапазон ($r_input) транслируется в общую сеть.${C_RESET}"
+                                echo -e "${C_GREEN} Выбранный диапазон ($r_input) транслируется в общую сеть.${C_RESET}"
                             fi
                             ;;
                         2)
                             silent_run tailscale set --advertise-routes=""
-                            echo -e "${C_GREEN}✅ Трансляция локальных сетей успешно отключена.${C_RESET}"
+                            echo -e "${C_GREEN} Трансляция локальных сетей успешно отключена.${C_RESET}"
                             ;;
                     esac
                     pause_enter
@@ -5094,17 +5094,17 @@ mod_tailscale() {
                 ;;
             4)
                 if prompt_yn "Разрешить принятие внешних сетевых маршрутов от других устройств в вашей сети?" "true"; then
-                    silent_run tailscale set --accept-routes=true; echo -e "${C_GREEN}✅ Принятие маршрутов включено.${C_RESET}"
+                    silent_run tailscale set --accept-routes=true; echo -e "${C_GREEN} Принятие маршрутов включено.${C_RESET}"
                 else
-                    silent_run tailscale set --accept-routes=false; echo -e "${C_BLUE}✅ Принятие маршрутов отключено.${C_RESET}"
+                    silent_run tailscale set --accept-routes=false; echo -e "${C_BLUE} Принятие маршрутов отключено.${C_RESET}"
                 fi
                 pause_enter
                 ;;
             5)
                 if prompt_yn "Включить скрытый режим работы (отбрасывание нежелательного входящего трафика)?" "true"; then
-                    silent_run tailscale set --stateful-filtering=true; echo -e "${C_GREEN}✅ Скрытый режим работы активирован.${C_RESET}"
+                    silent_run tailscale set --stateful-filtering=true; echo -e "${C_GREEN} Скрытый режим работы активирован.${C_RESET}"
                 else
-                    silent_run tailscale set --stateful-filtering=false; echo -e "${C_BLUE}✅ Скрытый режим отключен.${C_RESET}"
+                    silent_run tailscale set --stateful-filtering=false; echo -e "${C_BLUE} Скрытый режим отключен.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -5119,24 +5119,24 @@ mod_tailscale() {
                         silent_run ufw allow in on tailscale0 to any port 5252 proto tcp comment 'Tailscale Web UI'
                     fi
                     local ts_ip_now=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "100.x.x.x")
-                    echo -e "${C_GREEN}✅ Веб-интерфейс запущен, порт 5252/tcp открыт в UFW.${C_RESET}"
-                    echo -e "${C_BLUE}🌐 Адрес панели: http://${ts_ip_now}:5252${C_RESET}"
+                    echo -e "${C_GREEN} Веб-интерфейс запущен, порт 5252/tcp открыт в UFW.${C_RESET}"
+                    echo -e "${C_BLUE} Адрес панели: http://${ts_ip_now}:5252${C_RESET}"
                 else
                     silent_run tailscale set --webclient=false
                     if command -v ufw &>/dev/null; then
                         silent_run ufw delete allow in on tailscale0 to any port 5252 proto tcp
                     fi
-                    echo -e "${C_BLUE}✅ Панель управления остановлена, порт 5252/tcp закрыт в UFW.${C_RESET}"
+                    echo -e "${C_BLUE} Панель управления остановлена, порт 5252/tcp закрыт в UFW.${C_RESET}"
                 fi
                 pause_enter
                 ;;
             8)
                 local nf_choice
                 if smart_menu "Приоритет сетевых правил" "Действие:" 13 $WT_WIDTH 4 "nf_choice" \
-                "1" "🔒 Приоритет брандмауэра UFW (системный режим)" \
-                "2" "🔗 Приоритет Tailscale (встроенный авто-режим)" \
-                "3" "🔀 Выбрать интерфейсы для сквозного транзита" \
-                "4" "🧹 Очистить дубликаты NAT и перезагрузить UFW"; then
+                "1" " Приоритет брандмауэра UFW (системный режим)" \
+                "2" " Приоритет Tailscale (встроенный авто-режим)" \
+                "3" " Выбрать интерфейсы для сквозного транзита" \
+                "4" " Очистить дубликаты NAT и перезагрузить UFW"; then
                     case "$nf_choice" in
                         1) set_tailscale_netfilter_priority "off" ;;
                         2) set_tailscale_netfilter_priority "on" ;;
@@ -5145,13 +5145,13 @@ mod_tailscale() {
                             if [ -n "$wan_dev" ]; then
                                 select_and_apply_routed_interfaces "$wan_dev"
                                 flush_and_reload_nat
-                                echo -e "${C_GREEN}✅ Правила сквозного транзита для выбранных интерфейсов обновлены.${C_RESET}"
+                                echo -e "${C_GREEN} Правила сквозного транзита для выбранных интерфейсов обновлены.${C_RESET}"
                             fi
                             ;;
                         4)
                             flush_and_reload_nat
                             [ "$(get_tailscale_netfilter_mode)" = "off" ] && clean_tailscale_iptables_chains
-                            echo -e "${C_GREEN}✅ Таблица NAT очищена от дубликатов, правила UFW перезагружены.${C_RESET}"
+                            echo -e "${C_GREEN} Таблица NAT очищена от дубликатов, правила UFW перезагружены.${C_RESET}"
                             ;;
                     esac
                     print_network_health_summary
@@ -5171,7 +5171,7 @@ mod_tailscale() {
                     if command -v ufw &>/dev/null; then
                         silent_run ufw delete allow in on tailscale0 to any port 5252 proto tcp
                     fi
-                    echo -e "${C_GREEN}✅ Сетевые параметры очищены.${C_RESET}"
+                    echo -e "${C_GREEN} Сетевые параметры очищены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -5182,7 +5182,7 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 
 # 11. Управление логированием (Интерактивный менеджер)
 mod_logging_manager() {
-    echo -e "${C_CYAN}📝 === 11/21. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
+    echo -e "${C_CYAN} === 11/21. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
     local cur_usage="N/A"
     if command -v journalctl &>/dev/null; then
@@ -5192,10 +5192,10 @@ mod_logging_manager() {
     
     local cur_mode="Стандартный"
     if [ -f /etc/systemd/system/clean-logs-boot.service ] || [ -f /usr/local/bin/disable-logging.sh ]; then
-        cur_mode="🚫 Отключены (Stealth)"
+        cur_mode=" Отключены (Stealth)"
     elif grep -qE "^\s*SystemMaxUse=" /etc/systemd/journald.conf 2>/dev/null; then
         local cur_lim=$(grep -E "^\s*SystemMaxUse=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
-        cur_mode="🛡️ Ограничены (${cur_lim})"
+        cur_mode=" Ограничены (${cur_lim})"
     fi
     
     local msg="\nТекущее состояние журналов:
@@ -5206,10 +5206,10 @@ mod_logging_manager() {
     
     local log_choice=""
     if ! smart_menu "Управление системными журналами" "$msg" 16 $WT_WIDTH 4 "log_choice" \
-    "1" "🛡️ Ограничить размер (100 МБ, 1 месяц)" \
-    "2" "⚙️ Задать собственный лимит размера" \
-    "3" "🚫 Отключить ведение логов (Stealth)" \
-    "0" "🔙 Вернуться назад" || [ "$log_choice" = "0" ] || [ -z "$log_choice" ]; then
+    "1" " Ограничить размер (100 МБ, 1 месяц)" \
+    "2" " Задать собственный лимит размера" \
+    "3" " Отключить ведение логов (Stealth)" \
+    "0" " Вернуться назад" || [ "$log_choice" = "0" ] || [ -z "$log_choice" ]; then
         MODULE_CANCELED=true
         return 0
     fi
@@ -5223,7 +5223,7 @@ mod_logging_manager() {
             [ "$MODULE_CANCELED" = true ] && return 0
         fi
         
-        echo -e "${C_BLUE}⚙️ Применение лимита журналов ($log_size)...${C_RESET}"
+        echo -e "${C_BLUE} Применение лимита журналов ($log_size)...${C_RESET}"
         silent_run sed -i -E '/^\s*#?\s*(\[Journal\]|Storage=|ForwardToSyslog=|ForwardToKMsg=|ForwardToConsole=|ForwardToWall=|SystemMaxUse=|MaxRetentionSec=)/d' /etc/systemd/journald.conf
         cat << CONF >> /etc/systemd/journald.conf
 [Journal]
@@ -5239,11 +5239,11 @@ CONF
         journalctl --vacuum-size="$log_size" >/dev/null 2>&1 || true
         local new_usage=$(journalctl --disk-usage 2>/dev/null || echo "")
         
-        echo -e "${C_GREEN}✅ Системные журналы успешно ограничены объемом $log_size (хранение до 1 месяца).${C_RESET}"
+        echo -e "${C_GREEN} Системные журналы успешно ограничены объемом $log_size (хранение до 1 месяца).${C_RESET}"
         [ -n "$new_usage" ] && echo -e "  • ${C_BLUE}$new_usage${C_RESET}"
     
     elif [ "$log_choice" = "3" ]; then
-        echo -e "${C_BLUE}⚙️ Включение режима Stealth и отключение системных журналов...${C_RESET}"
+        echo -e "${C_BLUE} Включение режима Stealth и отключение системных журналов...${C_RESET}"
         cat << 'DISABLE_LOGS_EOF' > /usr/local/bin/disable-logging.sh
 #!/bin/bash
 set -euo pipefail
@@ -5302,7 +5302,7 @@ BOOT_CLEAN_SVC_EOF
         silent_run systemctl daemon-reload
         silent_run systemctl enable clean-logs-boot.service
         /usr/local/bin/disable-logging.sh
-        echo -e "${C_GREEN}✅ Полное отключение системного журналирования успешно активировано (режим Stealth).${C_RESET}"
+        echo -e "${C_GREEN} Полное отключение системного журналирования успешно активировано (режим Stealth).${C_RESET}"
         echo -e "  • ${C_BLUE}Служба journald переведена в режим Storage=none${C_RESET}"
         echo -e "  • ${C_BLUE}Службы rsyslog/auditd отключены, логи очищены${C_RESET}"
     fi
@@ -5319,7 +5319,7 @@ CONF
 
 # 12. Оптимизация RAM / Flash (с префиксом 99-zzz-)
 mod_ram_flash_opt() {
-    echo -e "${C_CYAN}⚡ === 12/21. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
+    echo -e "${C_CYAN} === 12/21. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
 
     local target_swappiness=1
@@ -5327,7 +5327,7 @@ mod_ram_flash_opt() {
     if swapon --show 2>/dev/null | grep -q "zram"; then
         target_swappiness=100
         target_page_cluster=0
-        echo -e "${C_BLUE}ℹ️ Обнаружен активный zRAM: установлен vm.swappiness=100 и page-cluster=0 для сжатия в ОЗУ.${C_RESET}"
+        echo -e "${C_BLUE}ℹ Обнаружен активный zRAM: установлен vm.swappiness=100 и page-cluster=0 для сжатия в ОЗУ.${C_RESET}"
     fi
 
     mkdir -p /etc/sysctl.d
@@ -5358,7 +5358,7 @@ EOF
             silent_run tune2fs -E mount_opts=commit=120 "$root_dev"
         fi
         silent_run mount -o remount,noatime,commit=120 /
-        echo -e "${C_GREEN}✅ Настройки noatime и commit=120 успешно применены (ФС: $root_fs).${C_RESET}"
+        echo -e "${C_GREEN} Настройки noatime и commit=120 успешно применены (ФС: $root_fs).${C_RESET}"
     else
         awk '
         BEGIN { OFS="\t" }
@@ -5367,7 +5367,7 @@ EOF
         }
         { print }' /etc/fstab > /tmp/fstab.tmp && cat /tmp/fstab.tmp > /etc/fstab && rm -f /tmp/fstab.tmp
         silent_run mount -o remount,noatime /
-        echo -e "${C_YELLOW}⚠️ Файловая система '$root_fs' не поддерживает commit=120. Применен только noatime.${C_RESET}"
+        echo -e "${C_YELLOW} Файловая система '$root_fs' не поддерживает commit=120. Применен только noatime.${C_RESET}"
     fi
 
     for dev_sched in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler; do
@@ -5405,9 +5405,9 @@ UDEV_EOF
 mod_swap_manager() {
     local swap_choice
     if ! smart_menu "Файл подкачки (Swap)" "Управление виртуальной памятью:" 12 $WT_WIDTH 3 "swap_choice" \
-    "1" "💾 Создать базовый объем (2 ГБ)" \
-    "2" "⚙️ Указать собственный объем" \
-    "3" "❌ Полностью отключить файл подкачки" || [ "$swap_choice" = "0" ]; then
+    "1" " Создать базовый объем (2 ГБ)" \
+    "2" " Указать собственный объем" \
+    "3" " Полностью отключить файл подкачки" || [ "$swap_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0
     fi
@@ -5420,7 +5420,7 @@ mod_swap_manager() {
                 prompt_default "Желаемый объем памяти (например: 2G, 4G, 1024M):" "4G" swap_size
                 [ "$MODULE_CANCELED" = true ] && return 0
                 if [[ ! "$swap_size" =~ ^[0-9]+[GgMm]$ ]]; then
-                    echo -e "${C_RED}❌ Ошибка: Неверный формат объема. Используйте G или M (например, 2G или 2048M).${C_RESET}"
+                    echo -e "${C_RED} Ошибка: Неверный формат объема. Используйте G или M (например, 2G или 2048M).${C_RESET}"
                     pause_enter
                     return 1
                 fi
@@ -5450,28 +5450,28 @@ mod_swap_manager() {
             swapon /swapfile
             sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
             echo '/swapfile none swap sw 0 0' >> /etc/fstab
-            echo -e "${C_GREEN}✅ Файл подкачки размером $swap_size успешно инициализирован!${C_RESET}"
+            echo -e "${C_GREEN} Файл подкачки размером $swap_size успешно инициализирован!${C_RESET}"
             ;;
         3)
             silent_run swapoff /swapfile 2>/dev/null
             silent_run swapoff /swap.img 2>/dev/null
             sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
             rm -f /swapfile /swap.img
-            echo -e "${C_GREEN}✅ Дисковый файл подкачки отключен.${C_RESET}"
+            echo -e "${C_GREEN} Дисковый файл подкачки отключен.${C_RESET}"
             ;;
     esac
 }
 
 # 14. Системные утилиты и режим процессора
 mod_desktop_apps() {
-    echo -e "${C_CYAN}💻 === 14/21. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
+    echo -e "${C_CYAN} === 14/21. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
     local gov_choice
     if smart_menu "Управление питанием процессора" "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 "gov_choice" \
-    "1" "⚡ Performance (Максимальный)" \
-    "2" "🔄 Ondemand / Schedutil (Сбалансированный)" \
-    "3" "🍃 Powersave (Эко-режим)" \
-    "0" "🔙 Без изменений" && [ "$gov_choice" != "0" ]; then
+    "1" " Performance (Максимальный)" \
+    "2" " Ondemand / Schedutil (Сбалансированный)" \
+    "3" " Powersave (Эко-режим)" \
+    "0" " Без изменений" && [ "$gov_choice" != "0" ]; then
         local selected_gov="ondemand"
         local gov_name="Сбалансированный"
         local avail_govs=""
@@ -5491,7 +5491,7 @@ mod_desktop_apps() {
             3) selected_gov="powersave"; gov_name="Эко-режим (Powersave)" ;;
         esac
 
-        echo -e "${C_BLUE}⚙️ Установка режима процессора: $gov_name...${C_RESET}"
+        echo -e "${C_BLUE} Установка режима процессора: $gov_name...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         silent_run apt-get update
         silent_run apt-get install -yq cpufrequtils
@@ -5502,13 +5502,13 @@ mod_desktop_apps() {
         for cpu in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
             [ -f "$cpu" ] && echo "$selected_gov" > "$cpu" 2>/dev/null || true
         done
-        echo -e "${C_GREEN}✅ Режим процессора успешно изменен на $gov_name.${C_RESET}"
+        echo -e "${C_GREEN} Режим процессора успешно изменен на $gov_name.${C_RESET}"
     else
-        echo -e "${C_YELLOW}⏭️ Настройка режима процессора пропущена.${C_RESET}"
+        echo -e "${C_YELLOW}⏭ Настройка режима процессора пропущена.${C_RESET}"
     fi
 
     if whiptail --title "Графическое окружение" --yesno "\nУстановить трей-апплеты (сеть, звук, bluetooth, батарея) и добавить их в автозапуск?\n\n(Имеет смысл только для систем с графическим рабочим столом)." 13 $WT_WIDTH; then
-        echo -e "${C_BLUE}📦 Установка утилит для графического интерфейса...${C_RESET}"
+        echo -e "${C_BLUE} Установка утилит для графического интерфейса...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         silent_run apt-get update
         silent_run apt-get install -yq network-manager-gnome pasystray blueman cbatticon
@@ -5550,15 +5550,15 @@ X-GNOME-Autostart-enabled=true
 EOF
 
         silent_run chown -R "$target_user:$target_user" "$target_home/.config"
-        echo -e "${C_GREEN}✅ Инструменты графического окружения добавлены в автозапуск для $target_user.${C_RESET}"
+        echo -e "${C_GREEN} Инструменты графического окружения добавлены в автозапуск для $target_user.${C_RESET}"
     else
-        echo -e "${C_YELLOW}⏭️ Установка графических утилит пропущена.${C_RESET}"
+        echo -e "${C_YELLOW}⏭ Установка графических утилит пропущена.${C_RESET}"
     fi
 }
 
 # 15. Программный сброс HDMI
 mod_hdmi_reset() {
-    echo -e "${C_CYAN}📺 === 15/21. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
+    echo -e "${C_CYAN} === 15/21. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
     cat << 'HDMI_EOF' > /usr/local/bin/reset-hdmi.sh
 #!/bin/bash
 HDMI_OUTPUT=$(xrandr 2>/dev/null | grep -E "^HDMI-[0-9A-Z-]+ connected" | awk '{print $1}' | head -n 1 || true)
@@ -5580,9 +5580,9 @@ HDMI_EOF
                 echo -e "\n[Seat:*]\ndisplay-setup-script=/usr/local/bin/reset-hdmi.sh" >> /etc/lightdm/lightdm.conf
             fi
         fi
-        echo -e "${C_GREEN}✅ Скрипт автоматического сброса HDMI подключен к дисплейному менеджеру LightDM.${C_RESET}"
+        echo -e "${C_GREEN} Скрипт автоматического сброса HDMI подключен к дисплейному менеджеру LightDM.${C_RESET}"
     else
-        echo -e "${C_GREEN}✅ Скрипт /usr/local/bin/reset-hdmi.sh создан. Конфигурация LightDM не найдена.${C_RESET}"
+        echo -e "${C_GREEN} Скрипт /usr/local/bin/reset-hdmi.sh создан. Конфигурация LightDM не найдена.${C_RESET}"
     fi
 }
 
@@ -5590,7 +5590,7 @@ HDMI_EOF
 mod_boot_diag() {
     echo -e "${C_CYAN}⏳ === 16/21. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
-        echo -e "${C_RED}❌ Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
+        echo -e "${C_RED} Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
     fi
 
@@ -5604,7 +5604,7 @@ mod_boot_diag() {
     local report_file="$output_dir/boot_report_${timestamp}.txt"
     local svg_file="$output_dir/boot_${timestamp}.svg"
 
-    echo "📊 Сбор данных о загрузке системы..."
+    echo " Сбор данных о загрузке системы..."
     echo "--- 1. Общее время старта ---" | tee "$report_file"
     systemd-analyze | tee -a "$report_file"
     echo "" | tee -a "$report_file"
@@ -5620,9 +5620,9 @@ mod_boot_diag() {
     silent_run systemd-analyze plot > "$svg_file"
     silent_run chown -R "$target_user:$target_user" "$output_dir"
     
-    echo -e "${C_GREEN}✅ Диагностика успешно завершена.${C_RESET}"
-    echo "📄 Текстовый отчёт сохранен: $report_file"
-    echo "📊 SVG-график сохранен:      $svg_file"
+    echo -e "${C_GREEN} Диагностика успешно завершена.${C_RESET}"
+    echo " Текстовый отчёт сохранен: $report_file"
+    echo " SVG-график сохранен:      $svg_file"
 }
 
 # 17. Полный аудит сервера (с проверкой ретранслятора DERP и обоих типов каскада)
@@ -5631,11 +5631,11 @@ mod_boot_diag() {
 audit_nat_output() {
     local iface="$1" rules stats total unique repeated groups
     if ! command -v iptables >/dev/null 2>&1; then
-        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Проверка недоступна: не найден компонент iptables${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ  Проверка недоступна: не найден компонент iptables${C_RESET}"
         return 0
     fi
     if ! rules=$(iptables -t nat -S POSTROUTING 2>/dev/null); then
-        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Не удалось прочитать правила; состояние NAT не определено${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ  Не удалось прочитать правила; состояние NAT не определено${C_RESET}"
         return 0
     fi
     stats=$(printf '%s\n' "$rules" | awk -v iface="$iface" '
@@ -5657,14 +5657,14 @@ audit_nat_output() {
         }')
     read -r total unique repeated groups <<< "$stats"
     if [[ "$total" == 0 ]]; then
-        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Прямых правил для $iface не найдено; другие цепочки и сетевые механизмы не проверялись${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ  Прямых правил для $iface не найдено; другие цепочки и сетевые механизмы не проверялись${C_RESET}"
     elif [[ "$repeated" == 0 ]]; then
-        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  На $iface настроено правил: $total; точных повторов нет${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ  На $iface настроено правил: $total; точных повторов нет${C_RESET}"
         if ((total>1)); then
             echo -e "                              ${C_BLUE}Несколько разных правил — само по себе не ошибка. Очистка по этому признаку не требуется.${C_RESET}"
         fi
     else
-        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  На $iface правил: $total; различных: $unique; лишних точных повторов: $repeated${C_RESET}"
+        echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ  На $iface правил: $total; различных: $unique; лишних точных повторов: $repeated${C_RESET}"
         echo -e "                              ${C_BLUE}Замечание к конфигурации, не доказательство сбоя. Автоматическая очистка не выполняется.${C_RESET}"
     fi
 }
@@ -5672,7 +5672,7 @@ audit_nat_output() {
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
-    echo -e "${C_BOLD}       🔍  АУДИТ СИСТЕМЫ 1 (ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ)     ${C_RESET}"
+    echo -e "${C_BOLD}         АУДИТ СИСТЕМЫ 1 (ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ)     ${C_RESET}"
     echo -e "${C_CYAN}=================================================================${C_RESET}\n"
     
     local active_user=$(get_active_user)
@@ -5682,8 +5682,8 @@ mod_server_audit() {
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
     current_tz="${current_tz#Etc/}"
     local ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "no")
-    local ntp_str="${C_YELLOW}⚠️  Нет синхронизации точного времени${C_RESET}"
-    [ "$ntp_sync" = "yes" ] && ntp_str="${C_GREEN}✅ Время синхронизировано${C_RESET}"
+    local ntp_str="${C_YELLOW}  Нет синхронизации точного времени${C_RESET}"
+    [ "$ntp_sync" = "yes" ] && ntp_str="${C_GREEN} Время синхронизировано${C_RESET}"
 
     local sys_type_human=$(get_system_type_human)
     local boot_target=$(systemctl get-default 2>/dev/null || echo "multi-user.target")
@@ -5696,9 +5696,9 @@ mod_server_audit() {
     echo -e "  • Режим работы системы:      $boot_target_human"
     
     if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
-        echo -e "  • Фоновые обновления:        ${C_GREEN}✅ Включены (авто-установка обновлений защиты)${C_RESET}"
+        echo -e "  • Фоновые обновления:        ${C_GREEN} Включены (авто-установка обновлений защиты)${C_RESET}"
     else
-        echo -e "  • Фоновые обновления:        ${C_RED}❌ Отключены${C_RESET}"
+        echo -e "  • Фоновые обновления:        ${C_RED} Отключены${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 2. Аппаратная часть и Детектор оверселлинга ---${C_RESET}"
@@ -5708,11 +5708,11 @@ mod_server_audit() {
         if [ -n "$raw_temp" ] && [ "$raw_temp" -gt 0 ]; then
             cpu_temp=$(LC_ALL=C awk "BEGIN {printf \"%.1f°C\", $raw_temp/1000}")
             if [ "$raw_temp" -gt 75000 ]; then
-                cpu_temp="${C_RED}🔥 $cpu_temp (Критический перегрев / Снижение частот!)${C_RESET}"
+                cpu_temp="${C_RED} $cpu_temp (Критический перегрев / Снижение частот!)${C_RESET}"
             elif [ "$raw_temp" -gt 60000 ]; then
-                cpu_temp="${C_YELLOW}⚠️  $cpu_temp (Повышенный нагрев)${C_RESET}"
+                cpu_temp="${C_YELLOW}  $cpu_temp (Повышенный нагрев)${C_RESET}"
             else
-                cpu_temp="${C_GREEN}❄️  $cpu_temp (В норме)${C_RESET}"
+                cpu_temp="${C_GREEN}  $cpu_temp (В норме)${C_RESET}"
             fi
         fi
     fi
@@ -5751,7 +5751,7 @@ mod_server_audit() {
     local steal_status="${C_BLUE}Неприменимо (физическое железо)${C_RESET}"
     local cpu_speed_status="${C_BLUE}Стандартная${C_RESET}"
     local disk_io_status="${C_BLUE}Не проверялся${C_RESET}"
-    local psi_status="${C_GREEN}✅ 0.0% (очередей ожидания нет)${C_RESET}"
+    local psi_status="${C_GREEN} 0.0% (очередей ожидания нет)${C_RESET}"
     local oversell_score=0
 
     local stat_line1=$(grep '^cpu ' /proc/stat 2>/dev/null || echo "")
@@ -5761,11 +5761,11 @@ mod_server_audit() {
 
     local cpu_bench_ms=$(LC_ALL=C awk -v t1="$t_cpu1" -v t2="$t_cpu2" 'BEGIN {d=(t2-t1)*1000; if(d<1) d=1; printf "%d", d}')
     if [ "$cpu_bench_ms" -lt 150 ]; then
-        cpu_speed_status="${C_GREEN}✅ Быстрый (${cpu_bench_ms} мс — без троттлинга)${C_RESET}"
+        cpu_speed_status="${C_GREEN} Быстрый (${cpu_bench_ms} мс — без троттлинга)${C_RESET}"
     elif [ "$cpu_bench_ms" -lt 350 ]; then
-        cpu_speed_status="${C_GREEN}✅ Нормальный (${cpu_bench_ms} мс — стандартное ядро)${C_RESET}"
+        cpu_speed_status="${C_GREEN} Нормальный (${cpu_bench_ms} мс — стандартное ядро)${C_RESET}"
     else
-        cpu_speed_status="${C_YELLOW}⚠️  Замедлен (${cpu_bench_ms} мс — хостер лимитирует ядро!)${C_RESET}"
+        cpu_speed_status="${C_YELLOW}  Замедлен (${cpu_bench_ms} мс — хостер лимитирует ядро!)${C_RESET}"
         oversell_score=$((oversell_score + 1))
     fi
 
@@ -5786,11 +5786,11 @@ mod_server_audit() {
         local io_lat_int=$(echo "$io_parsed" | cut -d'|' -f3)
 
         if [ "$io_lat_int" -lt 3 ]; then
-            disk_io_status="${C_GREEN}✅ Быстрый NVMe/SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
+            disk_io_status="${C_GREEN} Быстрый NVMe/SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
         elif [ "$io_lat_int" -lt 12 ]; then
-            disk_io_status="${C_GREEN}✅ Нормальный SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
+            disk_io_status="${C_GREEN} Нормальный SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
         else
-            disk_io_status="${C_YELLOW}⚠️  Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск занят!)${C_RESET}"
+            disk_io_status="${C_YELLOW}  Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск занят!)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         fi
     else
@@ -5818,14 +5818,14 @@ mod_server_audit() {
         local steal_int="${parsed_stat#*|}"
 
         if [ "$steal_int" -eq 0 ]; then
-            steal_status="${C_GREEN}✅ 0.0% под нагрузкой (хостер честно отдает ядро)${C_RESET}"
+            steal_status="${C_GREEN} 0.0% под нагрузкой (хостер честно отдает ядро)${C_RESET}"
         elif [ "$steal_int" -lt 5 ]; then
-            steal_status="${C_GREEN}✅ Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
+            steal_status="${C_GREEN} Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
         elif [ "$steal_int" -lt 15 ]; then
-            steal_status="${C_YELLOW}⚠️  Умеренный (${steal_pct}% — заметная очередь за процессором)${C_RESET}"
+            steal_status="${C_YELLOW}  Умеренный (${steal_pct}% — заметная очередь за процессором)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         else
-            steal_status="${C_RED}🚨 ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг CPU на ноде!)${C_RESET}"
+            steal_status="${C_RED} ВЫСОКИЙ (${steal_pct}% — жесткий оверселлинг CPU на ноде!)${C_RESET}"
             oversell_score=$((oversell_score + 2))
         fi
     fi
@@ -5837,18 +5837,18 @@ mod_server_audit() {
         psi_io="${psi_io:-0.00}"
         local psi_bad_flag=$(LC_ALL=C awk -v c="$psi_cpu" -v d="$psi_io" 'BEGIN {if (c+0 > 5.0 || d+0 > 10.0) print 1; else print 0}')
         if [ "${psi_bad_flag:-0}" -eq 1 ]; then
-            psi_status="${C_YELLOW}⚠️  Замечены простои в очереди (CPU: ${psi_cpu}%, Диск: ${psi_io}%)${C_RESET}"
+            psi_status="${C_YELLOW}  Замечены простои в очереди (CPU: ${psi_cpu}%, Диск: ${psi_io}%)${C_RESET}"
             oversell_score=$((oversell_score + 1))
         else
-            psi_status="${C_GREEN}✅ В норме (CPU: ${psi_cpu}%, Диск: ${psi_io}% за минуту)${C_RESET}"
+            psi_status="${C_GREEN} В норме (CPU: ${psi_cpu}%, Диск: ${psi_io}% за минуту)${C_RESET}"
         fi
     fi
 
-    local verdict_human="${C_GREEN}🟢 Честные ресурсы (оверселлинг не обнаружен)${C_RESET}"
+    local verdict_human="${C_GREEN} Честные ресурсы (оверселлинг не обнаружен)${C_RESET}"
     if [ "$oversell_score" -eq 1 ]; then
-        verdict_human="${C_YELLOW}🟡 Умеренный оверселлинг (ресурсы делятся с соседями)${C_RESET}"
+        verdict_human="${C_YELLOW} Умеренный оверселлинг (ресурсы делятся с соседями)${C_RESET}"
     elif [ "$oversell_score" -ge 2 ]; then
-        verdict_human="${C_RED}🔴 Жесткий оверселлинг! (хостер урезает железо)${C_RESET}"
+        verdict_human="${C_RED} Жесткий оверселлинг! (хостер урезает железо)${C_RESET}"
     fi
 
     echo -e "  • Температура процессора:    $cpu_temp"
@@ -5871,18 +5871,18 @@ mod_server_audit() {
 
     local sudo_effective_line=$(sudo -l -U "$active_user" 2>/dev/null | grep -E "NOPASSWD|ALL" | tail -n 1 || echo "")
     if echo "$sudo_effective_line" | grep -q "NOPASSWD"; then
-        echo -e "  • Повышение прав (Sudo):     ${C_GREEN}✅ Без запроса пароля (NOPASSWD активен)${C_RESET}"
+        echo -e "  • Повышение прав (Sudo):     ${C_GREEN} Без запроса пароля (NOPASSWD активен)${C_RESET}"
     elif [ -f "/etc/sudoers.d/99-zzz-$active_user" ] || [ -f "/etc/sudoers.d/$active_user" ]; then
-        echo -e "  • Повышение прав (Sudo):     ${C_YELLOW}⚠️  Файл NOPASSWD есть, но перебит другим правилом (перезапустите п. 4)${C_RESET}"
+        echo -e "  • Повышение прав (Sudo):     ${C_YELLOW}  Файл NOPASSWD есть, но перебит другим правилом (перезапустите п. 4)${C_RESET}"
     else
-        echo -e "  • Повышение прав (Sudo):     ${C_BLUE}ℹ️  Стандартный запрос пароля${C_RESET}"
+        echo -e "  • Повышение прав (Sudo):     ${C_BLUE}ℹ  Стандартный запрос пароля${C_RESET}"
     fi
 
     local root_locked=$(passwd -S root 2>/dev/null || echo "")
     if echo "$root_locked" | grep -qE " L | LK | NP "; then
-        echo -e "  • Пароль суперпользователя:  ${C_GREEN}✅ Заблокирован (защищено)${C_RESET}"
+        echo -e "  • Пароль суперпользователя:  ${C_GREEN} Заблокирован (защищено)${C_RESET}"
     else
-        echo -e "  • Пароль суперпользователя:  ${C_RED}❌ Активен (разрешен прямой вход root)${C_RESET}"
+        echo -e "  • Пароль суперпользователя:  ${C_RED} Активен (разрешен прямой вход root)${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
@@ -5901,22 +5901,22 @@ mod_server_audit() {
 
     local port_status_human
     if [ "$ssh_port" = "22" ]; then
-        port_status_human="${C_YELLOW}⚠️  22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
+        port_status_human="${C_YELLOW}  22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
     else
-        port_status_human="${C_GREEN}✅ $ssh_port (Нестандартный порт)${C_RESET}"
+        port_status_human="${C_GREEN} $ssh_port (Нестандартный порт)${C_RESET}"
     fi
 
     local root_status_human
     case "${root_ssh,,}" in
-        no) root_status_human="${C_GREEN}✅ Запрещен${C_RESET}" ;;
-        prohibit-password|without-password) root_status_human="${C_GREEN}✅ Только по SSH-ключам${C_RESET}" ;;
-        yes|*) root_status_human="${C_RED}❌ Разрешен${C_RESET}" ;;
+        no) root_status_human="${C_GREEN} Запрещен${C_RESET}" ;;
+        prohibit-password|without-password) root_status_human="${C_GREEN} Только по SSH-ключам${C_RESET}" ;;
+        yes|*) root_status_human="${C_RED} Разрешен${C_RESET}" ;;
     esac
 
     local pass_status_human
     case "${pass_auth,,}" in
-        no) pass_status_human="${C_GREEN}✅ Отключен (вход только по SSH-ключам)${C_RESET}" ;;
-        yes|*) pass_status_human="${C_YELLOW}⚠️  Разрешен вход по паролю${C_RESET}" ;;
+        no) pass_status_human="${C_GREEN} Отключен (вход только по SSH-ключам)${C_RESET}" ;;
+        yes|*) pass_status_human="${C_YELLOW}  Разрешен вход по паролю${C_RESET}" ;;
     esac
 
     echo -e "  • Используемый порт SSH:     $port_status_human"
@@ -5924,9 +5924,9 @@ mod_server_audit() {
     echo -e "  • Авторизация по паролю:     $pass_status_human"
 
     if systemctl is-active --quiet sshguard 2>/dev/null; then
-        echo -e "  • Защита от перебора пароля: ${C_GREEN}✅ Работает (легковесный демон sshguard)${C_RESET}"
+        echo -e "  • Защита от перебора пароля: ${C_GREEN} Работает (легковесный демон sshguard)${C_RESET}"
     elif systemctl is-active --quiet fail2ban 2>/dev/null; then
-        echo -e "  • Защита от перебора пароля: ${C_GREEN}✅ Работает (служба fail2ban)${C_RESET}"
+        echo -e "  • Защита от перебора пароля: ${C_GREEN} Работает (служба fail2ban)${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
@@ -5935,14 +5935,14 @@ mod_server_audit() {
         local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
         if [ "$param" = "net.core.rmem_max" ]; then
             if [ "$val" != "N/A" ] && [ "$val" -ge 26214400 ] 2>/dev/null; then
-                echo -e "  • ${label}${C_GREEN}✅ Активны (расширенные буферы под высокие скорости, сейчас: $val)${C_RESET}"
+                echo -e "  • ${label}${C_GREEN} Активны (расширенные буферы под высокие скорости, сейчас: $val)${C_RESET}"
                 return
             fi
         fi
         if [ "$val" = "$expected" ]; then
-            echo -e "  • ${label}${C_GREEN}✅ $ok_msg${C_RESET}"
+            echo -e "  • ${label}${C_GREEN} $ok_msg${C_RESET}"
         else
-            echo -e "  • ${label}${C_YELLOW}⚠️  $err_msg (сейчас: $val)${C_RESET}"
+            echo -e "  • ${label}${C_YELLOW}  $err_msg (сейчас: $val)${C_RESET}"
         fi
     }
     check_param "kernel.dmesg_restrict"           "1"        "Защита журнала ядра:       " "Включена" "Отключена"
@@ -5954,37 +5954,37 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_out=$(LC_ALL=C ufw status 2>/dev/null || echo "")
-        echo -e "  • Статус брандмауэра:        ${C_GREEN}✅ Включен и защищает сервер${C_RESET}"
+        echo -e "  • Статус брандмауэра:        ${C_GREEN} Включен и защищает сервер${C_RESET}"
         
         local fwd_policy=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")
         if [ "$fwd_policy" = "ACCEPT" ]; then
-            echo -e "  • Пересылка трафика (Шлюз):  ${C_GREEN}✅ Разрешена (сервер может раздавать интернет)${C_RESET}"
+            echo -e "  • Пересылка трафика (Шлюз):  ${C_GREEN} Разрешена (сервер может раздавать интернет)${C_RESET}"
         else
-            echo -e "  • Пересылка трафика (Шлюз):  ${C_YELLOW}⚠️  Запрещена (только локальные подключения)${C_RESET}"
+            echo -e "  • Пересылка трафика (Шлюз):  ${C_YELLOW}  Запрещена (только локальные подключения)${C_RESET}"
         fi
 
         if echo "$ufw_out" | grep -qE "${ssh_port}/tcp[[:space:]]+on[[:space:]]+tailscale0|SSH via Tailscale only"; then
-            echo -e "  • Доступ к порту SSH:        ${C_GREEN}🔒 Скрыт снаружи (вход только через Tailscale)${C_RESET}"
+            echo -e "  • Доступ к порту SSH:        ${C_GREEN} Скрыт снаружи (вход только через Tailscale)${C_RESET}"
         else
-            echo -e "  • Доступ к порту SSH:        ${C_YELLOW}🌍 Публичный (открыт для всех сетей)${C_RESET}"
+            echo -e "  • Доступ к порту SSH:        ${C_YELLOW} Публичный (открыт для всех сетей)${C_RESET}"
         fi
 
         if command -v tailscale &>/dev/null; then
             if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
-                echo -e "  • Изоляция сети Tailscale:   ${C_YELLOW}⚠️  Отключена (открыты все порты на tailscale0)${C_RESET}"
+                echo -e "  • Изоляция сети Tailscale:   ${C_YELLOW}  Отключена (открыты все порты на tailscale0)${C_RESET}"
             else
                 local open_ts_ports="только SSH $ssh_port/tcp"
                 if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
                     open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
                 fi
-                echo -e "  • Изоляция сети Tailscale:   ${C_GREEN}🔒 Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
+                echo -e "  • Изоляция сети Tailscale:   ${C_GREEN} Полная (Zero-Trust: $open_ts_ports — безопасно для Share)${C_RESET}"
             fi
         fi
 
         if [ -n "$wan_if" ]; then
             audit_nat_output "$wan_if"
         else
-            echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ️  Выходной интерфейс не определён; проверка не выполнена${C_RESET}"
+            echo -e "  • Трансляция NAT на выходе:  ${C_BLUE}ℹ  Выходной интерфейс не определён; проверка не выполнена${C_RESET}"
         fi
 
         if [ -f /etc/default/bobarev-router ]; then
@@ -5996,35 +5996,35 @@ mod_server_audit() {
 
             local r_out_human="${C_GREEN}Через сетевой канал $r_out${C_RESET}"
             case "$r_out" in
-                wg*)        r_out_human="${C_GREEN}🔒 Через защищенный туннель WireGuard ($r_out)${C_RESET}" ;;
-                tailscale0) r_out_human="${C_GREEN}🔗 Через закрытую сеть Tailscale${C_RESET}" ;;
-                tun*|utun*) r_out_human="${C_GREEN}🚀 Через прокси-туннель ($r_out)${C_RESET}" ;;
-                "$wan_if")  r_out_human="${C_BLUE}🌍 Напрямую через провайдера ($r_out, без VPN)${C_RESET}" ;;
+                wg*)        r_out_human="${C_GREEN} Через защищенный туннель WireGuard ($r_out)${C_RESET}" ;;
+                tailscale0) r_out_human="${C_GREEN} Через закрытую сеть Tailscale${C_RESET}" ;;
+                tun*|utun*) r_out_human="${C_GREEN} Через прокси-туннель ($r_out)${C_RESET}" ;;
+                "$wan_if")  r_out_human="${C_BLUE} Напрямую через провайдера ($r_out, без VPN)${C_RESET}" ;;
             esac
 
             local r_host_human="${C_BLUE}Идет напрямую через провайдера (мимо VPN)${C_RESET}"
             if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ]; then
-                r_host_human="${C_GREEN}✅ Тоже защищен и идет через $r_out${C_RESET}"
+                r_host_human="${C_GREEN} Тоже защищен и идет через $r_out${C_RESET}"
             fi
 
-            local r_ks_human="${C_YELLOW}⚠️  Выключена (при сбое VPN трафик пойдет напрямую)${C_RESET}"
+            local r_ks_human="${C_YELLOW}  Выключена (при сбое VPN трафик пойдет напрямую)${C_RESET}"
             if [ "${ROUTER_KILLSWITCH:-false}" = "true" ]; then
-                r_ks_human="${C_GREEN}🔒 Включена (блокирует утечку IP в обход VPN)${C_RESET}"
+                r_ks_human="${C_GREEN} Включена (блокирует утечку IP в обход VPN)${C_RESET}"
             elif [ "$r_out" = "$wan_if" ]; then
                 r_ks_human="${C_BLUE}Не требуется (выбран прямой выход без VPN)${C_RESET}"
             fi
 
-            echo -e "  • Режим локального роутера:  ${C_GREEN}✅ Активен (раздает сеть в порт $r_lan, шлюз $r_ip)${C_RESET}"
+            echo -e "  • Режим локального роутера:  ${C_GREEN} Активен (раздает сеть в порт $r_lan, шлюз $r_ip)${C_RESET}"
             echo -e "  • Интернет для клиентов LAN: $r_out_human"
             echo -e "  • Трафик самого сервера:     $r_host_human"
             echo -e "  • Защита от утечки IP:       $r_ks_human"
         fi
 
         if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules; then
-            echo -e "  • Защита контейнеров Docker: ${C_GREEN}✅ Включена (доступ к портам Docker извне закрыт)${C_RESET}"
+            echo -e "  • Защита контейнеров Docker: ${C_GREEN} Включена (доступ к портам Docker извне закрыт)${C_RESET}"
         fi
     else
-        echo -e "  • Статус брандмауэра:        ${C_RED}❌ Выключен (сервер не защищен)${C_RESET}"
+        echo -e "  • Статус брандмауэра:        ${C_RED} Выключен (сервер не защищен)${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 7. Закрытая меш-сеть Tailscale и Каскадные туннели ---${C_RESET}"
@@ -6040,9 +6040,9 @@ mod_server_audit() {
     elif systemctl is-active --quiet xraymesh.service; then
         cascade_status="${C_GREEN}Сервер 2: XRayMesh — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
-        cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
+        cascade_status="${C_GREEN} Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
     elif is_naive_active && is_wg_cascade_active; then
-        cascade_status="${C_GREEN}🚀 Сервер 1 (Каскад 1: Naiveproxy - Wireguard - Warp: NaiveProxy -> WG-Мост активен)${C_RESET}"
+        cascade_status="${C_GREEN} Сервер 1 (Каскад 1: Naiveproxy - Wireguard - Warp: NaiveProxy -> WG-Мост активен)${C_RESET}"
     elif is_naive_active; then
         local audit_saved_role=""
         if [[ -r /etc/default/bobarev-cascade ]]; then
@@ -6055,16 +6055,16 @@ mod_server_audit() {
             *) cascade_status="${C_BLUE}NaiveProxy запущен; направление выхода по этой проверке не определено${C_RESET}" ;;
         esac
     elif is_wg_cascade_active && is_warp_active; then
-        cascade_status="${C_GREEN}🌍 Сервер 2 (Прямой скоростной выход: WG-Мост -> WARP активен)${C_RESET}"
+        cascade_status="${C_GREEN} Сервер 2 (Прямой скоростной выход: WG-Мост -> WARP активен)${C_RESET}"
     elif is_warp_active; then
-        cascade_status="${C_GREEN}🌍 Сервер 2 (Tailscale-выход: Tailscale -> WARP активен)${C_RESET}"
+        cascade_status="${C_GREEN} Сервер 2 (Tailscale-выход: Tailscale -> WARP активен)${C_RESET}"
     elif systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; then
-        cascade_status="${C_GREEN}🔒 Шлюз WireGuard wg0 активен (таблица 150)${C_RESET}"
+        cascade_status="${C_GREEN} Шлюз WireGuard wg0 активен (таблица 150)${C_RESET}"
     fi
     echo -e "  • Активный режим каскада:    $cascade_status"
 
     if command -v tailscale &>/dev/null; then
-        echo -e "  • Служба Tailscale:          ${C_GREEN}✅ Установлена и работает${C_RESET}"
+        echo -e "  • Служба Tailscale:          ${C_GREEN} Установлена и работает${C_RESET}"
         local ts_name ts_ip ts_exit ts_adv_exit ts_accept ts_stealth
         IFS="|" read -r ts_name _ <<< "$(get_tailscale_whoami)"
         ts_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "Не авторизован")
@@ -6103,22 +6103,22 @@ mod_server_audit() {
 
         local ts_nf_mode=$(get_tailscale_netfilter_mode)
         local ts_nf_human="${C_BLUE}Tailscale (встроенный авто-режим)${C_RESET}"
-        [ "$ts_nf_mode" = "off" ] && ts_nf_human="${C_GREEN}✅ Брандмауэр UFW (системный режим)${C_RESET}"
+        [ "$ts_nf_mode" = "off" ] && ts_nf_human="${C_GREEN} Брандмауэр UFW (системный режим)${C_RESET}"
 
         local ts_web_human="${C_BLUE}Отключена (порт 5252 закрыт)${C_RESET}"
         if is_tailscale_web_active; then
             if LC_ALL=C ufw status 2>/dev/null | awk '!/ALLOW FWD/ && (/^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/ || /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/)' | grep -q .; then
-                ts_web_human="${C_GREEN}✅ Активна (http://${ts_ip}:5252 — порт 5252/tcp открыт в UFW)${C_RESET}"
+                ts_web_human="${C_GREEN} Активна (http://${ts_ip}:5252 — порт 5252/tcp открыт в UFW)${C_RESET}"
             else
-                ts_web_human="${C_YELLOW}⚠️  Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
+                ts_web_human="${C_YELLOW}  Включена, но порт 5252/tcp закрыт в UFW (перевключите п. 10 -> 7)${C_RESET}"
             fi
         fi
 
         local ts_derp_human="${C_BLUE}Не настроен${C_RESET}"
         if is_derp_active; then
-            ts_derp_human="${C_GREEN}✅ Работает (443/tcp и STUN 3478/udp открыты)${C_RESET}"
+            ts_derp_human="${C_GREEN} Работает (443/tcp и STUN 3478/udp открыты)${C_RESET}"
         elif [ -f /etc/systemd/system/derper.service ]; then
-            ts_derp_human="${C_YELLOW}⚠️  Установлен, но служба derper остановлена${C_RESET}"
+            ts_derp_human="${C_YELLOW}  Установлен, но служба derper остановлена${C_RESET}"
         fi
 
         echo -e "  • Имя устройства в сети:     ${C_BLUE}$ts_name${C_RESET}"
@@ -6132,12 +6132,12 @@ mod_server_audit() {
         echo -e "  • Веб-панель (порт 5252):    $ts_web_human"
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
-            echo -e "  • Аппаратное ускорение GRO:  ${C_GREEN}✅ Включено${C_RESET}"
+            echo -e "  • Аппаратное ускорение GRO:  ${C_GREEN} Включено${C_RESET}"
         else
-            echo -e "  • Аппаратное ускорение GRO:  ${C_YELLOW}⚠️  Отключено${C_RESET}"
+            echo -e "  • Аппаратное ускорение GRO:  ${C_YELLOW}  Отключено${C_RESET}"
         fi
     else
-        echo -e "  • Служба Tailscale:          ${C_YELLOW}⚠️  Не установлена${C_RESET}"
+        echo -e "  • Служба Tailscale:          ${C_YELLOW}  Не установлена${C_RESET}"
     fi
 
     echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Открытые порты ---${C_RESET}"
@@ -6162,11 +6162,11 @@ mod_server_audit() {
         local total_err=$((rx_err + tx_err))
         local total_drop=$((rx_drop + tx_drop))
         
-        local err_str="${C_GREEN}0 ✅${C_RESET}"
-        [ "$total_err" -gt 0 ] && err_str="${C_RED}$total_err ❌${C_RESET}"
+        local err_str="${C_GREEN}0 ${C_RESET}"
+        [ "$total_err" -gt 0 ] && err_str="${C_RED}$total_err ${C_RESET}"
         
-        local drop_str="${C_GREEN}0 ✅${C_RESET}"
-        [ "$total_drop" -gt 0 ] && drop_str="${C_YELLOW}$total_drop ⚠️${C_RESET}"
+        local drop_str="${C_GREEN}0 ${C_RESET}"
+        [ "$total_drop" -gt 0 ] && drop_str="${C_YELLOW}$total_drop ${C_RESET}"
 
         echo -e "  • Интерфейс ${C_BLUE}$iface${C_RESET} (MTU: ${C_GREEN}$mtu${C_RESET}, Скорость: ${C_GREEN}$speed${C_RESET})"
         echo -e "    └─ Пакеты: Ошибки = $err_str | Пропущено (Dropped) = $drop_str"
@@ -6178,9 +6178,9 @@ mod_server_audit() {
     if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then mss_active=true; fi
     
     if [ "$mss_active" = true ]; then
-        echo -e "  • Выравнивание пакетов (MSS): ${C_GREEN}✅ Включено (сайты открываются без зависаний в VPN)${C_RESET}"
+        echo -e "  • Выравнивание пакетов (MSS): ${C_GREEN} Включено (сайты открываются без зависаний в VPN)${C_RESET}"
     else
-        echo -e "  • Выравнивание пакетов (MSS): ${C_YELLOW}⚠️  Выключено (возможны зависания сайтов в VPN)${C_RESET}"
+        echo -e "  • Выравнивание пакетов (MSS): ${C_YELLOW}  Выключено (возможны зависания сайтов в VPN)${C_RESET}"
     fi
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
@@ -6197,28 +6197,28 @@ mod_server_audit() {
     local vm_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
     local swappiness_human
     if [ "$vm_swappiness" = "1" ]; then
-        swappiness_human="${C_GREEN}✅ 1 (Максимальная защита флеш-памяти от износа)${C_RESET}"
+        swappiness_human="${C_GREEN} 1 (Максимальная защита флеш-памяти от износа)${C_RESET}"
     elif [ "$vm_swappiness" = "100" ] && swapon --show 2>/dev/null | grep -q "zram"; then
-        swappiness_human="${C_GREEN}✅ 100 (Активное сжатие данных в быстрой ОЗУ zRAM)${C_RESET}"
+        swappiness_human="${C_GREEN} 100 (Активное сжатие данных в быстрой ОЗУ zRAM)${C_RESET}"
     elif [ "$vm_swappiness" = "60" ]; then
-        swappiness_human="${C_YELLOW}⚠️  60 (Заводское значение, частая запись на диск)${C_RESET}"
+        swappiness_human="${C_YELLOW}  60 (Заводское значение, частая запись на диск)${C_RESET}"
     elif [ "$vm_swappiness" = "N/A" ]; then
-        swappiness_human="${C_RED}❌ Ошибка чтения${C_RESET}"
+        swappiness_human="${C_RED} Ошибка чтения${C_RESET}"
     else
         swappiness_human="${C_BLUE}$vm_swappiness (Пользовательское значение)${C_RESET}"
     fi
     echo -e "  • Режим подкачки памяти:     $swappiness_human"
 
     if mount | grep " / " | grep -q "noatime"; then
-        echo -e "  • Запись времени чтения:     ${C_GREEN}✅ Отключена (noatime — снижен износ накопителя)${C_RESET}"
+        echo -e "  • Запись времени чтения:     ${C_GREEN} Отключена (noatime — снижен износ накопителя)${C_RESET}"
     else
-        echo -e "  • Запись времени чтения:     ${C_YELLOW}⚠️  Включена (лишняя нагрузка на диск)${C_RESET}"
+        echo -e "  • Запись времени чтения:     ${C_YELLOW}  Включена (лишняя нагрузка на диск)${C_RESET}"
     fi
 
     if mount | grep " / " | grep -q "commit=120"; then
-        echo -e "  • Буферизация записи диска:  ${C_GREEN}✅ 120 сек. (бережет флеш-память от частых записей)${C_RESET}"
+        echo -e "  • Буферизация записи диска:  ${C_GREEN} 120 сек. (бережет флеш-память от частых записей)${C_RESET}"
     else
-        echo -e "  • Буферизация записи диска:  ${C_YELLOW}⚠️  Стандартная (5 сек.)${C_RESET}"
+        echo -e "  • Буферизация записи диска:  ${C_YELLOW}  Стандартная (5 сек.)${C_RESET}"
     fi
 
     local swap_human_list=()
@@ -6234,7 +6234,7 @@ mod_server_audit() {
     if [ "${#swap_human_list[@]}" -gt 0 ]; then
         local joined_swap=$(printf "%s, " "${swap_human_list[@]}")
         joined_swap="${joined_swap%, }"
-        echo -e "  • Виртуальная память:        ${C_GREEN}✅ $joined_swap${C_RESET}"
+        echo -e "  • Виртуальная память:        ${C_GREEN} $joined_swap${C_RESET}"
     else
         echo -e "  • Виртуальная память:        ${C_YELLOW}Отключена${C_RESET}"
     fi
@@ -6252,14 +6252,14 @@ mod_router_sbc() {
    state='установлен'
    state2="$(systemctl is-active bobarev-router-v2.service 2>/dev/null || echo unknown)/$(systemctl is-active bobarev-router-dhcp.service 2>/dev/null || echo unknown)"
   fi
-  smart_menu '📡 Режим локального маршрутизатора' \
+  smart_menu 'Режим локального маршрутизатора' \
    "Состояние: $state. Службы: $state2.\nМастер настроит LAN, выход, DHCP и NAT пошагово. Базовая сеть, SSH и авторизация VPN не сбрасываются." \
    20 "$WT_WIDTH" 7 choice \
-   1 '🔎 Статус и диагностика' \
-   2 '🧙 Мастер настройки (step-by-step)' \
-   3 '▶️ Запустить / перезапустить' \
-   4 '⏹️ Остановить' \
-   5 '🗑️ Удалить настройки маршрутизатора' \
+   1 'Статус и диагностика' \
+   2 'Мастер настройки (step-by-step)' \
+   3 'Запустить / перезапустить' \
+   4 'Остановить' \
+   5 'Удалить настройки маршрутизатора' \
    0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
@@ -6321,22 +6321,21 @@ mod_router_sbc_setup() {
   [[ -e /sys/class/net/$iface/device && "$iface" != "$wan_if" ]] && items+=("$iface" "LAN (не WAN)")
  done
  ((${#items[@]})) || { echo 'Нет свободного физического LAN-порта.'; return 1; }
- smart_menu 'LAN маршрутизатора' 'Первый роутер → WAN NanoPi; LAN NanoPi → WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
- # Сканируем доступные выходные интерфейсы.
+ smart_menu 'LAN маршрутизатора' 'Первый роутер  WAN NanoPi; LAN NanoPi  WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
  local exit_items=() exit_choice='' custom_if=''
- exit_items+=("$wan_if" "🌐 WAN — чистый интернет ($wan_if)")
- [[ -e /sys/class/net/tailscale0 ]] && exit_items+=('tailscale0' '🟢 Tailscale exit node')
- [[ -e /sys/class/net/wg0 ]] && exit_items+=('wg0' '🔒 WireGuard wg0')
- [[ -e /sys/class/net/warp ]] && exit_items+=('warp' '☁️ Cloudflare WARP')
- [[ -e /sys/class/net/tun0 ]] && exit_items+=('tun0' '🔗 VPN tun0')
+ exit_items+=("$wan_if" "WAN — чистый интернет ($wan_if)")
+ [[ -e /sys/class/net/tailscale0 ]] && exit_items+=('tailscale0' 'Tailscale exit node')
+ [[ -e /sys/class/net/wg0 ]] && exit_items+=('wg0' 'WireGuard wg0')
+ [[ -e /sys/class/net/warp ]] && exit_items+=('warp' 'Cloudflare WARP')
+ [[ -e /sys/class/net/tun0 ]] && exit_items+=('tun0' 'VPN tun0')
  for iface in /sys/class/net/*; do
   iface=${iface##*/}
   [[ "$iface" == "$lan_if" || "$iface" == "$wan_if" ]] && continue
   [[ -e /sys/class/net/$iface/device ]] || continue
-  exit_items+=("$iface" "🔌 Физический интерфейс")
+  exit_items+=("$iface" "Физический интерфейс")
  done
- exit_items+=('custom' '✏️ Указать другой интерфейс вручную')
- smart_menu '🚪 Выбор выхода для LAN' 'Выберите интерфейс, через который LAN-клиенты будут выходить в интернет.' 22 "$WT_WIDTH" 9 exit_choice "${exit_items[@]}" || return 0
+ exit_items+=('custom' 'Указать другой интерфейс вручную')
+ smart_menu 'Выбор выхода для LAN' 'Выберите интерфейс, через который LAN-клиенты будут выходить в интернет.' 22 "$WT_WIDTH" 9 exit_choice "${exit_items[@]}" || return 0
  if [[ "$exit_choice" == "custom" ]]; then
   MODULE_CANCELED=false
   prompt_default 'Имя интерфейса (например tailscale0, wg0, eth1)' '' custom_if
@@ -6349,6 +6348,8 @@ mod_router_sbc_setup() {
  ip link show "$out_if" >/dev/null 2>&1 || { echo "Интерфейс $out_if не существует."; pause_enter; return 0; }
  prompt_default 'LAN IPv4 /24 (сеть не должна совпадать с WAN и LAN Google Wi-Fi)' 192.168.199.1 lan_ip
  [[ "$MODULE_CANCELED" == false ]] || return 0
+ prompt_default 'DNS для LAN-клиентов (через запятую)' '8.8.8.8,1.1.1.1' dns_servers
+ [[ "$MODULE_CANCELED" == false && -n "$dns_servers" ]] || return 0
  python3 - "$lan_ip" "$wan_if" <<'PY'
 import ipaddress,json,subprocess,sys
 x=ipaddress.IPv4Interface(sys.argv[1]+'/24')
@@ -6360,12 +6361,9 @@ PY
  [[ $? == 0 ]] || return 1
  if [[ "$out_if" == "tailscale0" ]]; then
   while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
-   echo -e "${C_YELLOW}⚠ Tailscale exit node пока не выбран или не активен.${C_RESET}"
+   echo 'Tailscale exit node пока не выбран или не активен.'
    local ts_choice='' ts_node=''
-   smart_menu '🌍 Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice \
-    1 '📋 Список exit nodes' \
-    2 '✅ Выбрать exit node по IP/имени' \
-    0 'Отмена' || return 0
+   smart_menu 'Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
    case "$ts_choice" in
     0) return 0 ;;
     1) tailscale exit-node list || true; pause_enter ;;
@@ -6374,15 +6372,15 @@ PY
      prompt_default 'IP или имя exit node' '' ts_node
      [[ "$MODULE_CANCELED" == false && -n "$ts_node" ]] || continue
      if tailscale set --advertise-exit-node=false --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
-      echo -e "${C_GREEN}✅ Exit node применён: $ts_node${C_RESET}"
+      echo -e "${C_GREEN}Exit node применён: $ts_node${C_RESET}"
      else
-      echo -e "${C_RED}❌ Не удалось применить exit node.${C_RESET}"
+      echo -e "${C_RED}Не удалось применить exit node.${C_RESET}"
      fi
      ;;
    esac
   done
  fi
- echo "Будет: LAN $lan_if $lan_ip/24 → $out_if. DHCP .50–.200, DNS 1.1.1.1/9.9.9.9."
+ echo "Будет: LAN $lan_if $lan_ip/24 -> $out_if. DHCP .50-.200, DNS $dns_servers."
  echo 'Существующий dnsmasq будет остановлен и заменён отдельной DHCP-службой. Старые конфиги сохраняются.'
  echo 'SSH/WAN/Tailscale не перенастраиваются. IPv6 клиентов через LAN блокируется (без IPv6 VPN/NAT).'
  nm_yes 'Применить маршрутизатор?' || return 0
@@ -6401,7 +6399,7 @@ interface=$lan_if
 bind-dynamic
 dhcp-range=$prefix.50,$prefix.200,255.255.255.0,12h
 dhcp-option=3,$lan_ip
-dhcp-option=6,1.1.1.1,9.9.9.9
+dhcp-option=6,$dns_servers
 dhcp-leasefile=/var/lib/misc/bobarev-router.leases
 EOF
  dnsmasq --test --conf-file=/etc/bobarev-router-v2/dhcp.conf || return 1
@@ -6419,7 +6417,7 @@ clean() {
  done
  while ip6tables -w -D FORWARD -i "$LAN" -j DROP 2>/dev/null; do :; done
  ip rule del pref 11991 iif "$LAN" lookup 199 2>/dev/null || true
- ip route flush table 199
+ ip route flush table 199 2>/dev/null || true
 }
 if [[ ${1:-} == stop ]]; then clean; exit; fi
 ip link show "$LAN" >/dev/null
@@ -6526,12 +6524,7 @@ br_snapshot() {
 manage_naive_mullvad_menu() {
  local pick='' node=''
  while true; do
-  smart_menu '🌐 NaiveProxy-Mullvad Exit Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick \
-   1 '📋 Список exit nodes' \
-   2 '✅ Выбрать exit node' \
-   3 '⛔ Отключить exit node' \
-   4 '🔎 Проверка выхода' \
-   0 'Назад' || return 0
+  smart_menu 'NaiveProxy-Mullvad Exit Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick 1 'Список exit nodes' 2 'Выбрать exit node' 3 'Отключить exit node' 4 'Проверка выхода' 0 'Назад' || return 0
   case "$pick" in
    0) return 0 ;;
    1)
@@ -6546,18 +6539,18 @@ manage_naive_mullvad_menu() {
     nm_yes 'Применить выбранный exit node?' || continue
     br_snapshot || return 1
     if tailscale set --advertise-exit-node=false --exit-node="$node" --exit-node-allow-lan-access=true; then
-     echo -e "${C_GREEN}✅ Exit node применён: $node${C_RESET}"
+     echo -e "${C_GREEN}Exit node применён: $node${C_RESET}"
     else
-     echo -e "${C_RED}❌ Не удалось применить exit node.${C_RESET}"
+     echo -e "${C_RED}Не удалось применить exit node.${C_RESET}"
     fi
     pause_enter ;;
    3)
     nm_yes 'Вернуть прямой выход через WAN?' || continue
     br_snapshot || return 1
     if tailscale set --exit-node=""; then
-     echo -e "${C_GREEN}✅ Tailscale exit node отключён.${C_RESET}"
+     echo -e "${C_GREEN}Tailscale exit node отключён.${C_RESET}"
     else
-     echo -e "${C_RED}❌ Не удалось отключить exit node.${C_RESET}"
+     echo -e "${C_RED}Не удалось отключить exit node.${C_RESET}"
     fi
     pause_enter ;;
    4)
@@ -6597,24 +6590,24 @@ mod_network_reset() {
  echo 'Это не заводской сброс. Неизвестные старые правила показываются, но автоматически не удаляются.'
  echo ''
  if [[ -f /etc/systemd/system/bobarev-router-v2.service ]]; then
-  items+=('LAN_ROUTER' '🔌 Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
+  items+=('LAN_ROUTER' 'Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
  fi
  if command -v tailscale >/dev/null; then
   if [[ -n "$ts_exit" && "$ts_exit" != "none" && "$ts_exit" != "false" ]]; then
-   items+=('TS_EXIT' '🌍 Отключить выбранный Tailscale exit node' OFF)
+   items+=('TS_EXIT' 'Отключить выбранный Tailscale exit node' OFF)
   fi
   if [[ "$ts_adv" == "true" ]]; then
-   items+=('TS_ADV' '📡 Отключить анонсирование сервера как exit node' OFF)
+   items+=('TS_ADV' 'Отключить анонсирование сервера как exit node' OFF)
   fi
  fi
  for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
   [[ -f "/etc/systemd/system/$unit.service" ]] || continue
   local state
   state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
-  items+=("$unit" "🛑 Остановить службу [$state]" OFF)
+  items+=("$unit" "Остановить службу [$state]" OFF)
  done
  ((${#items[@]})) || { echo 'Нет распознанных компонентов для безопасного отключения.'; return 0; }
- selected=$(whiptail --title '♻️ Сброс сетевых настроек' --checklist \
+ selected=$(whiptail --title 'Сброс сетевых настроек' --checklist \
   'Пробел — выбрать. Отключаются только выбранные маршрутизация, NAT/MASQUERADE и службы. Конфиги, пакеты, SSH и авторизация VPN сохраняются.' \
   24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
  [[ -n "$selected" ]] || return 0
@@ -6648,16 +6641,16 @@ mod_network_reset() {
 
 
 mod_backup_manager() {
-    echo -e "${C_CYAN}📦 === 19/21. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
+    echo -e "${C_CYAN} === 19/21. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
     local target_home=$(getent passwd "$target_user" | cut -d: -f6)
     [ -z "$target_home" ] && target_home="/root"
 
     local b_choice
     if ! smart_menu "Экспорт и импорт настроек" "Выберите действие:" 13 $WT_WIDTH 3 "b_choice" \
-    "1" "📤 Сохранить настройки в архив (Экспорт)" \
-    "2" "📥 Восстановить настройки из архива (Импорт)" \
-    "0" "🔙 Отмена" || [ "$b_choice" = "0" ]; then
+    "1" " Сохранить настройки в архив (Экспорт)" \
+    "2" " Восстановить настройки из архива (Импорт)" \
+    "0" " Отмена" || [ "$b_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0
     fi
@@ -6671,14 +6664,14 @@ mod_backup_manager() {
 
         tar -czf "$archive_path" "${files_to_pack[@]}" 2>/dev/null || true
         silent_run chown "$target_user:$target_user" "$archive_path"
-        echo -e "${C_GREEN}✅ Архив настроек успешно сохранен:${C_RESET} ${C_BLUE}$archive_path${C_RESET}"
+        echo -e "${C_GREEN} Архив настроек успешно сохранен:${C_RESET} ${C_BLUE}$archive_path${C_RESET}"
     elif [ "$b_choice" = "2" ]; then
         local import_path=""
         prompt_default "Введите полный путь к архиву .tar.gz для восстановления:" "${target_home}/" import_path
         [ "$MODULE_CANCELED" = true ] && return 0
 
         if [ ! -f "$import_path" ]; then
-            echo -e "${C_RED}❌ Файл не найден: $import_path${C_RESET}"
+            echo -e "${C_RED} Файл не найден: $import_path${C_RESET}"
             return 0
         fi
 
@@ -6697,7 +6690,7 @@ mod_backup_manager() {
             silent_run systemctl restart sshd || silent_run systemctl restart ssh
             command -v ufw &>/dev/null && flush_and_reload_nat
             disable_ufw_strict_rpfilter
-            echo -e "${C_GREEN}✅ Настройки успешно восстановлены и применены!${C_RESET}"
+            echo -e "${C_GREEN} Настройки успешно восстановлены и применены!${C_RESET}"
         fi
     fi
 }
@@ -6705,7 +6698,7 @@ mod_backup_manager() {
 # 21. Универсальный аудит сети, протоколов обхода ТСПУ и каскадных пар (network-audit v3.1)
 install_network_audit_tool() {
     if ! command -v tcpdump &>/dev/null || ! command -v mtr &>/dev/null || ! command -v conntrack &>/dev/null; then
-        echo -e "${C_BLUE}📦 Доустановка диагностических утилит (tcpdump, mtr-tiny, conntrack) для глубокого перехвата пакетов...${C_RESET}"
+        echo -e "${C_BLUE} Доустановка диагностических утилит (tcpdump, mtr-tiny, conntrack) для глубокого перехвата пакетов...${C_RESET}"
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq >/dev/null 2>&1 || true
         apt-get install -yq tcpdump mtr-tiny conntrack >/dev/null 2>&1 || true
@@ -7593,13 +7586,13 @@ mod_network_cascade_audit() {
         fi
 
         local na_choice=""
-        if ! smart_menu "🩺 23/23. Аудит системы 2 и каскадные пары (v3.1)" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 "na_choice" \
-        "1" "📸 Срез состояния системы" \
-        "2" "🔗 Тест связи между серверами" \
-        "3" "🔴 Мониторинг трафика Live" \
-        "4" "🚀 Полный комплексный аудит" \
-        "5" "💻 Запуск консольного меню" \
-        "0" "🔙 Вернуться в главное меню" || [ "$na_choice" = "0" ]; then
+        if ! smart_menu " 23/23. Аудит системы 2 и каскадные пары (v3.1)" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 "na_choice" \
+        "1" " Срез состояния системы" \
+        "2" " Тест связи между серверами" \
+        "3" " Мониторинг трафика Live" \
+        "4" " Полный комплексный аудит" \
+        "5" " Запуск консольного меню" \
+        "0" " Вернуться в главное меню" || [ "$na_choice" = "0" ]; then
             break
         fi
 
@@ -7686,18 +7679,18 @@ mod_network_cascade_audit() {
 }
 
 run_full_auto_setup() {
-    echo "🚀 ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
+    echo " ЗАПУСК ПОСЛЕДОВАТЕЛЬНОЙ НАСТРОЙКИ ВСЕХ КОМПОНЕНТОВ..."
     local local_aborted=false
     for m in mod_timezone mod_hostname mod_apt_update mod_user_setup mod_ssh_key mod_ssh_config mod_hardening mod_ufw mod_lock_root_auto mod_tailscale_auto mod_logging_manager_auto mod_ram_flash_opt; do
         MODULE_CANCELED=false
         $m
         if [ "$MODULE_CANCELED" = true ]; then
-            echo -e "${C_YELLOW}🛑 Автоматическая настройка прервана.${C_RESET}"
+            echo -e "${C_YELLOW} Автоматическая настройка прервана.${C_RESET}"
             local_aborted=true
             break
         fi
     done
-    if [ "$local_aborted" = false ]; then echo -e "\n${C_GREEN}🎉 ВСЕ ЭТАПЫ НАСТРОЙКИ УСПЕШНО ЗАВЕРШЕНЫ!${C_RESET}"; fi
+    if [ "$local_aborted" = false ]; then echo -e "\n${C_GREEN} ВСЕ ЭТАПЫ НАСТРОЙКИ УСПЕШНО ЗАВЕРШЕНЫ!${C_RESET}"; fi
     MODULE_CANCELED=false
 }
 
@@ -8285,7 +8278,7 @@ PY
 nm_reload_caddy
 trap - ERR
 echo "Готово. Бэкап: $BACKUP"
-echo 'Проверьте Shadowrocket: прежний профиль → https://ifconfig.me'
+echo 'Проверьте Shadowrocket: прежний профиль  https://ifconfig.me'
 echo 'Это финальная проверка всей цепочки; curl выше проверяет мост, но не клиентский NaiveProxy.'
 
 NM_ENTRY_SCRIPT
@@ -8409,7 +8402,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.10.3 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.10.4 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -8428,7 +8421,7 @@ if [ "${1:-}" != "" ]; then
 fi
 
 # ==============================================================================
-# === 🚀 ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
+# ===  ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
 # ==============================================================================
 while true; do
     ts_main_status="Отсутствует"
@@ -8459,43 +8452,43 @@ while true; do
     if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
 
     choice=""
-    if ! smart_menu "🔧 ГЛАВНОЕ МЕНЮ" \
-    "\n  💻 Системные данные:
+    if ! smart_menu " ГЛАВНОЕ МЕНЮ" \
+    "\n   Системные данные:
   • Хост: $(hostname) ($(get_system_type_short))
   • Часовой пояс: $tz
   • Статус UFW: $ufw_status
   • Сеть Tailscale: $ts_main_status
 
-  📌 Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU "choice" \
-    "1" "🌐 Часовой пояс" \
-    "2" "📌 Имя сервера" \
-    "3" "📦 Обновление компонентов" \
-    "4" "👤 Создание и настройка пользователя" \
-    "5" "🔑 Привязка ключа безопасности" \
-    "6" "🔒 Конфигурация удаленного доступа" \
-    "7" "🔒 Настройка системной защиты" \
-    "8" "🔥 Управление брандмауэром" \
-    "9" "🔐 Блокировка доступа суперпользователя" \
-    "10" "🔗 Настройка закрытой сети Tailscale" \
-    "11" "📝 Управление системными журналами" \
-    "12" "⚡ Оптимизация памяти" \
-    "13" "💾 Управление файлом подкачки" \
-    "14" "💻 Утилиты ПК и режим процессора" \
-    "15" "📺 Сброс видеовыхода HDMI" \
+   Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU "choice" \
+    "1" " Часовой пояс" \
+    "2" " Имя сервера" \
+    "3" " Обновление компонентов" \
+    "4" " Создание и настройка пользователя" \
+    "5" " Привязка ключа безопасности" \
+    "6" " Конфигурация удаленного доступа" \
+    "7" " Настройка системной защиты" \
+    "8" " Управление брандмауэром" \
+    "9" " Блокировка доступа суперпользователя" \
+    "10" " Настройка закрытой сети Tailscale" \
+    "11" " Управление системными журналами" \
+    "12" " Оптимизация памяти" \
+    "13" " Управление файлом подкачки" \
+    "14" " Утилиты ПК и режим процессора" \
+    "15" " Сброс видеовыхода HDMI" \
     "16" "⏳ Анализ времени загрузки" \
-    "17" "📡 Режим локального маршрутизатора" \
-    "18" "📦 Экспорт / Импорт настроек" \
-    "19" "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" \
-    "20" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
-    "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
-    "22" "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" \
-    "23" "🔗 NaiveProxy-XRayMesh" \
-    "24" "🌐 NaiveProxy-Tailscale Mullvad Exit" \
+    "17" " Режим локального маршрутизатора" \
+    "18" " Экспорт / Импорт настроек" \
+    "19" " Каскад 1: NaiveProxy + WireGuard + WARP" \
+    "20" " Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
+    "21" " Каскад 3: NaiveProxy + Xray REALITY + WARP" \
+    "22" " Автономный NaiveProxy (+ WG Dual-Gateway)" \
+    "23" "NaiveProxy-XRayMesh" \
+    "24" "NaiveProxy-Tailscale Mullvad Exit" \
     "25" "Аудит системы 1" \
     "26" "Аудит системы 2 и каскадные пары" \
     "27" "Сброс сетевых надстроек (выборочно)" \
-    "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
-    "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
+    "A" " Выполнить первичную настройку целиком (Шаги 1-12)" \
+    "0" " Завершить работу" || [ "$choice" = "0" ]; then
         clear
         echo "Работа скрипта завершена."
         exit 0

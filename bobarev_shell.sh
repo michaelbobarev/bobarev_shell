@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.10.9 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.11.0 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6542,9 +6542,12 @@ br_snapshot() {
 ts_is_online() {
  command -v tailscale >/dev/null 2>&1 || return 1
  local out
- out="$(tailscale status --self 2>/dev/null || true)"
+ out="$(tailscale status 2>&1 || true)"
  [[ -n "$out" ]] || return 1
- ! grep -qi 'offline' <<<"$out"
+ case "$out" in
+  *'Logged out'*|*NoState*|*'Tailscale is starting'*|*'offline'*) return 1 ;;
+ esac
+ grep -q '^100\.' <<<"$out"
 }
 
 manage_naive_mullvad_menu() {
@@ -8471,7 +8474,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.10.9 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.11.0 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

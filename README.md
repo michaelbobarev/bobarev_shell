@@ -1,4 +1,4 @@
-# 🛠️ Bobarev Shell (v3.8.55 Professional Stealth & Audit Suite)
+# 🛠️ Bobarev Shell
 
 Универсальный скрипт комплексной настройки Linux-серверов (VPS) «с нуля» до боевого запуска, а также оптимизации домашних ПК и одноплатных микрокомпьютеров (SBC: NanoPi, Raspberry Pi, Orange Pi).
 

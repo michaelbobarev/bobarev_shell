@@ -6361,7 +6361,7 @@ PY
   while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
    echo -e "${C_YELLOW}⚠ Tailscale exit node пока не выбран или не активен.${C_RESET}"
    local ts_choice='' ts_node=''
-   smart_menu 'Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
+   smart_menu 'Tailscale exit-node' 'Выберите exit-node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
    case "$ts_choice" in
     0) return 0 ;;
     1) tailscale exit-node list || true; pause_enter ;;
@@ -6523,7 +6523,7 @@ br_snapshot() {
 manage_naive_mullvad_menu() {
  local pick='' node=''
  while true; do
-  smart_menu 'NaiveProxy - Mullvad Exit-Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick 1 'Список exit nodes' 2 'Выбрать exit node' 3 'Отключить exit node' 4 'Проверка выхода' 0 'Назад' || return 0
+  smart_menu 'NaiveProxy - Mullvad Exit-Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick 1 'Список exit-nodes' 2 'Выбрать exit-node' 3 'Отключить exit-node' 4 'Проверка выхода' 0 'Назад' || return 0
   case "$pick" in
    0) return 0 ;;
    1)
@@ -6647,8 +6647,8 @@ mod_backup_manager() {
 
     local b_choice
     if ! smart_menu "Экспорт и импорт настроек" "Выберите действие:" 13 $WT_WIDTH 3 "b_choice" \
-    "1" "📤 Сохранить настройки в архив (Экспорт)" \
-    "2" "📥 Восстановить настройки из архива (Импорт)" \
+    "1" "📤 Сохранить настройки в архив" \
+    "2" "📥 Восстановить настройки из архива" \
     "0" "🔙 Отмена" || [ "$b_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0

@@ -4170,92 +4170,6 @@ pause_enter() {
     read -r -p "Нажмите Enter для возврата в меню..." < /dev/tty || true
 }
 
-
-# ============================================================
-# LAN Router Tailscale Exit Fix
-# Добавляет постоянное правило LAN -> Tailscale (table 52)
-# и устраняет гонку запуска router/tailscaled при загрузке.
-# ============================================================
-mod_fix_lan_router_tailscale() {
-    local router="/usr/local/sbin/bobarev-router-v2"
-    local config="/etc/bobarev-router-v2/config"
-    local dropdir="/etc/systemd/system/bobarev-router-v2.service.d"
-    local dropfile="$dropdir/override.conf"
-    local lan="" out="" backup="" ts_default=""
-
-    if [[ ! -x "$router" || ! -f "$config" ]]; then
-        echo -e "${C_RED}❌ LAN-маршрутизатор не настроен. Сначала выполните пункт 17.${C_RESET}"
-        return 1
-    fi
-
-    # shellcheck disable=SC1090
-    source "$config"
-    lan="${LAN:-}"
-    out="${OUT:-}"
-
-    if [[ -z "$lan" || -z "$out" ]]; then
-        echo -e "${C_RED}❌ В $config не заданы LAN или OUT.${C_RESET}"
-        return 1
-    fi
-
-    if [[ "$out" != "tailscale0" ]]; then
-        echo -e "${C_YELLOW}ℹ️  Этот фикс требуется только при OUT=tailscale0.${C_RESET}"
-        echo "Текущий OUT: $out"
-        return 0
-    fi
-
-    ts_default="$(ip -4 route show table 52 2>/dev/null | head -n 1 || true)"
-    if ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
-        echo -e "${C_RED}❌ Tailscale exit node не активен: в table 52 нет default dev tailscale0.${C_RESET}"
-        echo "Проверьте: tailscale status"
-        return 1
-    fi
-
-    echo -e "${C_BLUE}ℹ️  LAN: $lan${C_RESET}"
-    echo -e "${C_BLUE}ℹ️  Выход: tailscale0${C_RESET}"
-    echo -e "${C_BLUE}ℹ️  Tailscale default: $ts_default${C_RESET}"
-
-    if ! whiptail --title "Исправить LAN-маршрутизатор" --yesno \
-        "Будет создан systemd override для bobarev-router-v2:\n\n• ожидание tailscaled.service\n• задержка 5 секунд\n• постоянное правило:\n  11990: from all iif $lan lookup 52\n\nСкрипт маршрутизатора изменяться не будет.\n\nПродолжить?" 18 74; then
-        return 0
-    fi
-
-    backup="/root/$(basename "$router").bak-$(date +%Y%m%d-%H%M%S)"
-    cp -a "$router" "$backup"
-    echo -e "${C_GREEN}✅ Резервная копия скрипта: $backup${C_RESET}"
-
-    mkdir -p "$dropdir"
-    if [[ -f "$dropfile" ]]; then
-        cp -a "$dropfile" "/root/$(basename "$dropfile").bak-$(date +%Y%m%d-%H%M%S)"
-    fi
-
-    cat > "$dropfile" <<EOF
-[Unit]
-After=network-online.target tailscaled.service
-Wants=network-online.target tailscaled.service
-
-[Service]
-ExecStartPre=/bin/sleep 5
-ExecStartPost=-/sbin/ip rule del pref 11990 iif $lan lookup 52
-ExecStartPost=/sbin/ip rule add pref 11990 iif $lan lookup 52
-EOF
-    chmod 644 "$dropfile"
-
-    ip rule del pref 11990 iif "$lan" lookup 52 2>/dev/null || true
-    ip rule add pref 11990 iif "$lan" lookup 52
-
-    systemctl daemon-reload
-    systemctl restart bobarev-router-v2.service
-    systemctl restart bobarev-router-dhcp.service
-
-    echo -e "${C_GREEN}✅ LAN-маршрутизатор исправлен.${C_RESET}"
-    echo "Проверка:"
-    ip rule | grep "11990 iif $lan lookup 52" || true
-    ip -4 route show table 52 | head -n 1
-    echo ""
-    echo "Подключите устройство к LAN-порту $lan и проверьте https://ifconfig.me"
-}
-
 if [ "$EUID" -ne 0 ]; then
     echo -e "${C_RED}❌ Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).${C_RESET}" >&2
     exit 1
@@ -6482,62 +6396,127 @@ br_snapshot() {
 manage_naive_mullvad_menu() {
  local pick='' node=''
  while true; do
-  smart_menu 'NaiveProxy / Tailscale exit' 'Работа NaiveProxy через публичный адрес требует отдельной проверки обратной маршрутизации. Выбор exit меняет трафик всего хоста.' 19 "$WT_WIDTH" 6 pick 1 'Список exit nodes' 2 'Выбрать exit node' 3 'Отключить exit node' 4 'Проверка' 0 'Назад' || return 0
+  smart_menu 'NaiveProxy-Mullvad Exit Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick 1 'Список exit nodes' 2 'Выбрать exit node' 3 'Отключить exit node' 4 'Проверка выхода' 0 'Назад' || return 0
   case "$pick" in
    0) return 0 ;;
-   1) tailscale exit-node list || true; pause_enter ;;
+   1)
+    tailscale exit-node list || true
+    pause_enter ;;
    2)
     MODULE_CANCELED=false
-    prompt_default 'IP / имя узла (отмена без изменений)' '' node
+    prompt_default 'IP или имя узла (Enter — отмена без изменений)' '' node
     [[ "$MODULE_CANCELED" == false && -n "$node" ]] || continue
-    echo 'Необходимо отключить анонсирование себя как exit node. Публичные подключения могут нарушиться.'
-    nm_yes 'Применить выбранный выход и отключить анонсирование?' || continue
-    tailscale set --advertise-exit-node=false --exit-node="$node" --exit-node-allow-lan-access=true || true
+    echo 'Выбранный узел станет выходом для сервера и LAN-клиентов.'
+    echo 'Анонсирование этого сервера как exit node будет отключено.'
+    nm_yes 'Применить выбранный exit node?' || continue
+    br_snapshot || return 1
+    if tailscale set --advertise-exit-node=false --exit-node="$node" --exit-node-allow-lan-access=true; then
+     echo -e "${C_GREEN}✅ Exit node применён: $node${C_RESET}"
+    else
+     echo -e "${C_RED}❌ Не удалось применить exit node.${C_RESET}"
+    fi
     pause_enter ;;
-   3) nm_yes 'Вернуть прямой выход?' && tailscale set --exit-node=""; pause_enter ;;
-   4) tailscale status || true
+   3)
+    nm_yes 'Вернуть прямой выход через WAN?' || continue
+    br_snapshot || return 1
+    if tailscale set --exit-node=""; then
+     echo -e "${C_GREEN}✅ Tailscale exit node отключён.${C_RESET}"
+    else
+     echo -e "${C_RED}❌ Не удалось отключить exit node.${C_RESET}"
+    fi
+    pause_enter ;;
+   4)
+    tailscale status || true
+    echo '--- Проверка IPv4 ---'
     /usr/bin/curl -q --noproxy '*' -4 -fsS --connect-timeout 5 --max-time 12 https://1.1.1.1/cdn-cgi/trace || true
+    echo '--- Проверка IPv6 ---'
+    /usr/bin/curl -q --noproxy '*' -6 -fsS --connect-timeout 5 --max-time 12 https://1.1.1.1/cdn-cgi/trace || true
     pause_enter ;;
   esac
  done
 }
 
 mod_network_reset() {
- local choice='' unit='' selected='' candidates=() 
- smart_menu 'Сброс сетевых надстроек' 'Базовая ОС, SSH, пользователи, ключи и авторизация VPN сохраняются. Это НЕ заводской сброс. Полное восстановление неизвестных старых правил автоматически небезопасно.' 20 "$WT_WIDTH" 5 choice \
-  1 'Отключить новый LAN-маршрутизатор' \
-  2 'Остановить выбранные каскадные службы' \
-  3 'Отключить использование Tailscale exit node' \
-  0 'Назад' || return 0
- [[ "$choice" != 0 ]] || return 0
- case "$choice" in
-  1)
-   echo 'LAN-клиенты потеряют интернет. Старые LAN IP/правила неизвестных версий не удаляются.'
-   nm_yes 'Отключить LAN-маршрутизатор v2?' || return 0
-   br_snapshot || return 1
-   systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || return 1
-   if [[ -f /etc/bobarev-router-dnsmasq-was-active ]]; then
-    systemctl start dnsmasq.service || return 1
-    rm -f /etc/bobarev-router-dnsmasq-was-active
-   fi
-   echo 'Новый маршрутизатор отключён; конфиги оставлены для повторного включения.' ;;
-  2)
-   for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
-    [[ -f /etc/systemd/system/$unit.service ]] && candidates+=("$unit" 'Остановить службу' OFF)
-   done
-   ((${#candidates[@]})) || { echo 'Известных служб нет.'; return 0; }
-   selected=$(whiptail --title 'Выбор служб' --checklist 'Остановка может отключить прокси и SSH через mesh. Caddy с upstream перестанет проксировать. Сначала верните прямой выход в меню 23. Пакеты/конфиги/маршруты сторонних VPN не удаляются.' 23 "$WT_WIDTH" 9 "${candidates[@]}" 3>&1 1>&2 2>&3) || return 0
-   [[ -n "$selected" ]] || return 0
-   echo "Остановить: $selected"
-   nm_yes 'Подтвердить остановку выбранных служб?' || return 0
-   br_snapshot || return 1
-   for unit in $selected; do unit=${unit//\"/}; systemctl disable --now "$unit.service" || return 1; done ;;
-  3)
-   echo 'Меняется выход всего сервера, включая клиентов LAN. Авторизация Tailscale сохраняется.'
-   nm_yes 'Отключить выбранный exit node?' || return 0
-   br_snapshot || return 1
-   tailscale set --exit-node="" ;;
- esac
+ local selected='' item='' unit='' answer='' backup='' ts_exit='' ts_adv=''
+ local -a items=()
+
+ # Полное сканирование текущего состояния маршрутизации и надстроек.
+ echo 'Сканирование сетевых настроек...'
+ echo '--- Интерфейсы ---'
+ ip -br address || true
+ echo '--- IPv4 policy routing ---'
+ ip -4 rule || true
+ echo '--- NAT / MASQUERADE ---'
+ iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
+ echo '--- Активные сетевые службы ---'
+ for unit in bobarev-router-v2 bobarev-router-dhcp bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
+  [[ -f "/etc/systemd/system/$unit.service" ]] || continue
+  printf '%-32s %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
+ done
+ if command -v tailscale >/dev/null; then
+  ts_exit="$(tailscale get exit-node 2>/dev/null || echo '')"
+  ts_adv="$(tailscale get advertise-exit-node 2>/dev/null || echo false)"
+  echo "--- Tailscale exit node: ${ts_exit:-не выбран} ---"
+  echo "--- Анонсирование exit node: $ts_adv ---"
+ fi
+ echo ''
+ echo 'Базовая ОС, SSH, пользователи, ключи и авторизация VPN сохраняются.'
+ echo 'Это не заводской сброс. Неизвестные старые правила показываются, но автоматически не удаляются.'
+ echo ''
+
+ if [[ -f /etc/systemd/system/bobarev-router-v2.service ]]; then
+  items+=('LAN_ROUTER' 'Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
+ fi
+ if command -v tailscale >/dev/null; then
+  if [[ -n "$ts_exit" && "$ts_exit" != "none" && "$ts_exit" != "false" ]]; then
+   items+=('TS_EXIT' 'Отключить выбранный Tailscale exit node' OFF)
+  fi
+  if [[ "$ts_adv" == "true" ]]; then
+   items+=('TS_ADV' 'Отключить анонсирование сервера как exit node' OFF)
+  fi
+ fi
+ for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
+  [[ -f "/etc/systemd/system/$unit.service" ]] || continue
+  local state
+  state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
+  items+=("$unit" "Остановить службу [$state]" OFF)
+ done
+
+ ((${#items[@]})) || { echo 'Нет распознанных компонентов для безопасного отключения.'; return 0; }
+
+ selected=$(whiptail --title 'Сброс сетевых настроек' --checklist \
+  'Пробел — выбрать. Отключаются только выбранные маршрутизация, NAT/MASQUERADE и службы. Конфиги, пакеты, SSH и авторизация VPN сохраняются.' \
+  24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
+ [[ -n "$selected" ]] || return 0
+
+ echo 'Будут отключены:'
+ for item in $selected; do echo "  ${item//\"/}"; done
+ nm_yes 'Подтвердить выбранный сброс?' || return 0
+ br_snapshot || return 1
+
+ for item in $selected; do
+  item=${item//\"/}
+  case "$item" in
+   LAN_ROUTER)
+    systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || true
+    if [[ -f /etc/bobarev-router-dnsmasq-was-active ]]; then
+     systemctl start dnsmasq.service || true
+     rm -f /etc/bobarev-router-dnsmasq-was-active
+    fi
+    echo 'LAN-маршрутизатор, DHCP и его NAT/MASQUERADE отключены.' ;;
+   TS_EXIT)
+    tailscale set --exit-node="" || true
+    echo 'Tailscale exit node отключён.' ;;
+   TS_ADV)
+    tailscale set --advertise-exit-node=false || true
+    echo 'Анонсирование exit node отключено.' ;;
+   *)
+    systemctl disable --now "$item.service" || true
+    echo "Служба $item остановлена и отключена." ;;
+  esac
+ done
+
+ echo 'Сброс завершён. Конфигурации сохранены для повторного включения.'
 }
 
 
@@ -8383,12 +8362,11 @@ while true; do
     "20" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
     "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
     "22" "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" \
-    "23" "🔗 NaiveProxy + XRayMesh" \
-    "24" "NaiveProxy / Tailscale Mullvad Exit" \
+    "23" "🔗 NaiveProxy-XRayMesh" \
+    "24" "NaiveProxy-Tailscale Mullvad Exit" \
     "25" "Аудит системы 1" \
     "26" "Аудит системы 2 и каскадные пары" \
     "27" "Сброс сетевых надстроек (выборочно)" \
-    "28" "🔧 Исправить LAN-маршрутизатор (Tailscale)" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -8426,8 +8404,7 @@ while true; do
         24) manage_naive_mullvad_menu ;;
         25) mod_server_audit; pause_enter ;;
         26) mod_network_cascade_audit ;;
-        27) mod_network_reset; pause_enter ;;
-        28) mod_fix_lan_router_tailscale; pause_enter ;;
+        27) mod_network_reset ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

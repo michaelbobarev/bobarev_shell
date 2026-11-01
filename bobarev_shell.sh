@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.10.2 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.10.3 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -1013,7 +1013,7 @@ if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
-    # Для связки NaiveProxy - Tailscale (MTU 1280 + Disco) -> WARP (MTU 1280) фиксируем MSS 1140
+    # Для связки NaiveProxy -> Tailscale (MTU 1280 + Disco) -> WARP (MTU 1280) фиксируем MSS 1140
     iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     iptables -t mangle -I OUTPUT 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
@@ -1039,7 +1039,7 @@ RU_SH_EOF
 
     cat << 'RU_SVC_EOF' > /etc/systemd/system/bobarev-cascade-ru.service
 [Unit]
-Description=Bobarev Cascade RU Routing (NaiveProxy - Tunnel)
+Description=Bobarev Cascade RU Routing (NaiveProxy -> Tunnel)
 After=network-online.target caddy.service
 Wants=network-online.target
 
@@ -1301,14 +1301,14 @@ setup_standalone_naive() {
 
         local sc_choice=""
         if [ "$is_configured" = true ]; then
-            if ! smart_menu "🌐 NaiveProxy WG + Tailscale Dual-Gateway" "
+            if ! smart_menu "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" "
 Статус: $c_state
 Активных пользователей: $u_cnt
 Выберите действие:" 18 $WT_WIDTH 6 "sc_choice"             "1" "📋 Показать ссылки Shadowrocket"             "2" "👤 Управление пользователями"             "3" "🚀 Подключить / Обновить туннель WireGuard (wg0 -> Выход)"             "4" "🌍 Переключить на прямой выход в интернет (отключить wg0)"             "5" "🔧 Перенастроить домен и NaiveProxy (без изменения выхода)"             "6" "🛑 Остановить и удалить NaiveProxy"             "0" "🔙 Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
                 break
             fi
         else
-            if ! smart_menu "🌐 NaiveProxy WG + Tailscale Dual-Gateway" "
+            if ! smart_menu "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" "
 Статус: $c_state
 
 Поддерживает 2 режима выхода:
@@ -1449,7 +1449,7 @@ EOF
 
 
 setup_cascade_server1_ru() {
-    echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY - TAILSCALE ===${C_RESET}"
+    echo -e "${C_CYAN}🔒 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
     if ! is_derp_active && ! check_required_ports_free "ru" "80" "443"; then
         return 0
     fi
@@ -1685,9 +1685,9 @@ manage_cascade_naive_ts_warp() {
             # shellcheck disable=SC1091
             [ -f /etc/default/bobarev-cascade ] && source /etc/default/bobarev-cascade
             if [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
-                c_state="Сервер 1 (РФ: NaiveProxy - Прямой WG мост)"
+                c_state="Сервер 1 (РФ: NaiveProxy -> Прямой WG мост)"
             else
-                c_state="Сервер 1 (РФ: NaiveProxy - Tailscale)"
+                c_state="Сервер 1 (РФ: NaiveProxy -> Tailscale)"
             fi
         elif [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
@@ -1701,8 +1701,8 @@ manage_cascade_naive_ts_warp() {
 
         local c_choice
         if ! smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 "c_choice" \
-        "1" "🚀 Сервер 1 (РФ): NaiveProxy - Tailscale" \
-        "2" "🌍 Сервер 2 (Зарубеж): Tailscale - Выход" \
+        "1" "🚀 Сервер 1 (РФ): NaiveProxy -> Tailscale" \
+        "2" "🌍 Сервер 2 (Зарубеж): Tailscale -> Выход" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
         "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
@@ -1747,7 +1747,7 @@ manage_cascade_naive_ts_warp() {
 }
 
 # ==============================================================================
-# МОДУЛЬ 20: ПРЯМОЙ СКОРОСТНОЙ КАСКАД (NAIVEPROXY - WG + UDP2RAW - WARP)
+# МОДУЛЬ 20: ПРЯМОЙ СКОРОСТНОЙ КАСКАД (NAIVEPROXY -> WG + UDP2RAW -> WARP)
 # ==============================================================================
 check_required_ports_free() {
     # Проверяет, не заняты ли целевые порты СТОРОННИМИ процессами (игнорируя наши собственные caddy, udp2raw и ядерный интерфейс wg-cascade)
@@ -2322,7 +2322,7 @@ EOF
 }
 
 setup_direct_wg_server1_ru() {
-    echo -e "${C_CYAN}🚀 === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY - WG + ANTI-DPI) ===${C_RESET}"
+    echo -e "${C_CYAN}🚀 === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY -> WG + ANTI-DPI) ===${C_RESET}"
     if ! check_required_ports_free "ru" "80" "443" "51889"; then
         return 0
     fi
@@ -2550,7 +2550,7 @@ EOF
     fi
     disable_ufw_strict_rpfilter
 
-    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy - WG [MTU 1280, MSS 1240 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1280, MSS 1240 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
     echo -e "${C_BLUE}⚡ Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
     for i in {1..10}; do
         ping -c 1 -W 1 10.200.200.1 >/dev/null 2>&1 || true
@@ -2741,7 +2741,7 @@ EOF
 }
 
 setup_cascade_hysteria_server1_ru() {
-    echo -e "${C_CYAN}🚀 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY - HYSTERIA 2 ===${C_RESET}"
+    echo -e "${C_CYAN}🚀 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> HYSTERIA 2 ===${C_RESET}"
     ensure_hysteria_installed || return 1
     enable_routing_optimizations || true
 
@@ -2793,7 +2793,7 @@ setup_cascade_hysteria_server1_ru() {
 
     ensure_go_and_build_caddy_naive || return 1
 
-    # Отключаем перехват маршрутов от Каскада 1 (wg-cascade / udp2raw) и Tailscale Exit-Node,
+    # Отключаем перехват маршрутов от Каскада 1 (wg-cascade / udp2raw) и Tailscale Exit Node,
     # чтобы трафик шел строго по цепочке: Caddy (NaiveProxy) -> socks5://127.0.0.1:1080 (Hysteria 2 Client) -> Сервер 2
     echo -e "${C_BLUE}🧹 Очистка конфликтующих маршрутов wg-cascade и старых экземпляров Hysteria...${C_RESET}"
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service hysteria-server.service hysteria-client.service
@@ -2891,7 +2891,7 @@ EOF
     if [ -z "$test_ip" ]; then
         test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность UDP-порта ${s2_port} на Сервере 2")
     fi
-    echo -e "\n${C_GREEN}✅ Каскад 2 (NaiveProxy - Hysteria 2 SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
+    echo -e "\n${C_GREEN}✅ Каскад 2 (NaiveProxy -> Hysteria 2 SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "  • Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     print_naive_shadowrocket_links
 }
@@ -2907,13 +2907,13 @@ manage_cascade_hysteria_menu() {
                 c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Чистый IP сервера)"
             fi
         elif systemctl is-active --quiet hysteria-client.service 2>/dev/null; then
-            c_state="Активен Сервер 1 (РФ: NaiveProxy - Hysteria 2 Client)"
+            c_state="Активен Сервер 1 (РФ: NaiveProxy -> Hysteria 2 Client)"
         fi
 
         local c_choice
         if ! smart_menu "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" "🌍 Сервер 2 (Зарубеж): Hysteria 2 - Выход" \
-        "2" "🚀 Сервер 1 (РФ): NaiveProxy - Hysteria 2" \
+        "1" "🌍 Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
+        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
         "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
@@ -2967,7 +2967,7 @@ manage_cascade_hysteria_menu() {
 
 
 # ==============================================================================
-# МОДУЛЬ 21: КАСКАД 3 (NAIVEPROXY - XRAY REALITY VLESS -> WARP / ЧИСТЫЙ IP)
+# МОДУЛЬ 21: КАСКАД 3 (NAIVEPROXY -> XRAY REALITY VLESS -> WARP / ЧИСТЫЙ IP)
 # ==============================================================================
 ensure_xray_installed() {
     if [ -x "/usr/local/bin/xray" ]; then
@@ -3286,7 +3286,7 @@ EOF
 }
 
 setup_cascade_xray_server1_ru() {
-    echo -e "${C_CYAN}🚀 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY - XRAY REALITY ===${C_RESET}"
+    echo -e "${C_CYAN}🚀 === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> XRAY REALITY ===${C_RESET}"
     ensure_xray_installed || return 1
     enable_routing_optimizations || true
 
@@ -3396,7 +3396,7 @@ EOF
         test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:10808 --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность TCP-порта ${s2_port} на Сервере 2")
     fi
     echo -e "
-${C_GREEN}✅ Каскад 3 (NaiveProxy - Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
+${C_GREEN}✅ Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "  • Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     print_naive_shadowrocket_links
 }
@@ -3416,15 +3416,15 @@ manage_cascade_xray_menu() {
                         c_state="Активен Сервер 2 (Зарубеж: Xray REALITY -> Чистый IP сервера)"
                     fi
                 elif [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ]; then
-                    c_state="Активен Сервер 1 (РФ: NaiveProxy - Xray REALITY Client)"
+                    c_state="Активен Сервер 1 (РФ: NaiveProxy -> Xray REALITY Client)"
                 fi
             fi
         fi
 
         local c_choice
         if ! smart_menu "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" "🌍 Сервер 2 (Зарубеж): Xray REALITY - Выход" \
-        "2" "🚀 Сервер 1 (РФ): NaiveProxy - Xray REALITY" \
+        "1" "🌍 Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
+        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
         "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
@@ -3494,14 +3494,14 @@ mod_direct_wg_cascade() {
                     d_status="Активен Сервер 2 (Зарубеж: WG-Мост [$ob_str] -> Чистый IP сервера)"
                 fi
             else
-                d_status="Активен Сервер 1 (РФ: NaiveProxy - WG-Мост [$ob_str])"
+                d_status="Активен Сервер 1 (РФ: NaiveProxy -> WG-Мост [$ob_str])"
             fi
         fi
 
         local dc_choice
         if ! smart_menu "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" "\nСтатус моста: $d_status\nВыберите действие:" 18 $WT_WIDTH 7 "dc_choice" \
         "1" "🌍 Сервер 2 (Зарубеж): WG-мост + Anti-DPI" \
-        "2" "🚀 Сервер 1 (РФ): NaiveProxy - WG-мост" \
+        "2" "🚀 Сервер 1 (РФ): NaiveProxy -> WG-мост" \
         "3" "👤 Управление пользователями NaiveProxy" \
         "4" "📋 Показать ссылки Shadowrocket" \
         "5" "🔄 Переключить выход: Чистый IP <-> WARP" \
@@ -6040,7 +6040,7 @@ mod_server_audit() {
     elif systemctl is-active --quiet xraymesh.service; then
         cascade_status="${C_GREEN}Сервер 2: XRayMesh — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
-        cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit-Node -> WireGuard wg0 активен)${C_RESET}"
+        cascade_status="${C_GREEN}🚀 Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
     elif is_naive_active && is_wg_cascade_active; then
         cascade_status="${C_GREEN}🚀 Сервер 1 (Каскад 1: Naiveproxy - Wireguard - Warp: NaiveProxy -> WG-Мост активен)${C_RESET}"
     elif is_naive_active; then
@@ -6252,14 +6252,14 @@ mod_router_sbc() {
    state='установлен'
    state2="$(systemctl is-active bobarev-router-v2.service 2>/dev/null || echo unknown)/$(systemctl is-active bobarev-router-dhcp.service 2>/dev/null || echo unknown)"
   fi
-  smart_menu 'Режим локального маршрутизатора' \
+  smart_menu '📡 Режим локального маршрутизатора' \
    "Состояние: $state. Службы: $state2.\nМастер настроит LAN, выход, DHCP и NAT пошагово. Базовая сеть, SSH и авторизация VPN не сбрасываются." \
    20 "$WT_WIDTH" 7 choice \
-   1 'Статус и диагностика' \
-   2 'Мастер настройки' \
-   3 'Запустить / перезапустить' \
-   4 'Остановить' \
-   5 'Удалить настройки маршрутизатора' \
+   1 '🔎 Статус и диагностика' \
+   2 '🧙 Мастер настройки (step-by-step)' \
+   3 '▶️ Запустить / перезапустить' \
+   4 '⏹️ Остановить' \
+   5 '🗑️ Удалить настройки маршрутизатора' \
    0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
@@ -6324,18 +6324,19 @@ mod_router_sbc_setup() {
  smart_menu 'LAN маршрутизатора' 'Первый роутер → WAN NanoPi; LAN NanoPi → WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
  # Сканируем доступные выходные интерфейсы.
  local exit_items=() exit_choice='' custom_if=''
- [[ -e /sys/class/net/tailscale0 ]] && exit_items+=('tailscale0' 'Tailscale exit node')
- [[ -e /sys/class/net/wg0 ]] && exit_items+=('wg0' 'WireGuard wg0')
- [[ -e /sys/class/net/warp ]] && exit_items+=('warp' 'Cloudflare WARP')
- [[ -e /sys/class/net/tun0 ]] && exit_items+=('tun0' 'VPN tun0')
+ exit_items+=("$wan_if" "🌐 WAN — чистый интернет ($wan_if)")
+ [[ -e /sys/class/net/tailscale0 ]] && exit_items+=('tailscale0' '🟢 Tailscale exit node')
+ [[ -e /sys/class/net/wg0 ]] && exit_items+=('wg0' '🔒 WireGuard wg0')
+ [[ -e /sys/class/net/warp ]] && exit_items+=('warp' '☁️ Cloudflare WARP')
+ [[ -e /sys/class/net/tun0 ]] && exit_items+=('tun0' '🔗 VPN tun0')
  for iface in /sys/class/net/*; do
   iface=${iface##*/}
   [[ "$iface" == "$lan_if" || "$iface" == "$wan_if" ]] && continue
   [[ -e /sys/class/net/$iface/device ]] || continue
-  exit_items+=("$iface" "Физический WAN/выход")
+  exit_items+=("$iface" "🔌 Физический интерфейс")
  done
- exit_items+=('custom' 'Указать другой интерфейс вручную')
- smart_menu 'Выбор выхода для LAN' 'Выберите интерфейс, через который LAN-клиенты будут выходить в интернет.' 20 "$WT_WIDTH" 8 exit_choice "${exit_items[@]}" || return 0
+ exit_items+=('custom' '✏️ Указать другой интерфейс вручную')
+ smart_menu '🚪 Выбор выхода для LAN' 'Выберите интерфейс, через который LAN-клиенты будут выходить в интернет.' 22 "$WT_WIDTH" 9 exit_choice "${exit_items[@]}" || return 0
  if [[ "$exit_choice" == "custom" ]]; then
   MODULE_CANCELED=false
   prompt_default 'Имя интерфейса (например tailscale0, wg0, eth1)' '' custom_if
@@ -6361,7 +6362,10 @@ PY
   while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
    echo -e "${C_YELLOW}⚠ Tailscale exit node пока не выбран или не активен.${C_RESET}"
    local ts_choice='' ts_node=''
-   smart_menu 'Tailscale exit-node' 'Выберите exit-node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
+   smart_menu '🌍 Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice \
+    1 '📋 Список exit nodes' \
+    2 '✅ Выбрать exit node по IP/имени' \
+    0 'Отмена' || return 0
    case "$ts_choice" in
     0) return 0 ;;
     1) tailscale exit-node list || true; pause_enter ;;
@@ -6475,9 +6479,6 @@ UNIT
  if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
   ufw allow in on "$lan_if" to any port 67 proto udp comment 'Bobarev router v2 DHCP' || return 1
  fi
- systemctl daemon-reload
- systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service
-
  if [[ "$out_if" == "tailscale0" ]]; then
   mkdir -p /etc/systemd/system/bobarev-router-v2.service.d
   cat > /etc/systemd/system/bobarev-router-v2.service.d/override.conf <<EOF
@@ -6494,6 +6495,8 @@ EOF
   ip rule add pref 11990 iif "$lan_if" lookup 52
  fi
 
+ systemctl daemon-reload
+ systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service
  if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
   echo 'Ошибка применения. Проверьте journalctl -u bobarev-router-v2 -u bobarev-router-dhcp; резервная копия сохранена.'
   return 1
@@ -6523,7 +6526,12 @@ br_snapshot() {
 manage_naive_mullvad_menu() {
  local pick='' node=''
  while true; do
-  smart_menu 'NaiveProxy - Mullvad Exit-Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick 1 'Список exit-nodes' 2 'Выбрать exit-node' 3 'Отключить exit-node' 4 'Проверка выхода' 0 'Назад' || return 0
+  smart_menu '🌐 NaiveProxy-Mullvad Exit Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick \
+   1 '📋 Список exit nodes' \
+   2 '✅ Выбрать exit node' \
+   3 '⛔ Отключить exit node' \
+   4 '🔎 Проверка выхода' \
+   0 'Назад' || return 0
   case "$pick" in
    0) return 0 ;;
    1)
@@ -6589,24 +6597,24 @@ mod_network_reset() {
  echo 'Это не заводской сброс. Неизвестные старые правила показываются, но автоматически не удаляются.'
  echo ''
  if [[ -f /etc/systemd/system/bobarev-router-v2.service ]]; then
-  items+=('LAN_ROUTER' 'Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
+  items+=('LAN_ROUTER' '🔌 Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
  fi
  if command -v tailscale >/dev/null; then
   if [[ -n "$ts_exit" && "$ts_exit" != "none" && "$ts_exit" != "false" ]]; then
-   items+=('TS_EXIT' 'Отключить выбранный Tailscale exit node' OFF)
+   items+=('TS_EXIT' '🌍 Отключить выбранный Tailscale exit node' OFF)
   fi
   if [[ "$ts_adv" == "true" ]]; then
-   items+=('TS_ADV' 'Отключить анонсирование сервера как exit node' OFF)
+   items+=('TS_ADV' '📡 Отключить анонсирование сервера как exit node' OFF)
   fi
  fi
  for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
   [[ -f "/etc/systemd/system/$unit.service" ]] || continue
   local state
   state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
-  items+=("$unit" "Остановить службу [$state]" OFF)
+  items+=("$unit" "🛑 Остановить службу [$state]" OFF)
  done
  ((${#items[@]})) || { echo 'Нет распознанных компонентов для безопасного отключения.'; return 0; }
- selected=$(whiptail --title 'Сброс сетевых настроек' --checklist \
+ selected=$(whiptail --title '♻️ Сброс сетевых настроек' --checklist \
   'Пробел — выбрать. Отключаются только выбранные маршрутизация, NAT/MASQUERADE и службы. Конфиги, пакеты, SSH и авторизация VPN сохраняются.' \
   24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
  [[ -n "$selected" ]] || return 0
@@ -6647,8 +6655,8 @@ mod_backup_manager() {
 
     local b_choice
     if ! smart_menu "Экспорт и импорт настроек" "Выберите действие:" 13 $WT_WIDTH 3 "b_choice" \
-    "1" "📤 Сохранить настройки в архив" \
-    "2" "📥 Восстановить настройки из архива" \
+    "1" "📤 Сохранить настройки в архив (Экспорт)" \
+    "2" "📥 Восстановить настройки из архива (Импорт)" \
     "0" "🔙 Отмена" || [ "$b_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0
@@ -8401,7 +8409,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.10.2 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.10.3 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -8468,7 +8476,7 @@ while true; do
     "7" "🔒 Настройка системной защиты" \
     "8" "🔥 Управление брандмауэром" \
     "9" "🔐 Блокировка доступа суперпользователя" \
-    "10" "🔗 Настройка сети Tailscale" \
+    "10" "🔗 Настройка закрытой сети Tailscale" \
     "11" "📝 Управление системными журналами" \
     "12" "⚡ Оптимизация памяти" \
     "13" "💾 Управление файлом подкачки" \
@@ -8480,13 +8488,13 @@ while true; do
     "19" "🚀 Каскад 1: NaiveProxy + WireGuard + WARP" \
     "20" "🚀 Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
     "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
-    "22" "🔗 NaiveProxy WG + Tailscale Dual-Gateway" \
-    "23" "🔗 NaiveProxy + XRayMesh" \
-    "24" "🔗 NaiveProxy + Tailscale Mullvad Exit-Node" \
-    "25" "🛠️ Аудит системы 1" \
-    "26" "🛠️ Аудит системы 2 и каскадные пары" \
-    "27" "🔄 Сброс сетевых надстроек" \
-    "A" "🚀 Выполнить первичную настройку" \
+    "22" "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" \
+    "23" "🔗 NaiveProxy-XRayMesh" \
+    "24" "🌐 NaiveProxy-Tailscale Mullvad Exit" \
+    "25" "Аудит системы 1" \
+    "26" "Аудит системы 2 и каскадные пары" \
+    "27" "Сброс сетевых надстроек (выборочно)" \
+    "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
         clear
         echo "Работа скрипта завершена."

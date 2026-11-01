@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.10.4 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.10.6 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -768,9 +768,9 @@ manage_naive_users_menu() {
 
         local u_choice
         if ! smart_menu "Управление пользователями NaiveProxy" "\nАктивных пользователей: $u_cnt\nВыберите действие:" 15 $WT_WIDTH 4 "u_choice" \
-        "1" " Добавить или изменить пользователя" \
-        "2" " Удалить пользователя из списка" \
-        "3" " Показать ссылки всех пользователей" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
         "0" " Вернуться назад" || [ "$u_choice" = "0" ]; then
             break
         fi
@@ -1652,7 +1652,7 @@ setup_cascade_server2_warp() {
 
     local exit_choice=""
     if ! smart_menu "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" "\nКак выпускать трафик из Tailscale в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
+    "1" "1" \
     "2" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
         return 0
     fi
@@ -1701,12 +1701,12 @@ manage_cascade_naive_ts_warp() {
 
         local c_choice
         if ! smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 "c_choice" \
-        "1" " Сервер 1 (РФ): NaiveProxy -> Tailscale" \
-        "2" " Сервер 2 (Зарубеж): Tailscale -> Выход" \
-        "3" " Управление пользователями NaiveProxy" \
-        "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
-        "6" " Остановить компоненты каскада" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
+    "5" "5" \
+    "6" "6" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -2038,7 +2038,7 @@ toggle_foreign_warp_menu() {
     [ "$cur_mode" = "warp" ] && def_item="2"
 
     if ! smart_menu "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" "\nТекущий режим выхода: $cur_human\n\nРаботает для всех каскадов (WG-мост, Hysteria 2, Xray REALITY и Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 "m_choice" \
-    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
+    "1" "1" \
     "2" " Cloudflare WARP (Маскировка выходного IP под Cloudflare)"; then
         return 0
     fi
@@ -2145,8 +2145,8 @@ setup_direct_wg_server2_foreign() {
 
     local obfs_choice=""
     if ! smart_menu "2/3. Защита заголовков WireGuard от ТСПУ" "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 "obfs_choice" \
-    "1" " FakeTCP Маскировка (Рекомендуется — полностью мимикрирует под TCP-поток)" \
-    "2" " UDP-XOR Маскировка (Резервный вариант)" \
+    "1" "1" \
+    "2" "2" \
     "3" " Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"; then
         return 0
     fi
@@ -2160,7 +2160,7 @@ setup_direct_wg_server2_foreign() {
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2" "\nКак выпускать трафик в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим в любой момент в Пункте 5 меню каскада):" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
+    "1" "1" \
     "2" " Через Cloudflare WARP (Скрывает IP сервера за IP Cloudflare)"; then
         return 0
     fi
@@ -2650,7 +2650,7 @@ setup_cascade_hysteria_server2_foreign() {
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Hysteria 2)" "\nКак выпускать трафик из Hysteria 2 в интернет?" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)" \
+    "1" "1" \
     "2" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"; then
         return 0
     fi
@@ -2912,13 +2912,13 @@ manage_cascade_hysteria_menu() {
 
         local c_choice
         if ! smart_menu " Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" " Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
-        "2" " Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
-        "3" " Управление пользователями NaiveProxy" \
-        "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
-        "6" " Показать токен подключения" \
-        "7" " Остановить службу Hysteria 2" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
+    "5" "5" \
+    "6" "6" \
+    "7" "7" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -3423,13 +3423,13 @@ manage_cascade_xray_menu() {
 
         local c_choice
         if ! smart_menu " Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" " Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
-        "2" " Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
-        "3" " Управление пользователями NaiveProxy" \
-        "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
-        "6" " Показать токен подключения" \
-        "7" " Остановить службы Xray" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
+    "5" "5" \
+    "6" "6" \
+    "7" "7" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -3500,13 +3500,13 @@ mod_direct_wg_cascade() {
 
         local dc_choice
         if ! smart_menu " Каскад 1: NaiveProxy + WireGuard + WARP" "\nСтатус моста: $d_status\nВыберите действие:" 18 $WT_WIDTH 7 "dc_choice" \
-        "1" " Сервер 2 (Зарубеж): WG-мост + Anti-DPI" \
-        "2" " Сервер 1 (РФ): NaiveProxy -> WG-мост" \
-        "3" " Управление пользователями NaiveProxy" \
-        "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
-        "6" " Показать токен подключения" \
-        "7" " Остановить каскад и мост" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
+    "5" "5" \
+    "6" "6" \
+    "7" "7" \
         "0" " Вернуться в главное меню" || [ "$dc_choice" = "0" ]; then
             break
         fi
@@ -3681,10 +3681,10 @@ manage_custom_derp() {
 
         local d_choice
         if ! smart_menu "Личный ретранслятор (DERP)" "\nСтатус: $derp_state\nВыберите действие:" 16 $WT_WIDTH 5 "d_choice" \
-        "1" " Установить / Обновить DERP (Cloudflare + STUN)" \
-        "2" " Показать JSON-код (derpMap) для консоли" \
-        "3" " Редактировать сертификаты Cloudflare" \
-        "4" " Остановить и удалить службу DERP" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
         "0" " Вернуться назад" || [ "$d_choice" = "0" ]; then
             break
         fi
@@ -4420,7 +4420,7 @@ mod_ssh_key() {
     if [ -n "$pubkey" ]; then
         local mode_choice
         if ! smart_menu "Параметры сохранения" "Выберите действие:" 12 $WT_WIDTH 2 "mode_choice" \
-        "1" " Добавить ключ в существующий список" \
+    "1" "1" \
         "2" " Полностью перезаписать список ключей"; then
             echo -e "${C_YELLOW} Отмена сохранения.${C_RESET}"
             MODULE_CANCELED=true
@@ -4900,7 +4900,7 @@ mod_lock_root() {
     
     local root_choice
     if ! smart_menu "Системный доступ" "Выберите желаемое действие:" 12 $WT_WIDTH 2 "root_choice" \
-    "1" " Заблокировать" \
+    "1" "1" \
     "2" " Разблокировать"; then
         MODULE_CANCELED=true
         return 0
@@ -4963,17 +4963,17 @@ mod_tailscale() {
 
         local ts_choice
         if ! smart_menu "Настройка закрытой сети" "" 19 $WT_WIDTH 12 "ts_choice" \
-        "1" " Авторизация" \
-        "2" " Настройка шлюза" \
-        "3" " Трансляция локальных сетей" \
-        "4" " Прием маршрутов" \
-        "5" " Стелс-режим" \
-        "6" " Ускорение и MSS Clamping" \
-        "7" " Локальный веб-интерфейс" \
-        "8" " Приоритет сетевых правил" \
-        "9" " Личный ретранслятор (DERP)" \
-        "10" " Каскад: NaiveProxy + Tailscale + WARP" \
-        "11" " Полный сброс" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
+    "5" "5" \
+    "6" "6" \
+    "7" "7" \
+    "8" "8" \
+    "9" "9" \
+    "10" "10" \
+    "11" "11" \
         "0" " Вернуться назад"; then
             break
         fi
@@ -5002,9 +5002,9 @@ mod_tailscale() {
             2)
                 local en_choice
                 if smart_menu "Настройка шлюза" "Действие:" 12 $WT_WIDTH 4 "en_choice" \
-                "1" " Назначить этот сервер шлюзом" \
-                "2" " Отключить трансляцию шлюза" \
-                "3" " Подключиться к удаленному шлюзу" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
                 "4" " Отключиться от шлюза"; then
                     case "$en_choice" in
                         1) 
@@ -5071,7 +5071,7 @@ mod_tailscale() {
             3)
                 local tr_choice
                 if smart_menu "Трансляция локальных сетей" "Действие:" 11 $WT_WIDTH 2 "tr_choice" \
-                "1" " Включить трансляцию (Задать подсеть)" \
+    "1" "1" \
                 "2" " Отключить трансляцию"; then
                     case "$tr_choice" in
                         1)
@@ -5133,9 +5133,9 @@ mod_tailscale() {
             8)
                 local nf_choice
                 if smart_menu "Приоритет сетевых правил" "Действие:" 13 $WT_WIDTH 4 "nf_choice" \
-                "1" " Приоритет брандмауэра UFW (системный режим)" \
-                "2" " Приоритет Tailscale (встроенный авто-режим)" \
-                "3" " Выбрать интерфейсы для сквозного транзита" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
                 "4" " Очистить дубликаты NAT и перезагрузить UFW"; then
                     case "$nf_choice" in
                         1) set_tailscale_netfilter_priority "off" ;;
@@ -5206,9 +5206,9 @@ mod_logging_manager() {
     
     local log_choice=""
     if ! smart_menu "Управление системными журналами" "$msg" 16 $WT_WIDTH 4 "log_choice" \
-    "1" " Ограничить размер (100 МБ, 1 месяц)" \
-    "2" " Задать собственный лимит размера" \
-    "3" " Отключить ведение логов (Stealth)" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
     "0" " Вернуться назад" || [ "$log_choice" = "0" ] || [ -z "$log_choice" ]; then
         MODULE_CANCELED=true
         return 0
@@ -5405,8 +5405,8 @@ UDEV_EOF
 mod_swap_manager() {
     local swap_choice
     if ! smart_menu "Файл подкачки (Swap)" "Управление виртуальной памятью:" 12 $WT_WIDTH 3 "swap_choice" \
-    "1" " Создать базовый объем (2 ГБ)" \
-    "2" " Указать собственный объем" \
+    "1" "1" \
+    "2" "2" \
     "3" " Полностью отключить файл подкачки" || [ "$swap_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0
@@ -5468,9 +5468,9 @@ mod_desktop_apps() {
 
     local gov_choice
     if smart_menu "Управление питанием процессора" "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 "gov_choice" \
-    "1" " Performance (Максимальный)" \
-    "2" " Ondemand / Schedutil (Сбалансированный)" \
-    "3" " Powersave (Эко-режим)" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
     "0" " Без изменений" && [ "$gov_choice" != "0" ]; then
         local selected_gov="ondemand"
         local gov_name="Сбалансированный"
@@ -6256,7 +6256,7 @@ mod_router_sbc() {
    "Состояние: $state. Службы: $state2.\nМастер настроит LAN, выход, DHCP и NAT пошагово. Базовая сеть, SSH и авторизация VPN не сбрасываются." \
    20 "$WT_WIDTH" 7 choice \
    1 'Статус и диагностика' \
-   2 'Мастер настройки (step-by-step)' \
+   2 'Мастер настройки' \
    3 'Запустить / перезапустить' \
    4 'Остановить' \
    5 'Удалить настройки маршрутизатора' \
@@ -6321,7 +6321,7 @@ mod_router_sbc_setup() {
   [[ -e /sys/class/net/$iface/device && "$iface" != "$wan_if" ]] && items+=("$iface" "LAN (не WAN)")
  done
  ((${#items[@]})) || { echo 'Нет свободного физического LAN-порта.'; return 1; }
- smart_menu 'LAN маршрутизатора' 'Первый роутер  WAN NanoPi; LAN NanoPi  WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
+ smart_menu 'LAN маршрутизатора' 'Первый роутер WAN NanoPi; LAN NanoPi  WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
  local exit_items=() exit_choice='' custom_if=''
  exit_items+=("$wan_if" "WAN — чистый интернет ($wan_if)")
  [[ -e /sys/class/net/tailscale0 ]] && exit_items+=('tailscale0' 'Tailscale exit node')
@@ -6348,8 +6348,7 @@ mod_router_sbc_setup() {
  ip link show "$out_if" >/dev/null 2>&1 || { echo "Интерфейс $out_if не существует."; pause_enter; return 0; }
  prompt_default 'LAN IPv4 /24 (сеть не должна совпадать с WAN и LAN Google Wi-Fi)' 192.168.199.1 lan_ip
  [[ "$MODULE_CANCELED" == false ]] || return 0
- prompt_default 'DNS для LAN-клиентов (через запятую)' '8.8.8.8,1.1.1.1' dns_servers
- [[ "$MODULE_CANCELED" == false && -n "$dns_servers" ]] || return 0
+ dns_servers='8.8.8.8,1.1.1.1'
  python3 - "$lan_ip" "$wan_if" <<'PY'
 import ipaddress,json,subprocess,sys
 x=ipaddress.IPv4Interface(sys.argv[1]+'/24')
@@ -6522,9 +6521,9 @@ br_snapshot() {
 }
 
 manage_naive_mullvad_menu() {
- local pick='' node=''
+ local pick='' node='' wan_if='' router_config='/etc/bobarev-router-v2/config'
  while true; do
-  smart_menu 'NaiveProxy-Mullvad Exit Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Публичный вход NaiveProxy сохраняется, но обратная маршрутизация может потребовать отдельной проверки. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick 1 'Список exit nodes' 2 'Выбрать exit node' 3 'Отключить exit node' 4 'Проверка выхода' 0 'Назад' || return 0
+  smart_menu 'NaiveProxy-Mullvad Exit Node' 'Выбор exit node меняет исходящий трафик всего сервера и подключённых LAN-клиентов. Если настроен режим локального маршрутизатора, его выход автоматически переключается между Tailscale и WAN. Авторизация Tailscale не сбрасывается.' 19 "$WT_WIDTH" 6 pick 1 'Список exit nodes' 2 'Выбрать exit node' 3 'Отключить exit node' 4 'Проверка выхода' 0 'Назад' || return 0
   case "$pick" in
    0) return 0 ;;
    1)
@@ -6540,6 +6539,29 @@ manage_naive_mullvad_menu() {
     br_snapshot || return 1
     if tailscale set --advertise-exit-node=false --exit-node="$node" --exit-node-allow-lan-access=true; then
      echo -e "${C_GREEN}Exit node применён: $node${C_RESET}"
+     if [[ -f "$router_config" ]]; then
+      source "$router_config"
+      if [[ "${OUT:-}" != "tailscale0" ]]; then
+       wan_if="$(get_wan_if)"
+       sed -i "s/^OUT=.*/OUT=tailscale0/" "$router_config"
+       mkdir -p /etc/systemd/system/bobarev-router-v2.service.d
+       cat > /etc/systemd/system/bobarev-router-v2.service.d/override.conf <<EOF
+[Unit]
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+ExecStartPre=/bin/sleep 5
+ExecStartPost=-/sbin/ip rule del pref 11990 iif $LAN lookup 52
+ExecStartPost=/sbin/ip rule add pref 11990 iif $LAN lookup 52
+EOF
+       ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
+       ip rule add pref 11990 iif "$LAN" lookup 52
+       systemctl daemon-reload
+       systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true
+       echo 'LAN-маршрутизатор переключён на Tailscale exit node.'
+      fi
+     fi
     else
      echo -e "${C_RED}Не удалось применить exit node.${C_RESET}"
     fi
@@ -6549,6 +6571,20 @@ manage_naive_mullvad_menu() {
     br_snapshot || return 1
     if tailscale set --exit-node=""; then
      echo -e "${C_GREEN}Tailscale exit node отключён.${C_RESET}"
+     if [[ -f "$router_config" ]]; then
+      source "$router_config"
+      if [[ "${OUT:-}" == "tailscale0" ]]; then
+       wan_if="$(get_wan_if)"
+       if [[ -n "$wan_if" ]]; then
+        sed -i "s/^OUT=.*/OUT=$wan_if/" "$router_config"
+        rm -f /etc/systemd/system/bobarev-router-v2.service.d/override.conf
+        ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
+        systemctl daemon-reload
+        systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true
+        echo "LAN-маршрутизатор переключён на WAN: $wan_if"
+       fi
+      fi
+     fi
     else
      echo -e "${C_RED}Не удалось отключить exit node.${C_RESET}"
     fi
@@ -6648,8 +6684,8 @@ mod_backup_manager() {
 
     local b_choice
     if ! smart_menu "Экспорт и импорт настроек" "Выберите действие:" 13 $WT_WIDTH 3 "b_choice" \
-    "1" " Сохранить настройки в архив (Экспорт)" \
-    "2" " Восстановить настройки из архива (Импорт)" \
+    "1" "1" \
+    "2" "2" \
     "0" " Отмена" || [ "$b_choice" = "0" ]; then
         MODULE_CANCELED=true
         return 0
@@ -7587,11 +7623,11 @@ mod_network_cascade_audit() {
 
         local na_choice=""
         if ! smart_menu " 23/23. Аудит системы 2 и каскадные пары (v3.1)" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 "na_choice" \
-        "1" " Срез состояния системы" \
-        "2" " Тест связи между серверами" \
-        "3" " Мониторинг трафика Live" \
-        "4" " Полный комплексный аудит" \
-        "5" " Запуск консольного меню" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
+    "5" "5" \
         "0" " Вернуться в главное меню" || [ "$na_choice" = "0" ]; then
             break
         fi
@@ -8402,7 +8438,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.10.4 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.10.6 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -8460,33 +8496,33 @@ while true; do
   • Сеть Tailscale: $ts_main_status
 
    Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU "choice" \
-    "1" " Часовой пояс" \
-    "2" " Имя сервера" \
-    "3" " Обновление компонентов" \
-    "4" " Создание и настройка пользователя" \
-    "5" " Привязка ключа безопасности" \
-    "6" " Конфигурация удаленного доступа" \
-    "7" " Настройка системной защиты" \
-    "8" " Управление брандмауэром" \
-    "9" " Блокировка доступа суперпользователя" \
-    "10" " Настройка закрытой сети Tailscale" \
-    "11" " Управление системными журналами" \
-    "12" " Оптимизация памяти" \
-    "13" " Управление файлом подкачки" \
-    "14" " Утилиты ПК и режим процессора" \
-    "15" " Сброс видеовыхода HDMI" \
-    "16" "⏳ Анализ времени загрузки" \
-    "17" " Режим локального маршрутизатора" \
-    "18" " Экспорт / Импорт настроек" \
-    "19" " Каскад 1: NaiveProxy + WireGuard + WARP" \
-    "20" " Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
-    "21" " Каскад 3: NaiveProxy + Xray REALITY + WARP" \
-    "22" " Автономный NaiveProxy (+ WG Dual-Gateway)" \
-    "23" "NaiveProxy-XRayMesh" \
-    "24" "NaiveProxy-Tailscale Mullvad Exit" \
-    "25" "Аудит системы 1" \
-    "26" "Аудит системы 2 и каскадные пары" \
-    "27" "Сброс сетевых надстроек (выборочно)" \
+    "1" "1" \
+    "2" "2" \
+    "3" "3" \
+    "4" "4" \
+    "5" "5" \
+    "6" "6" \
+    "7" "7" \
+    "8" "8" \
+    "9" "9" \
+    "10" "10" \
+    "11" "11" \
+    "12" "12" \
+    "13" "13" \
+    "14" "14" \
+    "15" "15" \
+    "16" "16" \
+    "17" "17" \
+    "18" "18" \
+    "19" "19" \
+    "20" "20" \
+    "21" "21" \
+    "22" "22" \
+    "23" "23" \
+    "24" "24" \
+    "25" "25" \
+    "26" "26" \
+    "27" "27" \
     "A" " Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" " Завершить работу" || [ "$choice" = "0" ]; then
         clear

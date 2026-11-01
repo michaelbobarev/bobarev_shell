@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.9.10 (NaiveProxy + Tailscale Mullvad Exit Edition)
+# Версия: 3.10.0 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6244,185 +6244,217 @@ mod_server_audit() {
 
 # 18. Универсальный режим локального маршрутизатора (с поддержкой SBC-клиента WireGuard/WARP)
 mod_router_sbc() {
-    echo -e "${C_CYAN}📡 === 18/21. УНИВЕРСАЛЬНЫЙ РЕЖИМ ЛОКАЛЬНОГО МАРШРУТИЗАТОРА ===${C_RESET}"
-    DEFAULT_WAN_IF=$(get_wan_if)
-    local wan_if="$DEFAULT_WAN_IF"
-    
-    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nСкрипт настроит DHCP/DNS через dnsmasq, назначит статический IP на выбранный порт и свяжет локальную сеть с выбранным туннелем." 14 $WT_WIDTH; then
-        echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
-        MODULE_CANCELED=true
-        return 0
-    fi
-
-    # 1. Поиск физических портов
-    local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|wg-cascade|warp|tun[0-9]*|utun[0-9]*|docker|veth|br-" | awk '{print $1}' | sed 's/@.*//' || echo "")
-    if [ -z "$available_lan_ifs" ]; then
-        whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
-        return 0
-    fi
-
-    local lan_menu_items=()
-    for iface in $available_lan_ifs; do
-        local st_tag=$(get_iface_status_tag "$iface")
-        lan_menu_items+=("$iface" "Порт LAN для клиентов $st_tag")
-    done
-
-    local lan_if=""
-    if ! smart_menu "1/4. Внутренний LAN-интерфейс" "Выберите сетевой порт для подключения роутера/коммутатора:" 14 $WT_WIDTH 5 "lan_if" "${lan_menu_items[@]}" || [ -z "$lan_if" ]; then
-        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
-        MODULE_CANCELED=true
-        return 0
-    fi
-
-    # 2. Выбор выходного канала
-    local out_menu_items=()
-    ip link show wg0 >/dev/null 2>&1 && out_menu_items+=("wg0" "🔒 WireGuard туннель (wg0)")
-    ip link show wg-cascade >/dev/null 2>&1 && out_menu_items+=("wg-cascade" "🚀 Скоростной мост (wg-cascade)")
-    ip link show warp >/dev/null 2>&1 && out_menu_items+=("warp" "🚀 Cloudflare WARP туннель (warp)")
-    ip link show tailscale0 >/dev/null 2>&1 && out_menu_items+=("tailscale0" "🔗 Tailscale меш-сеть (tailscale0)")
-    [ -n "$wan_if" ] && out_menu_items+=("$wan_if" "🌍 Прямой WAN провайдера ($wan_if)")
-    out_menu_items+=("CUSTOM" "📝 Ввести имя интерфейса вручную")
-
-    local out_if=""
-    if ! smart_menu "2/4. Выходной VPN-канал" "Через какой интерфейс отправлять трафик клиентов из $lan_if?" 16 $WT_WIDTH 6 "out_if" "${out_menu_items[@]}" || [ -z "$out_if" ]; then
-        echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
-        MODULE_CANCELED=true
-        return 0
-    fi
-
-    if [ "$out_if" = "CUSTOM" ]; then
-        prompt_default "Введите точное имя интерфейса (например: wg0, tun0):" "wg0" out_if
-        if [ "$MODULE_CANCELED" = true ] || [ -z "$out_if" ]; then return 0; fi
-    fi
-
-    # 3. Настройка IP и шлюза
-    local lan_ip="192.168.199.1"
-    prompt_default "3/4. Введите статический IP для шлюза на порту $lan_if:" "$lan_ip" lan_ip
-    [ "$MODULE_CANCELED" = true ] && return 0
-
-    local subnet_prefix="${lan_ip%.*}"
-    local dhcp_start="${subnet_prefix}.50"
-    local dhcp_end="${subnet_prefix}.200"
-
-    # 4. Kill Switch (Защита от утечки в обход VPN)
-    local enable_ks=false
-    if [ "$out_if" != "$wan_if" ]; then
-        if prompt_yn "Включить Kill Switch?\n(Блокировать интернет клиентам LAN, если туннель $out_if упадет)" "true"; then
-            enable_ks=true
-        fi
-    fi
-
-    echo -e "${C_BLUE}📦 Установка и настройка dnsmasq...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -yq dnsmasq iptables >/dev/null 2>&1
-
-    # Отключение systemd-resolved от 53 порта, если он вызывает конфликт
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf 2>/dev/null || true
-        systemctl restart systemd-resolved 2>/dev/null || true
-    fi
-
-    # Конфигурация dnsmasq
-    backup_file "/etc/dnsmasq.conf"
-    cat << EOF > /etc/dnsmasq.conf
-# Bobarev Shell: LAN Router Configuration
+ local lan_if='' out_if='' lan_ip='192.168.199.1' wan_if='' answer='' items=() iface
+ MODULE_CANCELED=false
+ wan_if=$(get_wan_if)
+ for iface in /sys/class/net/*; do
+  iface=${iface##*/}
+  [[ -e /sys/class/net/$iface/device && "$iface" != "$wan_if" ]] && items+=("$iface" "LAN (не WAN)")
+ done
+ ((${#items[@]})) || { echo 'Нет свободного физического LAN-порта.'; return 1; }
+ smart_menu 'LAN маршрутизатора' 'Первый роутер → WAN NanoPi; LAN NanoPi → WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
+ prompt_default 'Выход: tailscale0, wg0, warp или физический WAN' tailscale0 out_if
+ [[ "$MODULE_CANCELED" == false && -n "$out_if" ]] || return 0
+ [[ "$out_if" =~ ^[a-zA-Z0-9_.-]+$ && "$out_if" != "$lan_if" ]] || return 1
+ ip link show "$out_if" >/dev/null || return 1
+ prompt_default 'LAN IPv4 /24 (сеть не должна совпадать с WAN и LAN Google Wi-Fi)' 192.168.199.1 lan_ip
+ [[ "$MODULE_CANCELED" == false ]] || return 0
+ python3 - "$lan_ip" "$wan_if" <<'PY'
+import ipaddress,json,subprocess,sys
+x=ipaddress.IPv4Interface(sys.argv[1]+'/24')
+if not x.ip.is_private or x.ip in (x.network.network_address,x.network.broadcast_address):sys.exit('Неверный LAN IP')
+for n in json.loads(subprocess.check_output(['ip','-j','-4','addr','show','dev',sys.argv[2]])):
+ for a in n.get('addr_info',[]):
+  if x.network.overlaps(ipaddress.ip_network(a['local']+'/'+str(a['prefixlen']),strict=False)):sys.exit('LAN пересекается с WAN')
+PY
+ [[ $? == 0 ]] || return 1
+ if [[ "$out_if" == tailscale0 ]]; then
+  ip -4 route show table 52 | grep -q '^default dev tailscale0' || { echo 'Сначала выберите рабочий Tailscale exit node.'; return 1; }
+ fi
+ echo "Будет: LAN $lan_if $lan_ip/24 → $out_if. DHCP .50–.200, DNS 1.1.1.1/9.9.9.9."
+ echo 'Существующий dnsmasq будет остановлен и заменён отдельной DHCP-службой. Старые конфиги сохраняются.'
+ echo 'SSH/WAN/Tailscale не перенастраиваются. IPv6 клиентов через LAN блокируется (без IPv6 VPN/NAT).'
+ nm_yes 'Применить маршрутизатор?' || return 0
+ apt-get install -y dnsmasq-base iptables iproute2 || return 1
+ br_snapshot || return 1
+ if systemctl is-active --quiet dnsmasq.service; then
+  touch /etc/bobarev-router-dnsmasq-was-active
+  systemctl stop dnsmasq.service || return 1
+ fi
+ install -d -m 700 /etc/bobarev-router-v2
+ printf 'LAN=%q\nOUT=%q\nADDR=%q\n' "$lan_if" "$out_if" "$lan_ip" > /etc/bobarev-router-v2/config
+ local prefix=${lan_ip%.*}
+ cat > /etc/bobarev-router-v2/dhcp.conf <<EOF
+port=0
 interface=$lan_if
-bind-interfaces
-listen-address=$lan_ip,127.0.0.1
-dhcp-range=$dhcp_start,$dhcp_end,255.255.255.0,12h
-dhcp-option=option:router,$lan_ip
-dhcp-option=option:dns-server,$lan_ip
-server=1.1.1.1
-server=8.8.8.8
-cache-size=1000
-no-resolv
-log-facility=/var/log/dnsmasq.log
+bind-dynamic
+dhcp-range=$prefix.50,$prefix.200,255.255.255.0,12h
+dhcp-option=3,$lan_ip
+dhcp-option=6,1.1.1.1,9.9.9.9
+dhcp-leasefile=/var/lib/misc/bobarev-router.leases
 EOF
-
-    # 5. Сохранение конфигурации маршрутизатора
-    cat << EOF > /etc/default/bobarev-router
-ROUTER_LAN_IF="$lan_if"
-ROUTER_LAN_IP="$lan_ip"
-ROUTER_OUT_IF="$out_if"
-ROUTER_KILLSWITCH="$enable_ks"
-ROUTER_ROUTE_HOST="false"
-EOF
-    chmod 600 /etc/default/bobarev-router
-
-    # 6. Генерация постоянного стартового скрипта
-    cat << 'ROUTER_SH_EOF' > /usr/local/bin/bobarev-router-up.sh
+ dnsmasq --test --conf-file=/etc/bobarev-router-v2/dhcp.conf || return 1
+ cat > /usr/local/sbin/bobarev-router-v2 <<'BR'
 #!/bin/bash
-[ ! -f /etc/default/bobarev-router ] && exit 0
-source /etc/default/bobarev-router
-
-sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
-    [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
-done
-
-# Присвоение статического IP на интерфейс LAN
-ip link set dev "$ROUTER_LAN_IF" up 2>/dev/null || true
-ip addr flush dev "$ROUTER_LAN_IF" 2>/dev/null || true
-ip addr add "${ROUTER_LAN_IP}/24" dev "$ROUTER_LAN_IF" 2>/dev/null || true
-
-# Форвардинг и NAT
-iptables -C FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT
-iptables -C FORWARD -i "$ROUTER_OUT_IF" -o "$ROUTER_LAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$ROUTER_OUT_IF" -o "$ROUTER_LAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -t nat -C POSTROUTING -s "${ROUTER_LAN_IP%.*}.0/24" -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "${ROUTER_LAN_IP%.*}.0/24" -o "$ROUTER_OUT_IF" -j MASQUERADE
-
-# Выравнивание TCP MSS (PMTU clamp)
-iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-
-# Применение Kill Switch при необходимости
-WAN_DEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
-if [ "${ROUTER_KILLSWITCH:-false}" = "true" ] && [ -n "$WAN_DEV" ] && [ "$WAN_DEV" != "$ROUTER_OUT_IF" ]; then
-    iptables -C FORWARD -i "$ROUTER_LAN_IF" -o "$WAN_DEV" -j DROP 2>/dev/null || iptables -I FORWARD 1 -i "$ROUTER_LAN_IF" -o "$WAN_DEV" -j DROP
+set -euo pipefail
+source /etc/bobarev-router-v2/config
+NET=${ADDR%.*}.0/24
+clean() {
+ for spec in 'filter FORWARD BR2_FWD' 'nat POSTROUTING BR2_NAT' 'mangle FORWARD BR2_MSS'; do
+  read -r table parent chain <<< "$spec"
+  while iptables -w -t "$table" -D "$parent" -j "$chain" 2>/dev/null; do :; done
+  iptables -w -t "$table" -F "$chain" 2>/dev/null || true
+  iptables -w -t "$table" -X "$chain" 2>/dev/null || true
+ done
+ while ip6tables -w -D FORWARD -i "$LAN" -j DROP 2>/dev/null; do :; done
+ ip rule del pref 11991 iif "$LAN" lookup 199 2>/dev/null || true
+ ip route flush table 199
+}
+if [[ ${1:-} == stop ]]; then clean; exit; fi
+ip link show "$LAN" >/dev/null
+ip link show "$OUT" >/dev/null
+sysctl -w net.ipv4.ip_forward=1
+ip link set "$LAN" up
+ip address replace "$ADDR/24" dev "$LAN"
+clean
+if [[ "$OUT" != tailscale0 ]]; then
+ if [[ "$OUT" == "$LAN" ]]; then exit 1; fi
+ GW=$(ip -4 route show table main default dev "$OUT" | awk '/via/{print $3;exit}')
+ if [[ -n "$GW" ]]; then ip route replace table 199 default via "$GW" dev "$OUT" onlink
+ else ip route replace table 199 default dev "$OUT"; fi
+ ip rule add pref 11991 iif "$LAN" lookup 199
+else
+ ip -4 route show table 52 | grep -q '^default dev tailscale0' || { echo 'Нет exit node'; exit 1; }
 fi
-ROUTER_SH_EOF
-    chmod +x /usr/local/bin/bobarev-router-up.sh
-
-    # 7. Создание службы systemd для автозапуска
-    cat << 'ROUTER_SVC_EOF' > /etc/systemd/system/bobarev-router.service
+iptables -w -N BR2_FWD
+iptables -w -A BR2_FWD -i "$LAN" -o "$OUT" -s "$NET" -j ACCEPT
+iptables -w -A BR2_FWD -i "$LAN" -j DROP
+iptables -w -A BR2_FWD -o "$LAN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -w -I FORWARD 1 -j BR2_FWD
+iptables -w -t nat -N BR2_NAT
+iptables -w -t nat -A BR2_NAT -s "$NET" -o "$OUT" -j MASQUERADE
+iptables -w -t nat -I POSTROUTING 1 -j BR2_NAT
+iptables -w -t mangle -N BR2_MSS
+iptables -w -t mangle -A BR2_MSS -i "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+iptables -w -t mangle -I FORWARD 1 -j BR2_MSS
+ip6tables -w -I FORWARD 1 -i "$LAN" -j DROP
+BR
+ chmod 700 /usr/local/sbin/bobarev-router-v2
+ cat > /etc/systemd/system/bobarev-router-v2.service <<'UNIT'
 [Unit]
-Description=Bobarev Shell Local Router Gateway
-After=network-online.target
+Description=Bobarev LAN router v2
+After=network-online.target tailscaled.service ufw.service
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/bobarev-router-up.sh
-
+ExecStart=/usr/local/sbin/bobarev-router-v2 start
+ExecStop=/usr/local/sbin/bobarev-router-v2 stop
 [Install]
 WantedBy=multi-user.target
-ROUTER_SVC_EOF
-
-    # 8. Запуск и применение правил
-    ensure_wg_kernel_modules
-    silent_run systemctl daemon-reload
-    silent_run systemctl enable --now bobarev-router.service
-    /usr/local/bin/bobarev-router-up.sh
-
-    systemctl restart dnsmasq
-    systemctl enable dnsmasq >/dev/null 2>&1 || true
-
-    # Интеграция с UFW (порты 67/udp DHCP и 53 DNS)
-    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-        silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
-        silent_run ufw allow in on "$lan_if" to any port 53 comment 'LAN DNS'
-        silent_run ufw route allow in on "$lan_if" out on "$out_if" comment "LAN to $out_if"
-        silent_run ufw route allow in on "$out_if" out on "$lan_if" comment "$out_if to LAN"
-        ensure_ufw_nat_rule "-A POSTROUTING -o $out_if -j MASQUERADE"
-        silent_run ufw reload
-    fi
-
-    echo -e "${C_GREEN}✅ Роутер запущен! Интерфейс $lan_if получил IP $lan_ip/24.${C_RESET}"
-    echo -e "  • DHCP-пул: ${C_CYAN}$dhcp_start - $dhcp_end${C_RESET}"
-    echo -e "  • Выходной канал: ${C_CYAN}$out_if${C_RESET} (Kill Switch: ${C_CYAN}$enable_ks${C_RESET})"
-    pause_enter
+UNIT
+ cat > /etc/systemd/system/bobarev-router-dhcp.service <<'UNIT'
+[Unit]
+Description=Bobarev LAN DHCP
+Requires=bobarev-router-v2.service
+After=bobarev-router-v2.service
+[Service]
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/bobarev-router-v2/dhcp.conf
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+UNIT
+ # DHCP allowed only on the chosen LAN; do not reset existing firewall.
+ if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
+  ufw allow in on "$lan_if" to any port 67 proto udp comment 'Bobarev router v2 DHCP' || return 1
+ fi
+ systemctl daemon-reload
+ systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service
+ if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
+  echo 'Ошибка применения. Проверьте journalctl -u bobarev-router-v2 -u bobarev-router-dhcp; резервная копия сохранена.'
+  return 1
+ fi
+ echo 'Настройки применены, но доступ в интернет ещё требует проверки.'
+ echo "Google Wi-Fi: WAN DHCP, LAN другая подсеть (например 192.168.86.0/24). Обновите WAN-аренду Google Wi-Fi."
+ echo 'После ufw reload перезапустите bobarev-router-v2.service.'
 }
 
-# 19. Экспорт и импорт резервной копии конфигураций (включая NaiveProxy, WARP, WG-Cascade и сертификаты)
+br_snapshot() {
+ local d="/root/bobarev-network-backup-$(date +%Y%m%d-%H%M%S)-$$"
+ mkdir -m 700 "$d" || return 1
+ cp -a /etc/ufw "$d/" 2>/dev/null || true
+ cp -a /etc/dnsmasq.conf /etc/dnsmasq.d /etc/bobarev-router-v2 "$d/" 2>/dev/null || true
+ iptables-save > "$d/iptables.txt"
+ ip6tables-save > "$d/ip6tables.txt"
+ ip -4 rule > "$d/ip-rule.txt"
+ ip -4 route show table all > "$d/routes.txt"
+ systemctl list-unit-files > "$d/units.txt"
+ command -v tailscale >/dev/null && tailscale debug prefs > "$d/tailscale-prefs.json" 2>/dev/null || true
+ echo "Резервная копия: $d (содержит приватные настройки; не публикуйте)"
+}
+
+manage_naive_mullvad_menu() {
+ local pick='' node=''
+ while true; do
+  smart_menu 'NaiveProxy / Tailscale exit' 'Работа NaiveProxy через публичный адрес требует отдельной проверки обратной маршрутизации. Выбор exit меняет трафик всего хоста.' 19 "$WT_WIDTH" 6 pick 1 'Список exit nodes' 2 'Выбрать exit node' 3 'Отключить exit node' 4 'Проверка' 0 'Назад' || return 0
+  case "$pick" in
+   0) return 0 ;;
+   1) tailscale exit-node list || true; pause_enter ;;
+   2)
+    MODULE_CANCELED=false
+    prompt_default 'IP / имя узла (отмена без изменений)' '' node
+    [[ "$MODULE_CANCELED" == false && -n "$node" ]] || continue
+    echo 'Необходимо отключить анонсирование себя как exit node. Публичные подключения могут нарушиться.'
+    nm_yes 'Применить выбранный выход и отключить анонсирование?' || continue
+    tailscale set --advertise-exit-node=false --exit-node="$node" --exit-node-allow-lan-access=true || true
+    pause_enter ;;
+   3) nm_yes 'Вернуть прямой выход?' && tailscale set --exit-node=""; pause_enter ;;
+   4) tailscale status || true
+    /usr/bin/curl -q --noproxy '*' -4 -fsS --connect-timeout 5 --max-time 12 https://1.1.1.1/cdn-cgi/trace || true
+    pause_enter ;;
+  esac
+ done
+}
+
+mod_network_reset() {
+ local choice='' unit='' selected='' candidates=() 
+ smart_menu 'Сброс сетевых надстроек' 'Базовая ОС, SSH, пользователи, ключи и авторизация VPN сохраняются. Это НЕ заводской сброс. Полное восстановление неизвестных старых правил автоматически небезопасно.' 20 "$WT_WIDTH" 5 choice \
+  1 'Отключить новый LAN-маршрутизатор' \
+  2 'Остановить выбранные каскадные службы' \
+  3 'Отключить использование Tailscale exit node' \
+  0 'Назад' || return 0
+ [[ "$choice" != 0 ]] || return 0
+ case "$choice" in
+  1)
+   echo 'LAN-клиенты потеряют интернет. Старые LAN IP/правила неизвестных версий не удаляются.'
+   nm_yes 'Отключить LAN-маршрутизатор v2?' || return 0
+   br_snapshot || return 1
+   systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || return 1
+   if [[ -f /etc/bobarev-router-dnsmasq-was-active ]]; then
+    systemctl start dnsmasq.service || return 1
+    rm -f /etc/bobarev-router-dnsmasq-was-active
+   fi
+   echo 'Новый маршрутизатор отключён; конфиги оставлены для повторного включения.' ;;
+  2)
+   for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
+    [[ -f /etc/systemd/system/$unit.service ]] && candidates+=("$unit" 'Остановить службу' OFF)
+   done
+   ((${#candidates[@]})) || { echo 'Известных служб нет.'; return 0; }
+   selected=$(whiptail --title 'Выбор служб' --checklist 'Остановка может отключить прокси и SSH через mesh. Caddy с upstream перестанет проксировать. Сначала верните прямой выход в меню 23. Пакеты/конфиги/маршруты сторонних VPN не удаляются.' 23 "$WT_WIDTH" 9 "${candidates[@]}" 3>&1 1>&2 2>&3) || return 0
+   [[ -n "$selected" ]] || return 0
+   echo "Остановить: $selected"
+   nm_yes 'Подтвердить остановку выбранных служб?' || return 0
+   br_snapshot || return 1
+   for unit in $selected; do unit=${unit//\"/}; systemctl disable --now "$unit.service" || return 1; done ;;
+  3)
+   echo 'Меняется выход всего сервера, включая клиентов LAN. Авторизация Tailscale сохраняется.'
+   nm_yes 'Отключить выбранный exit node?' || return 0
+   br_snapshot || return 1
+   tailscale set --exit-node="" ;;
+ esac
+}
+
+
 mod_backup_manager() {
     echo -e "${C_CYAN}📦 === 19/21. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
@@ -7804,92 +7836,6 @@ nm_checks_menu() {
   esac
  done
 }
-# ------------------------------------------------------------------------------
-# МОДУЛЬ: NAIVEPROXY → TAILSCALE MULLVAD EXIT
-# ------------------------------------------------------------------------------
-manage_naive_mullvad_menu() {
- local action='' node='' current_ip=''
- if ! command -v tailscale >/dev/null 2>&1; then
-  echo -e "${C_RED}❌ Tailscale не установлен. Сначала настройте Tailscale в пункте 10.${C_RESET}"
-  pause_enter; return 1
- fi
- if ! is_tailscale_authenticated; then
-  echo -e "${C_RED}❌ Tailscale не авторизован. Сначала выполните вход в Tailscale.${C_RESET}"
-  pause_enter; return 1
- fi
- while true; do
-  current_ip=$(curl --noproxy '*' -4 -fsS --connect-timeout 8 --max-time 15 https://ifconfig.me 2>/dev/null || echo 'неизвестен')
-  echo
-  echo -e "${C_BOLD}NaiveProxy → Tailscale Mullvad Exit${C_RESET}"
-  echo -e "NaiveProxy/Caddy остаётся входом; интернет-трафик сервера направляется через выбранный Mullvad exit node."
-  echo -e "Текущий внешний IP сервера: ${C_GREEN}${current_ip}${C_RESET}"
-  echo -e "${C_YELLOW}Перед включением убедитесь, что SSH доступен через Tailscale.${C_RESET}"
-  echo
-  if ! smart_menu 'NaiveProxy → Mullvad Exit' 'Выберите действие.' 24 "$WT_WIDTH" 7 action \
-   '1' 'Показать доступные Mullvad exit nodes' \
-   '2' 'Включить / сменить Mullvad exit node' \
-   '3' 'Выключить Mullvad exit node' \
-   '4' 'Проверить внешний IP и NaiveProxy' \
-   '5' 'Статус Tailscale' \
-   '0' 'Вернуться в меню'; then break; fi
-  [[ -n "$action" ]] || break
-  case "$action" in
-   0) break ;;
-   1)
-    echo -e "${C_BOLD}Доступные exit nodes:${C_RESET}"
-    tailscale exit-node list || echo -e "${C_RED}Не удалось получить список.${C_RESET}"
-    echo -e "${C_YELLOW}Если список пуст: включите Mullvad add-on в Tailscale Admin Console и добавьте этот VPS в Mullvad devices.${C_RESET}"
-    pause_enter ;;
-   2)
-    tailscale exit-node list || true
-    read -r -p 'Имя или Tailscale IP Mullvad exit node (Enter — отмена): ' node || node=''
-    if [[ -z "$node" ]]; then echo -e "${C_YELLOW}Отменено.${C_RESET}"; pause_enter; continue; fi
-    echo -e "${C_YELLOW}⚠️ После включения exit node публичный SSH этого VPS может стать недоступным.${C_RESET}"
-    nm_yes 'Включить выбранный Mullvad exit node?' || continue
-    if tailscale set --exit-node="$node" --exit-node-allow-lan-access=true; then
-     sleep 3
-     current_ip=$(curl --noproxy '*' -4 -fsS --connect-timeout 10 --max-time 20 https://ifconfig.me 2>/dev/null || echo 'не удалось определить')
-     echo -e "${C_GREEN}✅ Mullvad exit node включён.${C_RESET}"
-     echo -e "Текущий внешний IP: ${C_BOLD}${current_ip}${C_RESET}"
-     if systemctl is-active --quiet caddy.service; then
-      echo -e "${C_GREEN}Caddy/NaiveProxy активен: клиентский трафик будет выходить через этот IP.${C_RESET}"
-     else
-      echo -e "${C_YELLOW}Caddy/NaiveProxy не запущен. Настройте автономный NaiveProxy в пункте 22.${C_RESET}"
-     fi
-    else
-     echo -e "${C_RED}❌ Не удалось включить exit node. Проверьте имя узла и доступ Mullvad для этого устройства.${C_RESET}"
-    fi
-    pause_enter ;;
-   3)
-    nm_yes 'Выключить Mullvad exit node и вернуть прямой выход VPS?' || continue
-    if tailscale set --exit-node=; then
-     sleep 2
-     current_ip=$(curl --noproxy '*' -4 -fsS --connect-timeout 10 --max-time 20 https://ifconfig.me 2>/dev/null || echo 'не удалось определить')
-     echo -e "${C_GREEN}✅ Mullvad exit node выключен. Текущий IP: ${current_ip}${C_RESET}"
-    else
-     echo -e "${C_RED}❌ Не удалось выключить exit node.${C_RESET}"
-    fi
-    pause_enter ;;
-   4)
-    echo -e "${C_BOLD}Внешний IP сервера:${C_RESET}"
-    curl --noproxy '*' -4 -fsS --connect-timeout 10 --max-time 20 https://ifconfig.me || echo 'Проверка не удалась'
-    echo
-    if systemctl is-active --quiet caddy.service; then
-     echo -e "${C_GREEN}Caddy/NaiveProxy: запущен.${C_RESET}"
-    else
-     echo -e "${C_YELLOW}Caddy/NaiveProxy: не запущен.${C_RESET}"
-    fi
-    echo -e "${C_BLUE}Проверьте Shadowrocket: https://ifconfig.me${C_RESET}"
-    pause_enter ;;
-   5)
-    tailscale status || true
-    echo
-    tailscale exit-node list || true
-    pause_enter ;;
-  esac
- done
-}
-
 manage_naive_mesh_menu() {
  local action
  while true; do
@@ -8352,9 +8298,10 @@ while true; do
     "21" "🚀 Каскад 3: NaiveProxy + Xray REALITY + WARP" \
     "22" "🌐 Автономный NaiveProxy (+ WG Dual-Gateway)" \
     "23" "🔗 NaiveProxy + XRayMesh" \
-    "24" "🌍 NaiveProxy → Tailscale Mullvad Exit" \
-    "25" "🔍 Аудит системы 1" \
-    "26" "🩺 Аудит системы 2 и каскадные пары" \
+    "24" "NaiveProxy / Tailscale Mullvad Exit" \
+    "25" "Аудит системы 1" \
+    "26" "Аудит системы 2 и каскадные пары" \
+    "27" "Сброс сетевых надстроек (выборочно)" \
     "A" "🚀 Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" "❌ Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -8392,6 +8339,7 @@ while true; do
         24) manage_naive_mullvad_menu ;;
         25) mod_server_audit; pause_enter ;;
         26) mod_network_cascade_audit ;;
+        27) mod_network_reset; pause_enter ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.11.0 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.11.1 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6366,7 +6366,7 @@ PY
    pause_enter
    return 0
   fi
-  while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
+  if ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
    echo 'Tailscale exit node пока не выбран или не активен.'
    local ts_choice='' ts_node=''
    smart_menu 'Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
@@ -6378,13 +6378,21 @@ PY
      prompt_default 'IP или имя exit node' '' ts_node
      [[ "$MODULE_CANCELED" == false && -n "$ts_node" ]] || continue
      if tailscale set --advertise-exit-node=false --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
-      echo -e "${C_GREEN}Exit node применён: $ts_node${C_RESET}"
+      if ts_wait_exit_node; then
+       echo -e "${C_GREEN}Exit node применён и активен: $ts_node${C_RESET}"
+      else
+       echo -e "${C_YELLOW}Exit node задан, но default в table 52 пока не появился.${C_RESET}"
+       pause_enter
+       return 0
+      fi
      else
       echo -e "${C_RED}Не удалось применить exit node.${C_RESET}"
+      pause_enter
+      return 0
      fi
      ;;
    esac
-  done
+  fi
  fi
  echo "Будет: LAN $lan_if $lan_ip/24 -> $out_if. DHCP .50-.200, DNS $dns_servers."
  echo 'Существующий dnsmasq будет остановлен и заменён отдельной DHCP-службой. Старые конфиги сохраняются.'
@@ -6550,6 +6558,15 @@ ts_is_online() {
  grep -q '^100\.' <<<"$out"
 }
 
+ts_wait_exit_node() {
+ local i
+ for i in $(seq 1 15); do
+  ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && return 0
+  sleep 1
+ done
+ return 1
+}
+
 manage_naive_mullvad_menu() {
  local pick='' node='' wan_if='' router_config='/etc/bobarev-router-v2/config'
  while true; do
@@ -6574,14 +6591,15 @@ manage_naive_mullvad_menu() {
     nm_yes 'Применить выбранный exit node?' || continue
     br_snapshot || return 1
     if tailscale set --advertise-exit-node=false --exit-node="$node" --exit-node-allow-lan-access=true; then
-     echo -e "${C_GREEN}Exit node применён: $node${C_RESET}"
-     if [[ -f "$router_config" ]]; then
-      source "$router_config"
-      if [[ "${OUT:-}" != "tailscale0" ]]; then
-       wan_if="$(get_wan_if)"
-       sed -i "s/^OUT=.*/OUT=tailscale0/" "$router_config"
-       mkdir -p /etc/systemd/system/bobarev-router-v2.service.d
-       cat > /etc/systemd/system/bobarev-router-v2.service.d/override.conf <<EOF
+     if ts_wait_exit_node; then
+      echo -e "${C_GREEN}Exit node применён и активен: $node${C_RESET}"
+      if [[ -f "$router_config" ]]; then
+       source "$router_config"
+       if [[ "${OUT:-}" != "tailscale0" ]]; then
+        wan_if="$(get_wan_if)"
+        sed -i "s/^OUT=.*/OUT=tailscale0/" "$router_config"
+        mkdir -p /etc/systemd/system/bobarev-router-v2.service.d
+        cat > /etc/systemd/system/bobarev-router-v2.service.d/override.conf <<EOF
 [Unit]
 After=network-online.target tailscaled.service
 Wants=network-online.target tailscaled.service
@@ -6591,12 +6609,16 @@ ExecStartPre=/bin/sleep 5
 ExecStartPost=-/sbin/ip rule del pref 11990 iif $LAN lookup 52
 ExecStartPost=/sbin/ip rule add pref 11990 iif $LAN lookup 52
 EOF
-       ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
-       ip rule add pref 11990 iif "$LAN" lookup 52
-       systemctl daemon-reload
-       systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true
-       echo 'LAN-маршрутизатор переключён на Tailscale exit node.'
+        ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
+        ip rule add pref 11990 iif "$LAN" lookup 52
+        systemctl daemon-reload
+        systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true
+        echo 'LAN-маршрутизатор переключён на Tailscale exit node.'
+       fi
       fi
+     else
+      echo -e "${C_YELLOW}Exit node задан, но default в table 52 пока не появился.${C_RESET}"
+      echo 'Проверьте: tailscale status; tailscale netcheck'
      fi
     else
      echo -e "${C_RED}Не удалось применить exit node.${C_RESET}"
@@ -8474,7 +8496,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.11.0 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.11.1 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

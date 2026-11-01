@@ -6248,12 +6248,13 @@ mod_router_sbc() {
     DEFAULT_WAN_IF=$(get_wan_if)
     local wan_if="$DEFAULT_WAN_IF"
     
-    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nВы сможете выбрать внутренний интерфейс для клиентов (например, порт роутера Google Wi-Fi) и внешний VPN-канал (WireGuard wg0, wg-cascade, WARP, Tailscale или WAN)." 14 $WT_WIDTH; then
+    if ! whiptail --title "Универсальный Маршрутизатор" --yesno "Превратить этот сервер в локальный LAN-шлюз (Роутер)?\n\nСкрипт настроит DHCP/DNS через dnsmasq, назначит статический IP на выбранный порт и свяжет локальную сеть с выбранным туннелем." 14 $WT_WIDTH; then
         echo -e "${C_YELLOW}⏭️ Настройка маршрутизатора отменена.${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
+    # 1. Поиск физических портов
     local available_lan_ifs=$(ip -br link show | grep -vE "tailscale0|lo|wg[0-9]*|wg-cascade|warp|tun[0-9]*|utun[0-9]*|docker|veth|br-" | awk '{print $1}' | sed 's/@.*//' || echo "")
     if [ -z "$available_lan_ifs" ]; then
         whiptail --msgbox "Ошибка: Не найдено подходящих физических интерфейсов для локальной сети!" 8 $WT_WIDTH
@@ -6267,12 +6268,13 @@ mod_router_sbc() {
     done
 
     local lan_if=""
-    if ! smart_menu "1/3. Внутренний LAN-интерфейс" "Выберите сетевой порт для подключения роутера (например, Google Wi-Fi):" 14 $WT_WIDTH 5 "lan_if" "${lan_menu_items[@]}" || [ -z "$lan_if" ]; then
+    if ! smart_menu "1/4. Внутренний LAN-интерфейс" "Выберите сетевой порт для подключения роутера/коммутатора:" 14 $WT_WIDTH 5 "lan_if" "${lan_menu_items[@]}" || [ -z "$lan_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
+    # 2. Выбор выходного канала
     local out_menu_items=()
     ip link show wg0 >/dev/null 2>&1 && out_menu_items+=("wg0" "🔒 WireGuard туннель (wg0)")
     ip link show wg-cascade >/dev/null 2>&1 && out_menu_items+=("wg-cascade" "🚀 Скоростной мост (wg-cascade)")
@@ -6282,29 +6284,141 @@ mod_router_sbc() {
     out_menu_items+=("CUSTOM" "📝 Ввести имя интерфейса вручную")
 
     local out_if=""
-    if ! smart_menu "2/3. Выходной VPN-канал" "Через какой интерфейс отправлять трафик клиентов из локальной сети ($lan_if)?" 16 $WT_WIDTH 6 "out_if" "${out_menu_items[@]}" || [ -z "$out_if" ]; then
+    if ! smart_menu "2/4. Выходной VPN-канал" "Через какой интерфейс отправлять трафик клиентов из $lan_if?" 16 $WT_WIDTH 6 "out_if" "${out_menu_items[@]}" || [ -z "$out_if" ]; then
         echo -e "${C_YELLOW}↩️ Отмена. Возврат в меню...${C_RESET}"
         MODULE_CANCELED=true
         return 0
     fi
 
     if [ "$out_if" = "CUSTOM" ]; then
-        prompt_default "Введите точное имя интерфейса (например: wg0, warp):" "wg0" out_if
+        prompt_default "Введите точное имя интерфейса (например: wg0, tun0):" "wg0" out_if
         if [ "$MODULE_CANCELED" = true ] || [ -z "$out_if" ]; then return 0; fi
     fi
 
+    # 3. Настройка IP и шлюза
     local lan_ip="192.168.199.1"
-    prompt_default "3/3. Введите статический IP для шлюза на порту $lan_if:" "$lan_ip" lan_ip
+    prompt_default "3/4. Введите статический IP для шлюза на порту $lan_if:" "$lan_ip" lan_ip
     [ "$MODULE_CANCELED" = true ] && return 0
 
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    local subnet_prefix="${lan_ip%.*}"
+    local dhcp_start="${subnet_prefix}.50"
+    local dhcp_end="${subnet_prefix}.200"
+
+    # 4. Kill Switch (Защита от утечки в обход VPN)
+    local enable_ks=false
+    if [ "$out_if" != "$wan_if" ]; then
+        if prompt_yn "Включить Kill Switch?\n(Блокировать интернет клиентам LAN, если туннель $out_if упадет)" "true"; then
+            enable_ks=true
+        fi
+    fi
+
+    echo -e "${C_BLUE}📦 Установка и настройка dnsmasq...${C_RESET}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq && apt-get install -yq dnsmasq iptables >/dev/null 2>&1
+
+    # Отключение systemd-resolved от 53 порта, если он вызывает конфликт
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf 2>/dev/null || true
+        systemctl restart systemd-resolved 2>/dev/null || true
+    fi
+
+    # Конфигурация dnsmasq
+    backup_file "/etc/dnsmasq.conf"
+    cat << EOF > /etc/dnsmasq.conf
+# Bobarev Shell: LAN Router Configuration
+interface=$lan_if
+bind-interfaces
+listen-address=$lan_ip,127.0.0.1
+dhcp-range=$dhcp_start,$dhcp_end,255.255.255.0,12h
+dhcp-option=option:router,$lan_ip
+dhcp-option=option:dns-server,$lan_ip
+server=1.1.1.1
+server=8.8.8.8
+cache-size=1000
+no-resolv
+log-facility=/var/log/dnsmasq.log
+EOF
+
+    # 5. Сохранение конфигурации маршрутизатора
+    cat << EOF > /etc/default/bobarev-router
+ROUTER_LAN_IF="$lan_if"
+ROUTER_LAN_IP="$lan_ip"
+ROUTER_OUT_IF="$out_if"
+ROUTER_KILLSWITCH="$enable_ks"
+ROUTER_ROUTE_HOST="false"
+EOF
+    chmod 600 /etc/default/bobarev-router
+
+    # 6. Генерация постоянного стартового скрипта
+    cat << 'ROUTER_SH_EOF' > /usr/local/bin/bobarev-router-up.sh
+#!/bin/bash
+[ ! -f /etc/default/bobarev-router ] && exit 0
+source /etc/default/bobarev-router
+
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
+    [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
+done
+
+# Присвоение статического IP на интерфейс LAN
+ip link set dev "$ROUTER_LAN_IF" up 2>/dev/null || true
+ip addr flush dev "$ROUTER_LAN_IF" 2>/dev/null || true
+ip addr add "${ROUTER_LAN_IP}/24" dev "$ROUTER_LAN_IF" 2>/dev/null || true
+
+# Форвардинг и NAT
+iptables -C FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$ROUTER_LAN_IF" -o "$ROUTER_OUT_IF" -j ACCEPT
+iptables -C FORWARD -i "$ROUTER_OUT_IF" -o "$ROUTER_LAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$ROUTER_OUT_IF" -o "$ROUTER_LAN_IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -C POSTROUTING -s "${ROUTER_LAN_IP%.*}.0/24" -o "$ROUTER_OUT_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "${ROUTER_LAN_IP%.*}.0/24" -o "$ROUTER_OUT_IF" -j MASQUERADE
+
+# Выравнивание TCP MSS (PMTU clamp)
+iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+# Применение Kill Switch при необходимости
+WAN_DEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+if [ "${ROUTER_KILLSWITCH:-false}" = "true" ] && [ -n "$WAN_DEV" ] && [ "$WAN_DEV" != "$ROUTER_OUT_IF" ]; then
+    iptables -C FORWARD -i "$ROUTER_LAN_IF" -o "$WAN_DEV" -j DROP 2>/dev/null || iptables -I FORWARD 1 -i "$ROUTER_LAN_IF" -o "$WAN_DEV" -j DROP
+fi
+ROUTER_SH_EOF
+    chmod +x /usr/local/bin/bobarev-router-up.sh
+
+    # 7. Создание службы systemd для автозапуска
+    cat << 'ROUTER_SVC_EOF' > /etc/systemd/system/bobarev-router.service
+[Unit]
+Description=Bobarev Shell Local Router Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/bobarev-router-up.sh
+
+[Install]
+WantedBy=multi-user.target
+ROUTER_SVC_EOF
+
+    # 8. Запуск и применение правил
     ensure_wg_kernel_modules
+    silent_run systemctl daemon-reload
+    silent_run systemctl enable --now bobarev-router.service
+    /usr/local/bin/bobarev-router-up.sh
 
-    silent_run iptables -A FORWARD -i "$lan_if" -o "$out_if" -j ACCEPT
-    silent_run iptables -A FORWARD -i "$out_if" -o "$lan_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-    silent_run iptables -t nat -A POSTROUTING -s "${lan_ip%.*}.0/24" -o "$out_if" -j MASQUERADE
+    systemctl restart dnsmasq
+    systemctl enable dnsmasq >/dev/null 2>&1 || true
 
-    echo -e "${C_GREEN}✅ Одноплатный компьютер успешно настроен как шлюз! Клиенты из сети $lan_if маршрутизируются через интерфейс $out_if.${C_RESET}"
+    # Интеграция с UFW (порты 67/udp DHCP и 53 DNS)
+    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
+        silent_run ufw allow in on "$lan_if" to any port 67 proto udp comment 'LAN DHCP'
+        silent_run ufw allow in on "$lan_if" to any port 53 comment 'LAN DNS'
+        silent_run ufw route allow in on "$lan_if" out on "$out_if" comment "LAN to $out_if"
+        silent_run ufw route allow in on "$out_if" out on "$lan_if" comment "$out_if to LAN"
+        ensure_ufw_nat_rule "-A POSTROUTING -o $out_if -j MASQUERADE"
+        silent_run ufw reload
+    fi
+
+    echo -e "${C_GREEN}✅ Роутер запущен! Интерфейс $lan_if получил IP $lan_ip/24.${C_RESET}"
+    echo -e "  • DHCP-пул: ${C_CYAN}$dhcp_start - $dhcp_end${C_RESET}"
+    echo -e "  • Выходной канал: ${C_CYAN}$out_if${C_RESET} (Kill Switch: ${C_CYAN}$enable_ks${C_RESET})"
     pause_enter
 }
 

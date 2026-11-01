@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.10.8 (Hybrid Dual-Ingress WG Gateway Edition)
+# Версия: 3.10.9 (Hybrid Dual-Ingress WG Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6359,6 +6359,13 @@ for n in json.loads(subprocess.check_output(['ip','-j','-4','addr','show','dev',
 PY
  [[ $? == 0 ]] || return 1
  if [[ "$out_if" == "tailscale0" ]]; then
+  if ! ts_is_online; then
+   echo 'Tailscale сейчас offline. Нельзя направить LAN через tailscale0.'
+   echo 'Проверьте связь Tailscale и повторите мастер настройки.'
+   echo 'Команды: tailscale status; tailscale netcheck'
+   pause_enter
+   return 0
+  fi
   while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
    echo 'Tailscale exit node пока не выбран или не активен.'
    local ts_choice='' ts_node=''
@@ -6416,7 +6423,6 @@ clean() {
  done
  while ip6tables -w -D FORWARD -i "$LAN" -j DROP 2>/dev/null; do :; done
  ip rule del pref 11991 iif "$LAN" lookup 199 2>/dev/null || true
- ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
  ip route flush table 199 2>/dev/null || true
 }
 if [[ ${1:-} == stop ]]; then clean; exit; fi
@@ -6435,12 +6441,12 @@ if [[ "$OUT" != tailscale0 ]]; then
 else
  ip -4 route show table 52 | grep -q '^default dev tailscale0' || { echo 'Нет exit node'; exit 1; }
 fi
-iptables -w -N BR2_FWD 2>/dev/null || true
+iptables -w -N BR2_FWD
 iptables -w -A BR2_FWD -i "$LAN" -o "$OUT" -s "$NET" -j ACCEPT
 iptables -w -A BR2_FWD -i "$LAN" -j DROP
 iptables -w -A BR2_FWD -o "$LAN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 iptables -w -I FORWARD 1 -j BR2_FWD
-iptables -w -t nat -N BR2_NAT 2>/dev/null || true
+iptables -w -t nat -N BR2_NAT
 iptables -w -t nat -A BR2_NAT -s "$NET" -o "$OUT" -j MASQUERADE
 iptables -w -t nat -I POSTROUTING 1 -j BR2_NAT
 iptables -w -t mangle -N BR2_MSS
@@ -6533,6 +6539,14 @@ br_snapshot() {
  echo "Резервная копия: $d (содержит приватные настройки; не публикуйте)"
 }
 
+ts_is_online() {
+ command -v tailscale >/dev/null 2>&1 || return 1
+ local out
+ out="$(tailscale status --self 2>/dev/null || true)"
+ [[ -n "$out" ]] || return 1
+ ! grep -qi 'offline' <<<"$out"
+}
+
 manage_naive_mullvad_menu() {
  local pick='' node='' wan_if='' router_config='/etc/bobarev-router-v2/config'
  while true; do
@@ -6543,6 +6557,12 @@ manage_naive_mullvad_menu() {
     tailscale exit-node list || true
     pause_enter ;;
    2)
+    if ! ts_is_online; then
+     echo 'Tailscale сейчас offline. Сначала восстановите связь Tailscale.'
+     echo 'Проверьте: tailscale status; tailscale netcheck'
+     pause_enter
+     continue
+    fi
     MODULE_CANCELED=false
     prompt_default 'IP или имя узла (Enter — отмена без изменений)' '' node
     [[ "$MODULE_CANCELED" == false && -n "$node" ]] || continue
@@ -8451,7 +8471,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.10.8 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.10.9 (Hybrid Dual-Ingress WG Gateway Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

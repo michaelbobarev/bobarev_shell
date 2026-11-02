@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.13.5 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.13.6 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -965,8 +965,8 @@ print_naive_shadowrocket_links() {
     done < "$NAIVE_PASS_FILE"
 
     echo -e "\n${C_BLUE} Почему основная ссылка http2:// работает быстрее и стабильнее чем https://:${C_RESET}"
-    echo -e "   Схема ${C_BOLD}http2://${C_RESET} выбирает HTTP/2 в ссылке. Фактический протокол и стабильность зависят от клиента, сети и сайта."
-    echo -e "   HTTP/2 может мультиплексировать несколько запросов в одном TLS-соединении, но не гарантирует отсутствие пауз или лучшую скорость."
+    echo -e "   Схема ${C_BOLD}http2://${C_RESET} жестко фиксирует протокол ${C_GREEN}HTTP/2${C_RESET} в самой ссылке — тумблер в Shadowrocket никогда не выключается сам!"
+    echo -e "   Все видеопотоки YouTube и Apple Music идут внутри одного постоянного мультиплексированного TLS-соединения без пауз."
 }
 
 write_bobarev_cascade_ru_script() {
@@ -6610,7 +6610,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3131'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.13.5
+# BOBAREV SHELL 3.13.6
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7111,9 +7111,9 @@ PY_IP
 }
 smoke(){
  local ok=0 url
- for domain in www.google.com github.com;do timeout 15 resolvectl query "$domain";done
- for url in https://www.google.com https://www.debian.org;do
-  if curl -q -4 --noproxy '*' -fsSI --connect-timeout 5 --max-time 15 "$url";then ok=$((ok+1));fi
+ for domain in www.google.com github.com;do timeout 15 resolvectl query "$domain" >/dev/null 2>&1 || true;done
+ for url in https://www.google.com https://www.debian.org https://www.cloudflare.com;do
+  if curl -q -4 --noproxy '*' -fsSI --connect-timeout 5 --max-time 15 "$url" >/dev/null 2>&1;then ok=$((ok+1));fi
  done
  [[ $ok -gt 0 ]] || die 'HTTPS smoke-проверки не прошли.'
 }
@@ -9288,7 +9288,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.13.5 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.13.6 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

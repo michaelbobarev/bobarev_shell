@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.3 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.4 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6608,9 +6608,9 @@ install_bobarev_mullvad_runtime() {
   return 0
  fi
  install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3143'
+ cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3144'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.3
+# BOBAREV SHELL 3.14.4
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7129,12 +7129,34 @@ PY_IP
  return 1
 }
 smoke(){
- local ok=0 url
+ local ok=0 url attempt
  for domain in www.google.com github.com;do timeout 15 resolvectl query "$domain" >/dev/null 2>&1 || true;done
- for url in https://www.google.com https://www.debian.org https://www.cloudflare.com;do
-  if curl -q -4 --noproxy '*' -fsSI --connect-timeout 5 --max-time 15 "$url" >/dev/null 2>&1;then ok=$((ok+1));fi
+ for attempt in 1 2 3;do
+  ok=0
+  for url in https://www.google.com https://www.debian.org https://www.cloudflare.com https://api.ipify.org;do
+   if curl -q -4 --noproxy '*' -fsS -o /dev/null --connect-timeout 8 --max-time 20 "$url" >>"$TX/smoke-attempt-$attempt.log" 2>&1;then
+    ok=$((ok+1))
+   fi
+  done
+  [[ $ok -gt 0 ]] && return 0
+  [[ $attempt < 3 ]] && sleep 10
  done
- [[ $ok -gt 0 ]] || die 'HTTPS smoke-проверки не прошли.'
+ {
+  echo '=== curl -v к https://www.google.com ==='
+  curl -q -4 --noproxy '*' -v -o /dev/null --connect-timeout 8 --max-time 20 https://www.google.com 2>&1 || true
+  echo '=== ip -4 route show table 52 ==='
+  ip -4 route show table 52
+  echo '=== ip -4 rule ==='
+  ip -4 rule
+  echo '=== resolvectl status ==='
+  resolvectl status 2>&1 || true
+  echo '=== journalctl -u tailscaled ==='
+  journalctl -u tailscaled --since "10 minutes ago" --no-pager 2>&1 | tail -n 60 || true
+ } > "$TX/smoke-failure.log" 2>&1 || true
+ echo 'HTTPS smoke-проверки не прошли после 3 попыток. Диагностика:' >&2
+ tail -n 80 "$TX/smoke-failure.log" >&2
+ echo "Полный лог: $TX/smoke-failure.log" >&2
+ die 'Через exit node не прошёл ни один HTTPS-запрос; установка остановлена.'
 }
 check_exit(){
  local n attempt
@@ -7460,7 +7482,7 @@ case ${1:-help} in
  links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
  *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
 esac
-BOBAREV_ENGINE_3143
+BOBAREV_ENGINE_3144
  bash -n "$lib/mullvad.sh.new" || return 1
  chmod 700 "$lib/mullvad.sh.new" || return 1
  mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
@@ -9357,7 +9379,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.3 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.4 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

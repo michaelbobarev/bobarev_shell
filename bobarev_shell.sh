@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.5 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.6 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6608,10 +6608,9 @@ install_bobarev_mullvad_runtime() {
   return 0
  fi
  install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3145'
-
+ cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.5
+# BOBAREV SHELL 3.14.6
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7026,7 +7025,7 @@ dns_guard(){
  if ip link show tailscale0 >/dev/null 2>&1;then resolvectl revert tailscale0;fi
 }
 configure_dns(){
- apt-get install -y systemd-resolved
+ apt-get install -y systemd-resolved whiptail whiptail
  manager_dns
  mkdir -p /etc/systemd/resolved.conf.d
  for f in /etc/systemd/resolved.conf.d/*.conf;do
@@ -7192,7 +7191,7 @@ check_exit(){
   echo "Полный лог: $TX/exit-node-failure.log" >&2
   echo "Проверьте: tailscale status — узел $NODE должен быть Online и предлагать exit node." >&2
   die 'Exit node недоступен или не объявлен; установка остановлена до smoke-проверок.'
-fi
+ fi
  tailscale status --json > "$TX/after-status.json"
  python3 - "$TX/after-status.json" <<'PY_EXIT'
 import json,sys
@@ -7214,7 +7213,11 @@ commit(){
  log 'Откройте НОВУЮ SSH-сессию по публичному IPv4 и проверьте NaiveProxy/Shadowrocket.'
  log 'Проверьте выходной IP через клиентский прокси. Серверный curl этого не заменяет.'
  log 'Введите KEEP за 120 секунд только после успешной проверки. Иначе откат.'
- read -r -t 120 answer || die 'Нет подтверждения.'
+ if command -v whiptail >/dev/null;then
+  answer=$(whiptail --title 'BOBAREV SHELL' --inputbox 'Введите KEEP для подтверждения (120 секунд):' 10 60 '' 3>&1 1>&2 2>&3 --timeout 120) || die 'Нет подтверждения.'
+ else
+  read -r -t 120 answer || die 'Нет подтверждения.'
+ fi
  [[ $answer == KEEP ]] || die 'Изменения не подтверждены.'
  exec 8>"$BASE/state.lock";flock -w 10 8
  [[ -f "$PENDING" && $(cat "$PENDING") == "$TX" && ! -f "$TX/restored" ]] || die 'Транзакция уже откатилась.'
@@ -7397,25 +7400,41 @@ f=pathlib.Path(dest);f.write_text(text);f.chmod(0o600)
 PY_LINKS
  log "Ссылки с паролем: $BASE/client-links.txt (root-only)."
 }
+ui_input(){
+ if command -v whiptail >/dev/null;then
+  whiptail --title 'BOBAREV SHELL' --inputbox "$1" 10 60 "${2:-}" 3>&1 1>&2 2>&3
+ else
+  read -r -p "$1 [${2:-}]: " REPLY
+  printf '%s' "$REPLY"
+ fi
+}
+ui_yesno(){
+ if command -v whiptail >/dev/null;then
+  whiptail --title 'BOBAREV SHELL' --yesno "$1" 10 60
+ else
+  read -r -p "$1 [y/N]: " REPLY
+  [[ $REPLY == APPLY || $REPLY == y || $REPLY == Y ]]
+ fi
+}
 apply(){
  local kind=${1:-exit} answer
  preflight
  [[ -t 0 ]] || die 'Нужен интерактивный терминал.'
  log 'Публичный Mullvad DNS объявлен к отключению 02.11.2026; по умолчанию Quad9 DoT.'
- read -r -p 'DNS IPv4 или IPv4#TLS-hostname [9.9.9.9]: ' DNS
- DNS=${DNS:-9.9.9.9#dns.quad9.net};validate_dns "$DNS"
- read -r -p 'IP/имя exit node (Enter — показать список после установки): ' NODE
+ DNS=$(ui_input 'DNS IPv4 или IPv4#TLS-hostname:' '9.9.9.9') || die 'Отменено.'
+ [[ -z $DNS ]] && DNS='9.9.9.9'
+ validate_dns "$DNS"
+ NODE=$(ui_input 'IP/имя exit node (пусто — показать список после установки):' '') || die 'Отменено.'
  [[ -z $NODE || $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
  log 'Новые исходящие соединения VPS пойдут через exit node; это НЕ VPN kill switch.'
  log 'Откат восстанавливает прежние настройки, включая прежний exit node, если он был.'
- read -r -p 'Создать резервную копию и продолжить? Введите APPLY: ' answer
- [[ $answer == APPLY ]] || return 0
+ if ! ui_yesno 'Создать резервную копию и продолжить?';then return 0;fi
  transaction
  export BOBAREV_APPLY=1
  if command -v tailscale >/dev/null;then tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false;fi
  migrate_legacy
  install_dependencies
- if [[ -z $NODE ]];then tailscale exit-node list;read -r -p 'Выберите IP/имя exit node из списка: ' NODE;fi
+ if [[ -z $NODE ]];then tailscale exit-node list;NODE=$(ui_input 'Выберите IP/имя exit node из списка:' '') || die 'Отменено.';fi
  [[ $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
  DIRECT_IP=$(probe_ip) || die 'Не определён прямой WAN IPv4; исходный интернет не подтверждён.'
  log "Прямой WAN IPv4: $DIRECT_IP"
@@ -7484,7 +7503,7 @@ case ${1:-help} in
  links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
  *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
 esac
-BOBAREV_ENGINE_3145
+BOBAREV_ENGINE_3146
  bash -n "$lib/mullvad.sh.new" || return 1
  chmod 700 "$lib/mullvad.sh.new" || return 1
  mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
@@ -9381,7 +9400,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.5 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.6 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

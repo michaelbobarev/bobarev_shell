@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.13.4 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.13.5 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -678,7 +678,14 @@ RestartSec=5s
 WantedBy=multi-user.target
 SVC_EOF
 
-    "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile || return 1
+    "$CADDY_BIN" fmt --overwrite "$CADDYFILE" >/dev/null 2>&1 || true
+    if ! "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >"$CADDYFILE.validate.log" 2>&1;then
+        echo -e "${C_RED} Caddyfile не прошёл валидацию:${C_RESET}" >&2
+        tail -n 40 "$CADDYFILE.validate.log" >&2
+        rm -f "$CADDYFILE.validate.log"
+        return 1
+    fi
+    rm -f "$CADDYFILE.validate.log"
     systemctl daemon-reload || return 1
     systemctl enable caddy.service || return 1
     if systemctl is-active --quiet caddy.service; then
@@ -6603,7 +6610,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3131'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.13.4
+# BOBAREV SHELL 3.13.5
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7001,7 +7008,10 @@ UseDomains=no
 NETWORK_DNS
   networkctl reload
  else
-  if command -v resolvconf >/dev/null || command -v dhclient >/dev/null;then die 'resolvconf/dhclient без NM/networkd: требуется отдельный адаптер DNS; откат.';fi
+  if command -v resolvconf >/dev/null || command -v dhclient >/dev/null;then
+   log 'NM/networkd не найдены: переключаю системный DNS на systemd-resolved.'
+   ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  fi
  fi
 }
 dns_guard(){
@@ -9278,7 +9288,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.13.4 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.13.5 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

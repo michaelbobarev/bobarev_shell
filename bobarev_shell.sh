@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.13.6 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.13.7 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6610,7 +6610,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3131'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.13.6
+# BOBAREV SHELL 3.13.7
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7026,6 +7026,16 @@ configure_dns(){
  apt-get install -y systemd-resolved
  manager_dns
  mkdir -p /etc/systemd/resolved.conf.d
+ # Временно отключаем сторонние drop-in файлы: они могут добавлять свои DNS
+ # и конфликтовать с явно выбранным в мастере. Откат вернёт их из снапшота.
+ for f in /etc/systemd/resolved.conf.d/*.conf;do
+  [[ -e "$f" ]] || continue
+  [[ "$f" == *90-bobarev-shell-mullvad.conf ]] && continue
+  cp -a "$f" "$TX/" || true
+  rm -f "$f"
+ done
+ local dot_mode=no
+ [[ "$DNS" == *#* ]] && dot_mode=yes
  cat > /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf <<EOF_DNS
 [Resolve]
 DNS=
@@ -7033,7 +7043,7 @@ DNS=$DNS
 FallbackDNS=
 Domains=
 Domains=~.
-DNSOverTLS=yes
+DNSOverTLS=$dot_mode
 DNSStubListener=yes
 Cache=yes
 EOF_DNS
@@ -7058,7 +7068,7 @@ for line in open(sys.argv[1]):
  else:scalar[key]=value
 assert values['DNS']==[sys.argv[2]],'Сторонний DNS drop-in перекрывает выбор'
 assert not values['FallbackDNS'] and values['Domains']==['~.'],'Конфликт DNS routing/fallback'
-assert scalar.get('DNSOverTLS')=='yes' and scalar.get('DNSStubListener')=='yes','Конфликт режима resolver'
+assert scalar.get('DNSStubListener')=='yes','Конфликт режима resolver'
 PY_EFFECTIVE
  cat > /etc/systemd/system/bobarev-shell-dns.service <<'UNIT_DNS'
 [Unit]
@@ -9288,7 +9298,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.13.6 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.13.7 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

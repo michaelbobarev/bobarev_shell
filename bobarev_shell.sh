@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.4 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.5 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6608,9 +6608,10 @@ install_bobarev_mullvad_runtime() {
   return 0
  fi
  install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3144'
+ cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3145'
+
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.4
+# BOBAREV SHELL 3.14.5
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7159,16 +7160,17 @@ smoke(){
  die 'Через exit node не прошёл ни один HTTPS-запрос; установка остановлена.'
 }
 check_exit(){
- local n attempt
- for attempt in 1 2 3;do
-  for n in {1..12};do
-   if ip -4 route show table 52 | grep -q '^default dev tailscale0';then break 2;fi
-   sleep 5
-  done
-  if [[ $attempt < 3 ]];then
-   echo "Маршрут exit node ещё не появился (попытка $attempt/3). Повторяю применение exit node." >&2
+ local n
+ for n in {1..60};do
+  if ip -4 route show table 52 | grep -q '^default dev tailscale0';then
+   log "Маршрут exit node появился на попытке $n/60."
+   break
+  fi
+  if (( n % 12 == 0 ));then
+   echo "Маршрут exit node ещё не появился (${n}/60). Повторяю применение exit node." >&2
    tailscale set --advertise-exit-node=false --accept-dns=false --exit-node="$NODE" --exit-node-allow-lan-access=true || true
   fi
+  sleep 5
  done
  if ! ip -4 route show table 52 | grep -q '^default dev tailscale0';then
   {
@@ -7185,12 +7187,12 @@ check_exit(){
    echo '=== journalctl -u tailscaled ==='
    journalctl -u tailscaled --since "15 minutes ago" --no-pager 2>&1 | tail -n 80 || true
   } > "$TX/exit-node-failure.log" 2>&1 || true
-  echo 'Exit node не подтвердился за 3 попытки (до 3 минут). Диагностика сохранена и показана ниже.' >&2
+  echo 'Exit node не подтвердился за 5 минут. Диагностика сохранена и показана ниже.' >&2
   tail -n 100 "$TX/exit-node-failure.log" >&2
   echo "Полный лог: $TX/exit-node-failure.log" >&2
   echo "Проверьте: tailscale status — узел $NODE должен быть Online и предлагать exit node." >&2
   die 'Exit node недоступен или не объявлен; установка остановлена до smoke-проверок.'
- fi
+fi
  tailscale status --json > "$TX/after-status.json"
  python3 - "$TX/after-status.json" <<'PY_EXIT'
 import json,sys
@@ -7482,7 +7484,7 @@ case ${1:-help} in
  links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
  *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
 esac
-BOBAREV_ENGINE_3144
+BOBAREV_ENGINE_3145
  bash -n "$lib/mullvad.sh.new" || return 1
  chmod 700 "$lib/mullvad.sh.new" || return 1
  mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
@@ -9379,7 +9381,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.4 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.5 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.13.7 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.13.8 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6608,9 +6608,9 @@ install_bobarev_mullvad_runtime() {
   return 0
  fi
  install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3131'
+ cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3138'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.13.7
+# BOBAREV SHELL 3.13.8
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -6672,10 +6672,12 @@ PY_NET
 validate_dns(){
  python3 - "$1" <<'PY_DNS'
 import sys,ipaddress,re
-try:ip,name=sys.argv[1].split('#')
-except ValueError:sys.exit('Формат DNS: IPv4#TLS-hostname')
+v=sys.argv[1]
+try:ip,name=v.split('#')
+except ValueError:
+ ip,name=v,None
 if ipaddress.ip_address(ip).version!=4:sys.exit('Нужен IPv4 DNS')
-if not re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',name):sys.exit('Неверное TLS-имя')
+if name is not None and not re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',name):sys.exit('Неверное TLS-имя')
 PY_DNS
 }
 transaction(){
@@ -7026,8 +7028,6 @@ configure_dns(){
  apt-get install -y systemd-resolved
  manager_dns
  mkdir -p /etc/systemd/resolved.conf.d
- # Временно отключаем сторонние drop-in файлы: они могут добавлять свои DNS
- # и конфликтовать с явно выбранным в мастере. Откат вернёт их из снапшота.
  for f in /etc/systemd/resolved.conf.d/*.conf;do
   [[ -e "$f" ]] || continue
   [[ "$f" == *90-bobarev-shell-mullvad.conf ]] && continue
@@ -7331,7 +7331,7 @@ apply(){
  preflight
  [[ -t 0 ]] || die 'Нужен интерактивный терминал.'
  log 'Публичный Mullvad DNS объявлен к отключению 02.11.2026; по умолчанию Quad9 DoT.'
- read -r -p 'DoT IPv4#TLS-hostname [9.9.9.9#dns.quad9.net]: ' DNS
+ read -r -p 'DNS IPv4 или IPv4#TLS-hostname [9.9.9.9]: ' DNS
  DNS=${DNS:-9.9.9.9#dns.quad9.net};validate_dns "$DNS"
  read -r -p 'IP/имя exit node (Enter — показать список после установки): ' NODE
  [[ -z $NODE || $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
@@ -7401,7 +7401,7 @@ case ${1:-help} in
  links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
  *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
 esac
-BOBAREV_ENGINE_3131
+BOBAREV_ENGINE_3138
  bash -n "$lib/mullvad.sh.new" || return 1
  chmod 700 "$lib/mullvad.sh.new" || return 1
  mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
@@ -9298,7 +9298,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.13.7 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.13.8 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

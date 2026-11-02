@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.13.2 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.13.4 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6603,7 +6603,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3131'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.13.2
+# BOBAREV SHELL 3.13.4
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7161,10 +7161,18 @@ build_caddy(){
  fi
  export GOPATH=/root/go GOCACHE=/root/.cache/go-build GOTMPDIR=$temp TMPDIR=$temp
  if [[ ! -x /usr/local/bin/caddy ]] || ! /usr/local/bin/caddy list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null;then
-  go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}"
-  "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" --output "$temp/caddy"
+  log 'Сборка Caddy с NaiveProxy: это может занять несколько минут.'
+  if ! go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" >"$TX/caddy-build.log" 2>&1;then
+   tail -n 40 "$TX/caddy-build.log" >&2
+   die 'Не удалось установить xcaddy. Полный лог: '"$TX/caddy-build.log"
+  fi
+  if ! "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" --output "$temp/caddy" >>"$TX/caddy-build.log" 2>&1;then
+   tail -n 60 "$TX/caddy-build.log" >&2
+   die 'Не удалось собрать Caddy. Полный лог: '"$TX/caddy-build.log"
+  fi
   "$temp/caddy" list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null
   install -m 755 "$temp/caddy" /usr/local/bin/caddy
+  log 'Caddy собран успешно.'
  fi
  unset GOTMPDIR TMPDIR
  rm -rf "$temp"
@@ -7195,6 +7203,8 @@ PY_INPUT
  getent ahostsv4 "$domain" > "$TX/domain-addresses.txt"
  build_caddy
  mkdir -p /etc/caddy /etc/naiveproxy /var/www/html
+ printf '%s\n' '<!doctype html><meta charset="utf-8"><title>OK</title><p>Service is running.</p>' > /var/www/html/index.html
+ chmod 644 /var/www/html/index.html
  hash=$(printf '%s\n' "$pass" | htpasswd -niBC 12 "$user" | cut -d: -f2)
  [[ $hash == '$2'* ]] || die 'bcrypt не создан.'
  touch /etc/naiveproxy/users.conf /etc/naiveproxy/users.pass
@@ -7246,7 +7256,7 @@ PY_CADDY
  /usr/local/bin/caddy fmt --overwrite /etc/caddy/Caddyfile >/dev/null 2>&1 || true
  if ! /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$TX/caddy-validate.log" 2>&1; then
   echo 'Caddyfile не прошёл валидацию.' >&2
-  cat "$TX/caddy-validate.log" >&2
+  tail -n 40 "$TX/caddy-validate.log" >&2
   die 'Проверьте /etc/caddy/Caddyfile и повторите настройку.'
  fi
  cat > /etc/systemd/system/caddy.service <<'UNIT_CADDY'
@@ -7270,21 +7280,21 @@ WantedBy=multi-user.target
 UNIT_CADDY
  printf 'CASCADE_ROLE=%q\nNAIVE_DOMAIN=%q\nNAIVE_EMAIL=%q\nNAIVE_OUT_MODE=%q\n' standalone_naive "$domain" "$email" mullvad_ts > /etc/default/bobarev-cascade
  systemctl daemon-reload;systemctl enable caddy.service;systemctl restart caddy.service
- local n verified=0
+ local http_code=""
  for n in {1..30};do
-  if curl -q --noproxy '*' --resolve "$domain:443:127.0.0.1" -fsSI --connect-timeout 3 --max-time 5 "https://$domain" > "$TX/local-caddy-check.txt" 2>&1;then verified=1;break;fi
+  http_code=$(curl -q --noproxy '*' --resolve "$domain:443:127.0.0.1" -o /dev/null -sS -w '%{http_code}' --connect-timeout 3 --max-time 5 "https://$domain" 2>>"$TX/local-caddy-check.txt" || true)
+  if [[ $http_code =~ ^[1-5][0-9][0-9]$ ]];then verified=1;break;fi
   sleep 3
  done
  if [[ $verified != 1 ]];then
   journalctl -u caddy --since "10 minutes ago" --no-pager > "$TX/caddy-failure.log" 2>&1 || true
-  echo 'Локальная TLS-проверка Caddy не прошла.' >&2
-  echo "Лог: $TX/caddy-failure.log" >&2
+  echo 'Локальная TLS-проверка Caddy не прошла. Последние строки журнала:' >&2
+  tail -n 60 "$TX/caddy-failure.log" >&2
+  echo "Полный лог: $TX/caddy-failure.log" >&2
   if grep -qiE 'obtain|certificate|acme|challenge' "$TX/caddy-failure.log";then
    echo 'Наиболее вероятно: ACME не смог получить сертификат. Проверьте A-запись и доступность 80/tcp/443/tcp извне.' >&2
   elif grep -qiE 'address already in use|bind' "$TX/caddy-failure.log";then
    echo 'Порт 80/443 занят другим процессом.' >&2
-  else
-   echo 'Проверьте конфигурацию Caddy, DNS и firewall хостинга.' >&2
   fi
   die 'Установка остановлена до включения exit node.'
  fi
@@ -9268,7 +9278,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.13.2 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.13.4 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -9348,13 +9358,13 @@ while true; do
     "20" " Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
     "21" " Каскад 3: NaiveProxy + Xray REALITY + WARP" \
     "22" " Автономный NaiveProxy (+ WG Dual-Gateway)" \
-    "23" " NaiveProxy-XRayMesh" \
-    "24" " NaiveProxy-Tailscale Mullvad Exit" \
-    "25" " Аудит системы 1" \
-    "26" " Аудит системы 2 и каскадные пары" \
-    "27" " Сброс сетевых надстроек (выборочно)" \
-    "A" "  Выполнить первичную настройку целиком (Шаги 1-12)" \
-    "0" "  Завершить работу" || [ "$choice" = "0" ]; then
+    "23" "NaiveProxy-XRayMesh" \
+    "24" "NaiveProxy-Tailscale Mullvad Exit" \
+    "25" "Аудит системы 1" \
+    "26" "Аудит системы 2 и каскадные пары" \
+    "27" "Сброс сетевых надстроек (выборочно)" \
+    "A" " Выполнить первичную настройку целиком (Шаги 1-12)" \
+    "0" " Завершить работу" || [ "$choice" = "0" ]; then
         clear
         echo "Работа скрипта завершена."
         exit 0

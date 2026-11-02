@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.13.1 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.13.2 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6603,7 +6603,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3131'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.13.1
+# BOBAREV SHELL 3.13.2
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7287,7 +7287,7 @@ UNIT_CADDY
    echo 'Проверьте конфигурацию Caddy, DNS и firewall хостинга.' >&2
   fi
   die 'Установка остановлена до включения exit node.'
- fi'
+ fi
  python3 - "$domain" "$user" "$pass" "$BASE/client-links.txt" <<'PY_LINKS'
 import base64,pathlib,sys,urllib.parse
 host,u,p,dest=sys.argv[1:];b=base64.b64encode(f'{u}:{p}@{host}:443'.encode()).decode()
@@ -7335,7 +7335,7 @@ diag(){
  ip -4 rule show;ip -4 route show table main;ip -4 route show table 52 || true
  command -v tailscale >/dev/null && tailscale debug prefs | grep -E 'ExitNode|CorpDNS|RouteAll' || true
  command -v resolvectl >/dev/null && resolvectl status || true
- for s in bobarev-BOBAREV SHELL-return bobarev-BOBAREV SHELL-dns bobarev-shell-rollback.timer caddy;do systemctl status "$s" --no-pager -l || true;done
+ for s in bobarev-shell-return bobarev-shell-dns bobarev-shell-rollback.timer caddy;do systemctl status "$s" --no-pager -l || true;done
  if [[ -f "$CFG" ]];then source "$CFG";log "WAN=$WAN NODE=$NODE DNS=$DNS";fi
  if command -v resolvectl >/dev/null;then timeout 15 resolvectl query www.google.com || true;fi
  if value=$(probe_ip);then log "Текущий IPv4: $value";else log 'Проверка внешнего IP не прошла.';fi
@@ -9268,7 +9268,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.13.1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.13.2 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -9348,13 +9348,13 @@ while true; do
     "20" " Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
     "21" " Каскад 3: NaiveProxy + Xray REALITY + WARP" \
     "22" " Автономный NaiveProxy (+ WG Dual-Gateway)" \
-    "23" "NaiveProxy-XRayMesh" \
-    "24" "NaiveProxy-Tailscale Mullvad Exit" \
-    "25" "Аудит системы 1" \
-    "26" "Аудит системы 2 и каскадные пары" \
-    "27" "Сброс сетевых надстроек (выборочно)" \
-    "A" " Выполнить первичную настройку целиком (Шаги 1-12)" \
-    "0" " Завершить работу" || [ "$choice" = "0" ]; then
+    "23" " NaiveProxy-XRayMesh" \
+    "24" " NaiveProxy-Tailscale Mullvad Exit" \
+    "25" " Аудит системы 1" \
+    "26" " Аудит системы 2 и каскадные пары" \
+    "27" " Сброс сетевых надстроек (выборочно)" \
+    "A" "  Выполнить первичную настройку целиком (Шаги 1-12)" \
+    "0" "  Завершить работу" || [ "$choice" = "0" ]; then
         clear
         echo "Работа скрипта завершена."
         exit 0

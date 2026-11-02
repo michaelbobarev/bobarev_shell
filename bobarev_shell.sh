@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.11.6 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.12.1 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6581,30 +6581,30 @@ ts_exit_node_works() {
  /usr/bin/curl -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1
 }
 
-# Google Gemini Edition: isolated fail-fast network controller.
-gemini_install_mullvad_runtime() {
- local lib=/usr/local/lib/bobarev-gemini
+# Изолированный fail-fast контроллер Mullvad Safe Edition.
+install_mullvad_safe_runtime() {
+ local lib=/usr/local/lib/bobarev-mullvad-safe
  [[ $EUID == 0 ]] || { echo 'Нужен root.';return 1; }
- if [[ -f /var/lib/bobarev-gemini-mullvad/pending && -x "$lib/mullvad.sh" ]];then
+ if [[ -f /var/lib/bobarev-mullvad-safe/pending && -x "$lib/mullvad.sh" ]];then
   echo 'Незавершённая транзакция: используйте пункт восстановления. Контроллер сохранён.'
   return 0
  fi
  install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'GEMINI_ENGINE_3116'
+ cat > "$lib/mullvad.sh.new" <<'MULLVAD_SAFE_ENGINE'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.11.6 — Google Gemini Edition / Mullvad VPS Safety Revision
+# BOBAREV SHELL 3.12.1 — Mullvad Safe Edition / Mullvad VPS Safety Revision
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-BASE=/var/lib/bobarev-gemini-mullvad
-LIB=/usr/local/lib/bobarev-gemini
+BASE=/var/lib/bobarev-mullvad-safe
+LIB=/usr/local/lib/bobarev-mullvad-safe
 SELF=$LIB/mullvad.sh
 CFG=$BASE/config
 PENDING=$BASE/pending
 PREF=1050
 MARK=0x80000000/0x80000000
 TX=''
-log(){ printf '[Gemini Edition] %s\n' "$*"; }
+log(){ printf '[Mullvad Safe Edition] %s\n' "$*"; }
 die(){ log "ОШИБКА: $*" >&2; exit 1; }
 root(){ [[ $EUID == 0 && -d /run/systemd/system ]] || die 'Нужны root и systemd.'; }
 snap_file(){
@@ -6664,8 +6664,8 @@ transaction(){
  mkdir -p "$BASE/transactions"
  TX=$(mktemp -d "$BASE/transactions/tx-$(date +%Y%m%d-%H%M%S)-XXXXXX")
  chmod 700 "$TX"
- for p in /etc/ufw /etc/default/ufw /etc/resolv.conf /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d /etc/caddy /etc/naiveproxy /etc/default/bobarev-cascade /usr/local/bin/caddy /etc/systemd/system/caddy.service /etc/systemd/system/naive-return-route.service /usr/local/sbin/bobarev-mullvad-return-route.sh /etc/systemd/system/bobarev-gemini-return.service /etc/systemd/system/bobarev-gemini-dns.service "$CFG" "$BASE/client-links.txt"; do snap_file "$p"; done
- for u in ufw.service caddy.service systemd-resolved.service naive-return-route.service bobarev-gemini-return.service bobarev-gemini-dns.service; do unit_state "$u"; done
+ for p in /etc/ufw /etc/default/ufw /etc/resolv.conf /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d /etc/caddy /etc/naiveproxy /etc/default/bobarev-cascade /usr/local/bin/caddy /etc/systemd/system/caddy.service /etc/systemd/system/naive-return-route.service /usr/local/sbin/bobarev-mullvad-return-route.sh /etc/systemd/system/bobarev-mullvad-safe-return.service /etc/systemd/system/bobarev-mullvad-safe-dns.service "$CFG" "$BASE/client-links.txt"; do snap_file "$p"; done
+ for u in ufw.service caddy.service systemd-resolved.service naive-return-route.service bobarev-mullvad-safe-return.service bobarev-mullvad-safe-dns.service; do unit_state "$u"; done
  if command -v resolvectl >/dev/null;then
   python3 - "$TX" "$WAN" <<'PY_LINK_SNAPSHOT'
 import subprocess,json,sys,pathlib
@@ -6690,40 +6690,40 @@ pathlib.Path(sys.argv[2],'writer-id.json').write_text(json.dumps({'pid':pid,'sta
 PY_WRITER_ID
  printf '%s\n' "$TX" > "$PENDING"
  printf '%s\n' "$TX" > "$BASE/latest"
- cat > /etc/systemd/system/bobarev-gemini-rollback.service <<'UNIT_ROLL'
+ cat > /etc/systemd/system/bobarev-mullvad-safe-rollback.service <<'UNIT_ROLL'
 [Unit]
-Description=Bobarev Google Gemini Edition transaction recovery
+Description=Bobarev Mullvad Safe Edition transaction recovery
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh recover pending
+ExecStart=/usr/local/lib/bobarev-mullvad-safe/mullvad.sh recover pending
 UNIT_ROLL
- cat > /etc/systemd/system/bobarev-gemini-rollback.timer <<'UNIT_TIMER'
+ cat > /etc/systemd/system/bobarev-mullvad-safe-rollback.timer <<'UNIT_TIMER'
 [Unit]
 Description=Bobarev transaction watchdog
 [Timer]
 OnActiveSec=45min
 AccuracySec=1s
-Unit=bobarev-gemini-rollback.service
+Unit=bobarev-mullvad-safe-rollback.service
 [Install]
 WantedBy=timers.target
 UNIT_TIMER
- cat > /etc/systemd/system/bobarev-gemini-boot-recover.service <<'UNIT_BOOT'
+ cat > /etc/systemd/system/bobarev-mullvad-safe-boot-recover.service <<'UNIT_BOOT'
 [Unit]
 Description=Recover interrupted Bobarev transaction after reboot
 After=network-online.target tailscaled.service
 Wants=network-online.target
-ConditionPathExists=/var/lib/bobarev-gemini-mullvad/pending
+ConditionPathExists=/var/lib/bobarev-mullvad-safe/pending
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh recover pending
+ExecStart=/usr/local/lib/bobarev-mullvad-safe/mullvad.sh recover pending
 [Install]
 WantedBy=multi-user.target
 UNIT_BOOT
  systemctl daemon-reload
- systemctl enable bobarev-gemini-boot-recover.service
- rm -f /run/systemd/system/bobarev-gemini-rollback.timer.d/window.conf
+ systemctl enable bobarev-mullvad-safe-boot-recover.service
+ rm -f /run/systemd/system/bobarev-mullvad-safe-rollback.timer.d/window.conf
  systemctl daemon-reload
- systemctl restart bobarev-gemini-rollback.timer
+ systemctl restart bobarev-mullvad-safe-rollback.timer
  trap 'on_error "$?" "$LINENO"' ERR
  trap 'on_error 130 "$LINENO"' INT TERM HUP
  log "Резервная копия: $TX (приватные настройки, не публикуйте)."
@@ -6798,7 +6798,7 @@ PY_STOP_WRITER
  if [[ "$mode" == pending && ! -f "$PENDING" ]];then return 0;fi
  local failed=0
  if command -v tailscale >/dev/null; then tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false || failed=1;fi
- systemctl stop bobarev-gemini-return.service bobarev-gemini-dns.service 2>/dev/null || true
+ systemctl stop bobarev-mullvad-safe-return.service bobarev-mullvad-safe-dns.service 2>/dev/null || true
  route_stop || failed=1
  if [[ -f "$TX/services.tsv" ]];then
   while IFS=$'\t' read -r u active enabled;do
@@ -6861,10 +6861,10 @@ PY_TS_RESTORE
  fi
  if [[ $failed == 0 ]];then
   touch "$TX/restored";rm -f "$PENDING"
-  if grep -q $'bobarev-gemini-return.service\tactive' "$TX/services.tsv";then systemctl restart bobarev-gemini-return.service || return 1;fi
-  systemctl stop bobarev-gemini-rollback.timer || true
+  if grep -q $'bobarev-mullvad-safe-return.service\tactive' "$TX/services.tsv";then systemctl restart bobarev-mullvad-safe-return.service || return 1;fi
+  systemctl stop bobarev-mullvad-safe-rollback.timer || true
   log "Восстановлены файлы и настройки $TX. Пакеты и кэши остаются."
- else log "Неполное восстановление: смотрите journalctl -u bobarev-gemini-rollback и $TX.";return 1;fi
+ else log "Неполное восстановление: смотрите journalctl -u bobarev-mullvad-safe-rollback и $TX.";return 1;fi
 }
 route_stop(){
  local rc=0
@@ -6882,7 +6882,7 @@ route_stop(){
 }
 route_start(){
  root
- [[ ! -f "$PENDING" || ${GEMINI_APPLY:-0} == 1 ]] || { log 'Startup отложен до восстановления pending.';return 0; }
+ [[ ! -f "$PENDING" || ${MULLVAD_SAFE_APPLY:-0} == 1 ]] || { log 'Startup отложен до восстановления pending.';return 0; }
  [[ -f "$CFG" ]] || die 'Нет config.'
  source "$CFG"
  ip link show "$WAN" >/dev/null
@@ -6907,7 +6907,7 @@ route_start(){
 }
 migrate_legacy(){
  [[ -f /usr/local/sbin/bobarev-mullvad-return-route.sh ]] || return 0
- log 'Миграция старой Gemini Return-Path-службы; только распознанные правила.'
+ log 'Миграция старой Mullvad Safe Return-Path-службы; только распознанные правила.'
  python3 - "$TX" <<'PY_LEGACY'
 import re,pathlib,subprocess,json,ipaddress,sys
 text=pathlib.Path('/usr/local/sbin/bobarev-mullvad-return-route.sh').read_text()
@@ -6921,9 +6921,9 @@ pathlib.Path(sys.argv[1],'legacy-rules.json').write_text(json.dumps(removed))
 PY_LEGACY
  if systemctl is-active --quiet naive-return-route.service;then
   install -d /run/systemd/system/naive-return-route.service.d
-  printf '[Service]\nExecStop=\n' > /run/systemd/system/naive-return-route.service.d/gemini-migration.conf
+  printf '[Service]\nExecStop=\n' > /run/systemd/system/naive-return-route.service.d/mullvad-safe-migration.conf
   systemctl daemon-reload;systemctl disable --now naive-return-route.service
-  rm -f /run/systemd/system/naive-return-route.service.d/gemini-migration.conf
+  rm -f /run/systemd/system/naive-return-route.service.d/mullvad-safe-migration.conf
   systemctl daemon-reload
  fi
  systemctl disable naive-return-route.service 2>/dev/null || true
@@ -6972,7 +6972,7 @@ manager_dns(){
   file=$(LC_ALL=C networkctl status "$WAN" --no-pager | sed -n 's/^[[:space:]]*Network File: //p' | head -n 1)
   [[ -n $file && $file == *.network ]] || die 'Не определён .network WAN.'
   name=$(basename "$file")
-  local drop="/etc/systemd/network/$name.d/90-bobarev-gemini-dns.conf"
+  local drop="/etc/systemd/network/$name.d/90-bobarev-mullvad-safe-dns.conf"
   snap_file "$drop";mkdir -p "$(dirname "$drop")"
   cat > "$drop" <<'NETWORK_DNS'
 [Network]
@@ -7005,7 +7005,7 @@ configure_dns(){
  apt-get install -y systemd-resolved
  manager_dns
  mkdir -p /etc/systemd/resolved.conf.d
- cat > /etc/systemd/resolved.conf.d/90-bobarev-gemini-mullvad.conf <<EOF_DNS
+ cat > /etc/systemd/resolved.conf.d/90-bobarev-mullvad-safe.conf <<EOF_DNS
 [Resolve]
 DNS=
 DNS=$DNS
@@ -7039,36 +7039,36 @@ assert values['DNS']==[sys.argv[2]],'Сторонний DNS drop-in перекр
 assert not values['FallbackDNS'] and values['Domains']==['~.'],'Конфликт DNS routing/fallback'
 assert scalar.get('DNSOverTLS')=='yes' and scalar.get('DNSStubListener')=='yes','Конфликт режима resolver'
 PY_EFFECTIVE
- cat > /etc/systemd/system/bobarev-gemini-dns.service <<'UNIT_DNS'
+ cat > /etc/systemd/system/bobarev-mullvad-safe-dns.service <<'UNIT_DNS'
 [Unit]
 Description=Bobarev DNS runtime reconciliation
 Wants=network-online.target systemd-resolved.service
 After=network-online.target systemd-resolved.service tailscaled.service NetworkManager.service systemd-networkd.service
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh dns-guard
+ExecStart=/usr/local/lib/bobarev-mullvad-safe/mullvad.sh dns-guard
 [Install]
 WantedBy=multi-user.target
 UNIT_DNS
- systemctl daemon-reload;systemctl enable bobarev-gemini-dns.service
+ systemctl daemon-reload;systemctl enable bobarev-mullvad-safe-dns.service
 }
 configure_route(){
  printf 'WAN=%q\nDNS=%q\nNODE=%q\n' "$WAN" "$DNS" "$NODE" > "$CFG"
- cat > /etc/systemd/system/bobarev-gemini-return.service <<'UNIT_RETURN'
+ cat > /etc/systemd/system/bobarev-mullvad-safe-return.service <<'UNIT_RETURN'
 [Unit]
-Description=Bobarev Google Gemini Edition IPv4 ingress reply routing
+Description=Bobarev Mullvad Safe Edition IPv4 ingress reply routing
 Wants=network-online.target
 After=network-online.target ufw.service
 Before=tailscaled.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh route-start
-ExecStop=/usr/local/lib/bobarev-gemini/mullvad.sh route-stop
+ExecStart=/usr/local/lib/bobarev-mullvad-safe/mullvad.sh route-start
+ExecStop=/usr/local/lib/bobarev-mullvad-safe/mullvad.sh route-stop
 [Install]
 WantedBy=multi-user.target
 UNIT_RETURN
- systemctl daemon-reload;systemctl enable bobarev-gemini-return.service
+ systemctl daemon-reload;systemctl enable bobarev-mullvad-safe-return.service
  route_start
 }
 test_dot(){
@@ -7090,8 +7090,8 @@ PY_IP
 }
 smoke(){
  local ok=0 url
- for domain in www.google.com github.com;do timeout 15 resolvectl query "$domain";done
- for url in https://www.google.com https://www.debian.org;do
+ for domain in www.cloudflare.com github.com;do timeout 15 resolvectl query "$domain";done
+ for url in https://www.cloudflare.com https://www.debian.org;do
   if curl -q -4 --noproxy '*' -fsSI --connect-timeout 5 --max-time 15 "$url";then ok=$((ok+1));fi
  done
  [[ $ok -gt 0 ]] || die 'HTTPS smoke-проверки не прошли.'
@@ -7112,9 +7112,9 @@ PY_EXIT
  log "WAN: $DIRECT_IP; сейчас: $OUT_IP. Проверьте соответствие выбранному узлу/стране."
 }
 renew_watchdog(){
- mkdir -p /run/systemd/system/bobarev-gemini-rollback.timer.d
- printf '[Timer]\nOnActiveSec=\nOnActiveSec=5min\n' > /run/systemd/system/bobarev-gemini-rollback.timer.d/window.conf
- systemctl daemon-reload;systemctl restart bobarev-gemini-rollback.timer
+ mkdir -p /run/systemd/system/bobarev-mullvad-safe-rollback.timer.d
+ printf '[Timer]\nOnActiveSec=\nOnActiveSec=5min\n' > /run/systemd/system/bobarev-mullvad-safe-rollback.timer.d/window.conf
+ systemctl daemon-reload;systemctl restart bobarev-mullvad-safe-rollback.timer
 }
 commit(){
  local answer=''
@@ -7125,14 +7125,14 @@ commit(){
  [[ $answer == KEEP ]] || die 'Изменения не подтверждены.'
  exec 8>"$BASE/state.lock";flock -w 10 8
  [[ -f "$PENDING" && $(cat "$PENDING") == "$TX" && ! -f "$TX/restored" ]] || die 'Транзакция уже откатилась.'
- GEMINI_APPLY=1 route_start
+ MULLVAD_SAFE_APPLY=1 route_start
  dns_guard
- systemctl stop bobarev-gemini-rollback.timer
+ systemctl stop bobarev-mullvad-safe-rollback.timer
  rm -f "$PENDING";touch "$TX/committed"
  trap - ERR INT TERM HUP EXIT
  flock -u 8
- systemctl restart bobarev-gemini-return.service
- systemctl restart bobarev-gemini-dns.service
+ systemctl restart bobarev-mullvad-safe-return.service
+ systemctl restart bobarev-mullvad-safe-dns.service
  log 'Применено. Теперь нужен reboot-тест. Резервная копия сохранена.'
 }
 build_caddy(){
@@ -7177,8 +7177,8 @@ PY_INPUT
  done
  if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active';then
   touch "$TX/ufw-changed"
-  ufw allow 80/tcp comment 'Google Gemini Edition ACME'
-  ufw allow 443/tcp comment 'Google Gemini Edition NaiveProxy'
+  ufw allow 80/tcp comment 'Mullvad Safe Edition ACME'
+  ufw allow 443/tcp comment 'Mullvad Safe Edition NaiveProxy'
  fi
  log '80/tcp и 443/tcp также должны быть разрешены в панели хостинга. Firewall не сбрасывается.'
  getent ahostsv4 "$domain" > "$TX/domain-addresses.txt"
@@ -7235,7 +7235,7 @@ PY_CADDY
  /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
  cat > /etc/systemd/system/caddy.service <<'UNIT_CADDY'
 [Unit]
-Description=NaiveProxy Caddy — Google Gemini Edition
+Description=NaiveProxy Caddy — Mullvad Safe Edition
 After=network-online.target
 Wants=network-online.target
 [Service]
@@ -7255,11 +7255,24 @@ UNIT_CADDY
  printf 'CASCADE_ROLE=%q\nNAIVE_DOMAIN=%q\nNAIVE_EMAIL=%q\nNAIVE_OUT_MODE=%q\n' standalone_naive "$domain" "$email" mullvad_ts > /etc/default/bobarev-cascade
  systemctl daemon-reload;systemctl enable caddy.service;systemctl restart caddy.service
  local n verified=0
+ : > "$TX/local-caddy-check.txt"
  for n in {1..30};do
   if curl -q --noproxy '*' --resolve "$domain:443:127.0.0.1" -fsSI --connect-timeout 3 --max-time 5 "https://$domain" > "$TX/local-caddy-check.txt" 2>&1;then verified=1;break;fi
   sleep 3
  done
- [[ $verified == 1 ]] || die 'Caddy/сертификат не прошёл локальную TLS-проверку; journalctl -u caddy.'
+ if [[ $verified != 1 ]];then
+  journalctl -u caddy --since "10 minutes ago" --no-pager > "$TX/caddy-failure.log" 2>&1 || true
+  echo -e "${C_RED}Локальная TLS-проверка Caddy не прошла.${C_RESET}" >&2
+  echo -e "${C_YELLOW}Лог: $TX/caddy-failure.log${C_RESET}" >&2
+  if grep -qiE 'obtain|certificate|acme|challenge' "$TX/caddy-failure.log";then
+   echo 'Наиболее вероятно: ACME не смог получить сертификат. Проверьте A-запись и доступность 80/tcp/443/tcp извне.' >&2
+  elif grep -qiE 'address already in use|bind' "$TX/caddy-failure.log";then
+   echo 'Порт 80/443 занят другим процессом.' >&2
+  else
+   echo 'Проверьте конфигурацию Caddy, DNS и firewall хостинга.' >&2
+  fi
+  die 'Установка остановлена до включения exit node.'
+ fi
  python3 - "$domain" "$user" "$pass" "$BASE/client-links.txt" <<'PY_LINKS'
 import base64,pathlib,sys,urllib.parse
 host,u,p,dest=sys.argv[1:];b=base64.b64encode(f'{u}:{p}@{host}:443'.encode()).decode()
@@ -7282,7 +7295,7 @@ apply(){
  read -r -p 'Создать резервную копию и продолжить? Введите APPLY: ' answer
  [[ $answer == APPLY ]] || return 0
  transaction
- export GEMINI_APPLY=1
+ export MULLVAD_SAFE_APPLY=1
  if command -v tailscale >/dev/null;then tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false;fi
  migrate_legacy
  install_dependencies
@@ -7296,7 +7309,7 @@ apply(){
  configure_route
  configure_dns
  test_dot
- timeout 15 resolvectl query www.google.com
+ timeout 15 resolvectl query www.cloudflare.com
  tailscale set --advertise-exit-node=false --accept-dns=false --exit-node="$NODE" --exit-node-allow-lan-access=true
  check_exit
  printf 'DIRECT_IP=%q\nOUT_IP=%q\n' "$DIRECT_IP" "$OUT_IP" >> "$CFG"
@@ -7307,9 +7320,9 @@ diag(){
  ip -4 rule show;ip -4 route show table main;ip -4 route show table 52 || true
  command -v tailscale >/dev/null && tailscale debug prefs | grep -E 'ExitNode|CorpDNS|RouteAll' || true
  command -v resolvectl >/dev/null && resolvectl status || true
- for s in bobarev-gemini-return bobarev-gemini-dns bobarev-gemini-rollback.timer caddy;do systemctl status "$s" --no-pager -l || true;done
+ for s in bobarev-mullvad_safe-return bobarev-mullvad_safe-dns bobarev-mullvad-safe-rollback.timer caddy;do systemctl status "$s" --no-pager -l || true;done
  if [[ -f "$CFG" ]];then source "$CFG";log "WAN=$WAN NODE=$NODE DNS=$DNS";fi
- if command -v resolvectl >/dev/null;then timeout 15 resolvectl query www.google.com || true;fi
+ if command -v resolvectl >/dev/null;then timeout 15 resolvectl query www.cloudflare.com || true;fi
  if value=$(probe_ip);then log "Текущий IPv4: $value";else log 'Проверка внешнего IP не прошла.';fi
 }
 mss_change(){
@@ -7321,7 +7334,7 @@ mss_change(){
  [[ $confirm == APPLY ]] || return 0
  source "$CFG"
  transaction
- export GEMINI_APPLY=1
+ export MULLVAD_SAFE_APPLY=1
  sed -i '/^MSS_PROFILE=/d' "$CFG"
  printf 'MSS_PROFILE=%q\n' "$profile" >> "$CFG"
  source "$CFG"
@@ -7341,9 +7354,9 @@ case ${1:-help} in
  direct) root;tailscale set --exit-node= --exit-node-allow-lan-access=false;log 'Exit node отключён; DNS и обратный путь сохранены.';;
  mss) root;mkdir -p "$BASE";exec 9>"$BASE/wizard.lock";flock -n 9 || die 'Мастер уже работает.';mss_change "${2:-auto}";;
  links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
- *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
+ *) echo 'Команды: full | exit | diag | caddy-check | direct | recover pending | recover latest | links';;
 esac
-GEMINI_ENGINE_3116
+MULLVAD_SAFE_ENGINE
  bash -n "$lib/mullvad.sh.new" || return 1
  chmod 700 "$lib/mullvad.sh.new" || return 1
  mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
@@ -7364,10 +7377,10 @@ ensure_mullvad_return_route_and_dot_dns() {
 }
 manage_naive_mullvad_menu() {
  local pick='' profile=''
- local ctl=/usr/local/lib/bobarev-gemini/mullvad.sh
- gemini_install_mullvad_runtime || return 1
+ local ctl=/usr/local/lib/bobarev-mullvad-safe/mullvad.sh
+ install_mullvad_safe_runtime || return 1
  while true;do
-  smart_menu 'Google Gemini Edition — NaiveProxy / Mullvad' \
+  smart_menu 'Mullvad Safe Edition — NaiveProxy / Mullvad' \
    'VPS IPv4. Мастер с резервной копией, conntrack return-path, строгим DoT и откатом. Перед стартом нужны консоль хостинга, A-запись и открытые 80/443. LAN и глобальный IPv6 требуют отдельной схемы.' \
    24 "$WT_WIDTH" 10 pick \
    1 'Мастер под ключ: Tailscale + NaiveProxy + DNS + exit node' \
@@ -7386,7 +7399,7 @@ manage_naive_mullvad_menu() {
    3) bash "$ctl" exit || echo 'Изменения не подтверждены; проверьте откат.';pause_enter;;
    4) if nm_yes 'Отключить exit node? DNS и обратный путь будут сохранены.';then bash "$ctl" direct || echo 'Не удалось отключить exit node.';fi;pause_enter;;
    5) if nm_yes 'Восстановить сохранённые файлы и прежний exit node? Поздние ручные изменения могут быть заменены.';then
-       if [[ -f /var/lib/bobarev-gemini-mullvad/pending ]];then bash "$ctl" recover pending || echo 'Откат неполный!';else bash "$ctl" recover latest || echo 'Откат неполный!';fi
+       if [[ -f /var/lib/bobarev-mullvad-safe/pending ]];then bash "$ctl" recover pending || echo 'Откат неполный!';else bash "$ctl" recover latest || echo 'Откат неполный!';fi
       fi;pause_enter;;
    6) manage_naive_users_menu; if nm_yes 'Показать сохранённые мастером ссылки (содержат пароль)?';then bash "$ctl" links || true;fi;pause_enter;;
    7) bash "$ctl" diag || true;pause_enter;;
@@ -9211,10 +9224,10 @@ NM_EXIT_SCRIPT
 # ------------------------------------------------------------------------------
 if [ "${1:-}" != "" ]; then
     case "${1:-}" in
-        --gemini-mullvad)
-            gemini_install_mullvad_runtime
+        --mullvad-safe)
+            install_mullvad_safe_runtime
             shift
-            bash /usr/local/lib/bobarev-gemini/mullvad.sh "$@"
+            bash /usr/local/lib/bobarev-mullvad-safe/mullvad.sh "$@"
             exit $?
             ;;
         --audit|-a)
@@ -9240,7 +9253,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.11.6 (Google Gemini Edition — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.12.1 (Mullvad Safe Edition — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

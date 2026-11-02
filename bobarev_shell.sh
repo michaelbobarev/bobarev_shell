@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.11.6 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.12.0 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -555,7 +555,7 @@ ensure_go_and_build_caddy_naive() {
     local tmp_caddy_bin="${build_tmp_dir}/caddy_built"
     "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
         --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
-        --output "$tmp_caddy_bin" || true
+        --output "$tmp_caddy_bin" || return 1
 
     if [ -f "$tmp_caddy_bin" ]; then
         chmod +x "$tmp_caddy_bin"
@@ -6578,628 +6578,382 @@ ts_wait_exit_node() {
 }
 
 ts_exit_node_works() {
- /usr/bin/curl -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1
+ /usr/bin/curl -q -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1
 }
 
-# Google Gemini Edition: isolated fail-fast network controller.
-gemini_install_mullvad_runtime() {
- local lib=/usr/local/lib/bobarev-gemini
+# Unified Recovery Edition — one controller, isolated from legacy silent_run.
+unified_install_runtime() {
+ local lib=/usr/local/lib/bobarev-unified source_path=''
  [[ $EUID == 0 ]] || { echo 'Нужен root.';return 1; }
- if [[ -f /var/lib/bobarev-gemini-mullvad/pending && -x "$lib/mullvad.sh" ]];then
-  echo 'Незавершённая транзакция: используйте пункт восстановления. Контроллер сохранён.'
+ if [[ -f /var/lib/bobarev-unified/pending && -f "$lib/controller.py" ]];then
+  echo 'Есть незавершённая транзакция; сначала восстановите её. Контроллер не заменяется.'
   return 0
  fi
- install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'GEMINI_ENGINE_3116'
-#!/usr/bin/env bash
-# BOBAREV SHELL 3.11.6 — Google Gemini Edition / Mullvad VPS Safety Revision
-set -Eeuo pipefail
-umask 077
-export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-BASE=/var/lib/bobarev-gemini-mullvad
-LIB=/usr/local/lib/bobarev-gemini
-SELF=$LIB/mullvad.sh
-CFG=$BASE/config
-PENDING=$BASE/pending
-PREF=1050
-MARK=0x80000000/0x80000000
-TX=''
-log(){ printf '[Gemini Edition] %s\n' "$*"; }
-die(){ log "ОШИБКА: $*" >&2; exit 1; }
-root(){ [[ $EUID == 0 && -d /run/systemd/system ]] || die 'Нужны root и systemd.'; }
-snap_file(){
- python3 - "$TX" "$1" <<'PY_SNAP'
-import json,pathlib,shutil,sys,os
-root=pathlib.Path(sys.argv[1]);p=pathlib.Path(sys.argv[2]);manifest=root/'manifest.json'
-m=json.loads(manifest.read_text()) if manifest.exists() else []
-if any(x['path']==str(p) for x in m):sys.exit(0)
-target=root/'files'/str(p).lstrip('/');target.parent.mkdir(parents=True,exist_ok=True)
-exists=os.path.lexists(p)
-if exists:
- if p.is_symlink():target.symlink_to(os.readlink(p))
- elif p.is_dir():shutil.copytree(p,target,symlinks=True)
- else:shutil.copy2(p,target)
-m.append({'path':str(p),'exists':exists});manifest.write_text(json.dumps(m,indent=2))
-PY_SNAP
-}
-unit_state(){
- local a e
- a=$(systemctl is-active "$1" 2>/dev/null) || true
- e=$(systemctl is-enabled "$1" 2>/dev/null) || true
- printf '%s\t%s\t%s\n' "$1" "$a" "$e" >> "$TX/services.tsv"
-}
-preflight(){
- root
- command -v apt-get >/dev/null || die 'Поддерживаются Debian/Ubuntu с apt.'
- command -v python3 >/dev/null || { apt-get update; apt-get install -y python3; }
- [[ ! -f /etc/bobarev-router-v2/config && ! -f /etc/default/bobarev-router ]] || die 'LAN-router обнаружен. Этот мастер предназначен для VPS, не LAN.'
- python3 - <<'PY_NET'
-import json,subprocess,sys
-r=json.loads(subprocess.check_output(['ip','-j','-4','route','show','table','main','default']))
-if len(r)!=1 or not r[0].get('dev') or r[0]['dev'].startswith(('tailscale','wg','tun','warp')):sys.exit('Нужен один обычный WAN default в table main.')
-for link in json.loads(subprocess.check_output(['ip','-j','-6','addr','show'])):
- if link['ifname']=='tailscale0':continue
- if any(a.get('scope')=='global' for a in link.get('addr_info',[])):sys.exit('Глобальный IPv6: требуется отдельная dual-stack схема. Настройка не применена.')
-PY_NET
- WAN=$(ip -j -4 route show table main default | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["dev"])')
- [[ "$WAN" =~ ^[a-zA-Z0-9_.:-]+$ ]] || die 'Неверное имя WAN.'
- if [[ ! -f "$CFG" ]]; then
-  if ip -4 rule show | grep -q "^$PREF:"; then die "Приоритет $PREF занят."; fi
-  if command -v iptables-save >/dev/null && iptables-save -t mangle | grep -qE 'BMGE_|0x80000000'; then die 'Конфликт mark/цепочек: нужен аудит.'; fi
- fi
- [[ ! -e "$PENDING" ]] || die 'Незавершённая транзакция: сначала восстановление.'
- [[ ! -f /etc/naiveproxy/mesh-upstream.port && ! -f /etc/naiveproxy/mesh-paused ]] || die 'Сначала штатно отключите mesh/paused режим NaiveProxy.'
- log "WAN=$WAN. Держите консоль провайдера открытой; не перезагружайте VPS до KEEP."
-}
-validate_dns(){
- python3 - "$1" <<'PY_DNS'
-import sys,ipaddress,re
-try:ip,name=sys.argv[1].split('#')
-except ValueError:sys.exit('Формат DNS: IPv4#TLS-hostname')
-if ipaddress.ip_address(ip).version!=4:sys.exit('Нужен IPv4 DNS')
-if not re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',name):sys.exit('Неверное TLS-имя')
-PY_DNS
-}
-transaction(){
- mkdir -p "$BASE/transactions"
- TX=$(mktemp -d "$BASE/transactions/tx-$(date +%Y%m%d-%H%M%S)-XXXXXX")
- chmod 700 "$TX"
- for p in /etc/ufw /etc/default/ufw /etc/resolv.conf /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d /etc/caddy /etc/naiveproxy /etc/default/bobarev-cascade /usr/local/bin/caddy /etc/systemd/system/caddy.service /etc/systemd/system/naive-return-route.service /usr/local/sbin/bobarev-mullvad-return-route.sh /etc/systemd/system/bobarev-gemini-return.service /etc/systemd/system/bobarev-gemini-dns.service "$CFG" "$BASE/client-links.txt"; do snap_file "$p"; done
- for u in ufw.service caddy.service systemd-resolved.service naive-return-route.service bobarev-gemini-return.service bobarev-gemini-dns.service; do unit_state "$u"; done
- if command -v resolvectl >/dev/null;then
-  python3 - "$TX" "$WAN" <<'PY_LINK_SNAPSHOT'
-import subprocess,json,sys,pathlib
-result={}
-for setting in ('dns','domain','default-route'):
- p=subprocess.run(['resolvectl',setting,sys.argv[2]],text=True,capture_output=True)
- if p.returncode==0:result[setting]=p.stdout.split('):',1)[-1].strip().split()
-pathlib.Path(sys.argv[1],'link-dns.json').write_text(json.dumps({'wan':sys.argv[2],'settings':result}))
-PY_LINK_SNAPSHOT
- fi
- ip -4 rule show > "$TX/ip-rules.txt"
- ip -4 route show table all > "$TX/routes.txt"
- if command -v iptables-save >/dev/null; then iptables-save > "$TX/iptables.txt"; fi
- for k in net.ipv4.conf.all.rp_filter net.ipv4.conf."$WAN".rp_filter; do printf '%s\t%s\n' "$k" "$(sysctl -n "$k")" >> "$TX/sysctls.tsv"; done
- if command -v tailscale >/dev/null; then tailscale debug prefs > "$TX/prefs.json"; tailscale status --json > "$TX/status.json"; fi
- trap 'cleanup_exit "$?"' EXIT
- printf '%s\n' "$$" > "$TX/wizard.pid"
- python3 - "$$" "$TX" <<'PY_WRITER_ID'
-import pathlib,sys,json
-pid=int(sys.argv[1]);p=pathlib.Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()
-pathlib.Path(sys.argv[2],'writer-id.json').write_text(json.dumps({'pid':pid,'start':p[19],'boot':pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()}))
-PY_WRITER_ID
- printf '%s\n' "$TX" > "$PENDING"
- printf '%s\n' "$TX" > "$BASE/latest"
- cat > /etc/systemd/system/bobarev-gemini-rollback.service <<'UNIT_ROLL'
-[Unit]
-Description=Bobarev Google Gemini Edition transaction recovery
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh recover pending
-UNIT_ROLL
- cat > /etc/systemd/system/bobarev-gemini-rollback.timer <<'UNIT_TIMER'
-[Unit]
-Description=Bobarev transaction watchdog
-[Timer]
-OnActiveSec=45min
-AccuracySec=1s
-Unit=bobarev-gemini-rollback.service
-[Install]
-WantedBy=timers.target
-UNIT_TIMER
- cat > /etc/systemd/system/bobarev-gemini-boot-recover.service <<'UNIT_BOOT'
-[Unit]
-Description=Recover interrupted Bobarev transaction after reboot
-After=network-online.target tailscaled.service
-Wants=network-online.target
-ConditionPathExists=/var/lib/bobarev-gemini-mullvad/pending
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh recover pending
-[Install]
-WantedBy=multi-user.target
-UNIT_BOOT
- systemctl daemon-reload
- systemctl enable bobarev-gemini-boot-recover.service
- rm -f /run/systemd/system/bobarev-gemini-rollback.timer.d/window.conf
- systemctl daemon-reload
- systemctl restart bobarev-gemini-rollback.timer
- trap 'on_error "$?" "$LINENO"' ERR
- trap 'on_error 130 "$LINENO"' INT TERM HUP
- log "Резервная копия: $TX (приватные настройки, не публикуйте)."
-}
-on_error(){
- local code=$1 line=$2
- trap - ERR INT TERM HUP
- log "Ошибка $code на строке $line."
- exit "$code"
-}
-cleanup_exit(){
- local code=$1
- trap - EXIT ERR INT TERM HUP
- exec 8>&- || true
- if [[ -n "$TX" && -f "$PENDING" && $(cat "$PENDING") == "$TX" ]]; then
-  log 'Незавершённая транзакция: восстановление.'
-  "$SELF" recover pending || log 'Неполный откат: используйте консоль провайдера.'
- fi
- exit "$code"
-}
-restore_files(){
- python3 - "$TX" <<'PY_RESTORE'
-import json,pathlib,shutil,sys,os
-root=pathlib.Path(sys.argv[1])
-for entry in reversed(json.loads((root/'manifest.json').read_text())):
- p=pathlib.Path(entry['path']);s=root/'files'/str(p).lstrip('/')
- if p.is_symlink() or p.is_file():p.unlink()
- elif p.is_dir():shutil.rmtree(p)
- if not entry['exists']:continue
- p.parent.mkdir(parents=True,exist_ok=True)
- if s.is_symlink():p.symlink_to(os.readlink(s))
- elif s.is_dir():shutil.copytree(s,p,symlinks=True)
- else:shutil.copy2(s,p)
-PY_RESTORE
-}
-recover(){
- root
- mkdir -p "$BASE"
- local mode=${1:-pending}
- if [[ "$mode" == pending ]]; then [[ -f "$PENDING" ]] || { log 'Нет незавершённой транзакции.'; return 0; };TX=$(cat "$PENDING")
- else [[ -f "$BASE/latest" ]] || die 'Нет резервной копии.';TX=$(cat "$BASE/latest");fi
- [[ "$TX" == "$BASE/transactions/"* && -f "$TX/manifest.json" ]] || die 'Некорректная резервная копия.'
- [[ ! -f "$TX/restored" ]] || { log 'Транзакция уже восстановлена.';return 0; }
- python3 - "$TX" "$$" "$PPID" <<'PY_STOP_WRITER'
-import json,pathlib,sys,os,signal
-f=pathlib.Path(sys.argv[1],'writer-id.json')
-if not f.exists():sys.exit(0)
-j=json.loads(f.read_text());pid=j['pid'];me=int(sys.argv[2]);parent=int(sys.argv[3])
-if pid in (me,parent):sys.exit(0)
-try:
- stat=pathlib.Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()
- if stat[19]!=j['start'] or pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()!=j['boot']:sys.exit(0)
-except FileNotFoundError:sys.exit(0)
-parents={}
-for d in pathlib.Path('/proc').iterdir():
- if not d.name.isdecimal():continue
- try:parents[int(d.name)]=int((d/'stat').read_text().rsplit(')',1)[1].split()[1])
- except (OSError,ValueError,IndexError):pass
-victims={pid}
-while True:
- expanded=victims|{p for p,pp in parents.items() if pp in victims}
- if expanded==victims:break
- victims=expanded
-if me in victims:sys.exit(0)
-for p in sorted(victims,reverse=True):
- try:os.kill(p,signal.SIGKILL)
- except ProcessLookupError:pass
-PY_STOP_WRITER
- exec 8>"$BASE/state.lock"; flock -w 20 8 || die 'Восстановление уже работает.'
- # Re-check after obtaining the commit/recovery lock.
- [[ ! -f "$TX/restored" ]] || return 0
- if [[ "$mode" == pending && ! -f "$PENDING" ]];then return 0;fi
- local failed=0
- if command -v tailscale >/dev/null; then tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false || failed=1;fi
- systemctl stop bobarev-gemini-return.service bobarev-gemini-dns.service 2>/dev/null || true
- route_stop || failed=1
- if [[ -f "$TX/services.tsv" ]];then
-  while IFS=$'\t' read -r u active enabled;do
-   case "$enabled" in not-found|'') systemctl disable "$u" 2>/dev/null || true;;esac
-  done < "$TX/services.tsv"
- fi
- restore_files || failed=1
- systemctl daemon-reload || failed=1
- if [[ -f "$TX/ufw-changed" ]] && command -v ufw >/dev/null;then ufw reload || failed=1;fi
- if [[ -f "$TX/sysctls.tsv" ]]; then while IFS=$'\t' read -r k v;do sysctl -w "$k=$v" || failed=1;done < "$TX/sysctls.tsv";fi
- if [[ -f "$TX/nm.tsv" ]] && command -v nmcli >/dev/null;then
-  while IFS=$'\t' read -r uuid key value;do nmcli connection modify "$uuid" "$key" "$value" || failed=1;done < "$TX/nm.tsv"
- fi
- if systemctl is-active --quiet systemd-networkd;then networkctl reload || failed=1;fi
- if [[ -f "$TX/legacy-rules.json" ]];then
-  python3 - "$TX/legacy-rules.json" <<'PY_LEGACY_RESTORE'
-import json,sys,subprocess
-failed=False
-for args in json.load(open(sys.argv[1])):
- r=subprocess.run(['ip','-4','rule','add']+args,text=True,capture_output=True)
- if r.returncode and 'File exists' not in r.stderr:
-  print(r.stderr,file=sys.stderr);failed=True
-sys.exit(1 if failed else 0)
-PY_LEGACY_RESTORE
-  [[ $? == 0 ]] || failed=1
- fi
- if [[ -s "$TX/legacy-firewall.sh" ]];then bash -e "$TX/legacy-firewall.sh" || failed=1;fi
- if [[ -f "$TX/services.tsv" ]];then
-  while IFS=$'\t' read -r u active enabled;do
-   case "$enabled" in enabled|enabled-runtime) systemctl enable "$u" || failed=1;;disabled) systemctl disable "$u" || failed=1;;esac
-   case "$active" in active) systemctl restart "$u" || failed=1;;*) systemctl stop "$u" 2>/dev/null || true;;esac
-  done < "$TX/services.tsv"
- fi
- if [[ -f "$TX/link-dns.json" ]] && command -v resolvectl >/dev/null;then
-  python3 - "$TX/link-dns.json" <<'PY_LINK_RESTORE'
-import subprocess,json,sys
-j=json.load(open(sys.argv[1]))
-for setting,values in j['settings'].items():
- if not values and setting=='default-route':continue
- subprocess.run(['resolvectl',setting,j['wan']]+(values or ['']),check=True)
-PY_LINK_RESTORE
-  [[ $? == 0 ]] || failed=1
- fi
- if [[ -f "$TX/prefs.json" ]] && command -v tailscale >/dev/null;then
-  python3 - "$TX" <<'PY_TS_RESTORE'
-import json,subprocess,sys
-from pathlib import Path
-p=Path(sys.argv[1]);prefs=json.loads((p/'prefs.json').read_text());status=json.loads((p/'status.json').read_text())
-node=str(prefs.get('ExitNodeIP') or '')
-if node in ('invalid IP','<nil>'):node=''
-if not node and prefs.get('ExitNodeID'):
- for peer in status.get('Peer',{}).values():
-  if peer.get('ID')==prefs['ExitNodeID']:
-   node=next((ip for ip in peer.get('TailscaleIPs',[]) if ':' not in ip),'');break
- if not node:raise SystemExit('Прежний exit node не найден; оставлен WAN. Восстановите выбор вручную.')
-args=['tailscale','set','--exit-node='+node,'--exit-node-allow-lan-access='+str(bool(node and prefs.get('ExitNodeAllowLANAccess'))).lower(),'--accept-dns='+str(bool(prefs.get('CorpDNS',True))).lower(),'--accept-routes='+str(bool(prefs.get('RouteAll',False))).lower(),'--advertise-exit-node='+str(any(r in ('0.0.0.0/0','::/0') for r in prefs.get('AdvertiseRoutes',[]) or [])).lower()]
-subprocess.run(args,check=True)
-PY_TS_RESTORE
-  [[ $? == 0 ]] || failed=1
- fi
- if [[ $failed == 0 ]];then
-  touch "$TX/restored";rm -f "$PENDING"
-  if grep -q $'bobarev-gemini-return.service\tactive' "$TX/services.tsv";then systemctl restart bobarev-gemini-return.service || return 1;fi
-  systemctl stop bobarev-gemini-rollback.timer || true
-  log "Восстановлены файлы и настройки $TX. Пакеты и кэши остаются."
- else log "Неполное восстановление: смотрите journalctl -u bobarev-gemini-rollback и $TX.";return 1;fi
-}
-route_stop(){
- local rc=0
- if command -v iptables >/dev/null;then
-  while iptables -w -t mangle -D PREROUTING -j BMGE_IN 2>/dev/null;do :;done
-  while iptables -w -t mangle -D OUTPUT -j BMGE_OUT 2>/dev/null;do :;done
-  while iptables -w -t mangle -D OUTPUT -j BMGE_MSS 2>/dev/null;do :;done
-  while iptables -w -t mangle -D FORWARD -j BMGE_MSS 2>/dev/null;do :;done
-  for chain in BMGE_IN BMGE_OUT BMGE_MSS;do
-   if iptables -w -t mangle -S "$chain" >/dev/null 2>&1;then iptables -w -t mangle -F "$chain" || rc=1;iptables -w -t mangle -X "$chain" || rc=1;fi
-  done
- fi
- while ip -4 rule del pref "$PREF" fwmark "$MARK" lookup main 2>/dev/null;do :;done
- return "$rc"
-}
-route_start(){
- root
- [[ ! -f "$PENDING" || ${GEMINI_APPLY:-0} == 1 ]] || { log 'Startup отложен до восстановления pending.';return 0; }
- [[ -f "$CFG" ]] || die 'Нет config.'
- source "$CFG"
- ip link show "$WAN" >/dev/null
- local other
- other=$(ip -4 rule show | awk -v p="$PREF:" '$1==p && $0 !~ /fwmark 0x80000000\/0x80000000 lookup main/ {print}')
- [[ -z "$other" ]] || die 'Конфликт приоритета обратного маршрута.'
- route_stop
- ip -4 rule add pref "$PREF" fwmark "$MARK" lookup main
- iptables -w -t mangle -N BMGE_IN
- iptables -w -t mangle -A BMGE_IN -i "$WAN" -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark "$MARK"
- iptables -w -t mangle -I PREROUTING 1 -j BMGE_IN
- iptables -w -t mangle -N BMGE_OUT
- iptables -w -t mangle -A BMGE_OUT -m connmark --mark "$MARK" -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000
- iptables -w -t mangle -A OUTPUT -j BMGE_OUT
- if [[ ${MSS_PROFILE:-auto} == diagnostic1140 ]];then
-  iptables -w -t mangle -N BMGE_MSS
-  iptables -w -t mangle -A BMGE_MSS -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
-  iptables -w -t mangle -A OUTPUT -j BMGE_MSS
-  iptables -w -t mangle -A FORWARD -j BMGE_MSS
- fi
- sysctl -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf."$WAN".rp_filter=2
-}
-migrate_legacy(){
- [[ -f /usr/local/sbin/bobarev-mullvad-return-route.sh ]] || return 0
- log 'Миграция старой Gemini Return-Path-службы; только распознанные правила.'
- python3 - "$TX" <<'PY_LEGACY'
-import re,pathlib,subprocess,json,ipaddress,sys
-text=pathlib.Path('/usr/local/sbin/bobarev-mullvad-return-route.sh').read_text()
-ip=re.search(r'^PUB_IP="([0-9.]+)"$',text,re.M);port=re.search(r'^SSH_P="([0-9]+)"$',text,re.M)
-if not ip or not port:raise SystemExit('Старый helper не распознан; нужна ручная миграция.')
-ipaddress.IPv4Address(ip[1]);p=int(port[1]);assert 1<=p<=65535
-rules=[['from',ip[1]+'/32','table','main','priority','100'],['sport',str(p),'table','main','priority','98'],['sport','443','table','main','priority','99'],['sport','80','table','main','priority','101']];removed=[]
-for args in rules:
- while subprocess.run(['ip','-4','rule','del']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:removed.append(args)
-pathlib.Path(sys.argv[1],'legacy-rules.json').write_text(json.dumps(removed))
-PY_LEGACY
- if systemctl is-active --quiet naive-return-route.service;then
-  install -d /run/systemd/system/naive-return-route.service.d
-  printf '[Service]\nExecStop=\n' > /run/systemd/system/naive-return-route.service.d/gemini-migration.conf
-  systemctl daemon-reload;systemctl disable --now naive-return-route.service
-  rm -f /run/systemd/system/naive-return-route.service.d/gemini-migration.conf
-  systemctl daemon-reload
- fi
- systemctl disable naive-return-route.service 2>/dev/null || true
- command -v iptables >/dev/null || die 'Старый helper есть, но iptables отсутствует; нужна ручная миграция.'
- : > "$TX/legacy-firewall.sh"
- for table_chain in 'nat POSTROUTING' 'mangle FORWARD' 'mangle OUTPUT' 'mangle POSTROUTING';do
-  local table chain;read -r table chain <<< "$table_chain"
-  local -a spec
-  if [[ $table == nat ]];then spec=(-o tailscale0 -j MASQUERADE);else spec=(-o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140);fi
-  while iptables -w -t "$table" -C "$chain" "${spec[@]}" 2>/dev/null;do
-   printf 'iptables -w -t %q -A %q ' "$table" "$chain" >> "$TX/legacy-firewall.sh";printf '%q ' "${spec[@]}" >> "$TX/legacy-firewall.sh";printf '\n' >> "$TX/legacy-firewall.sh"
-   iptables -w -t "$table" -D "$chain" "${spec[@]}"
-  done
- done
-}
-install_dependencies(){
- export DEBIAN_FRONTEND=noninteractive
- apt-get update
- apt-get install -y curl ca-certificates openssl iptables iproute2 python3 git wget tar unzip apache2-utils util-linux
- if ! command -v tailscale >/dev/null;then
-  curl -q --proto '=https' --tlsv1.2 -fSL --connect-timeout 10 --max-time 120 https://tailscale.com/install.sh -o "$TX/tailscale-install.sh"
-  sh -n "$TX/tailscale-install.sh"
-  sh "$TX/tailscale-install.sh"
- fi
- systemctl enable --now tailscaled
- local state
- state=$(tailscale status --json | python3 -c 'import json,sys;print(json.load(sys.stdin).get("BackendState",""))')
- if [[ $state != Running ]];then
-  log 'Авторизуйте Tailscale по ссылке (до 5 минут).'
-  timeout 300 tailscale up --accept-dns=false --accept-routes=false
- fi
- tailscale status --json | python3 -c 'import json,sys;assert json.load(sys.stdin).get("BackendState")=="Running"'
- tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false
-}
-manager_dns(){
- local uuid key old file name
- if systemctl is-active --quiet NetworkManager && command -v nmcli >/dev/null;then
-  uuid=$(nmcli -g GENERAL.CON-UUID device show "$WAN")
-  [[ -n $uuid && $uuid != -- ]] || die 'Не определён NM UUID WAN.'
-  for key in ipv4.ignore-auto-dns ipv6.ignore-auto-dns ipv4.dns ipv6.dns ipv4.dns-search ipv6.dns-search;do
-   old=$(nmcli -g "$key" connection show "$uuid")
-   printf '%s\t%s\t%s\n' "$uuid" "$key" "$old" >> "$TX/nm.tsv"
-   if [[ $key == *.ignore-auto-dns ]];then nmcli connection modify "$uuid" "$key" yes;else nmcli connection modify "$uuid" "$key" '';fi
-  done
- elif systemctl is-active --quiet systemd-networkd;then
-  file=$(LC_ALL=C networkctl status "$WAN" --no-pager | sed -n 's/^[[:space:]]*Network File: //p' | head -n 1)
-  [[ -n $file && $file == *.network ]] || die 'Не определён .network WAN.'
-  name=$(basename "$file")
-  local drop="/etc/systemd/network/$name.d/90-bobarev-gemini-dns.conf"
-  snap_file "$drop";mkdir -p "$(dirname "$drop")"
-  cat > "$drop" <<'NETWORK_DNS'
-[Network]
-DNS=
-Domains=
-[DHCPv4]
-UseDNS=no
-UseDomains=no
-[DHCPv6]
-UseDNS=no
-UseDomains=no
-[IPv6AcceptRA]
-UseDNS=no
-UseDomains=no
-NETWORK_DNS
-  networkctl reload
- else
-  if command -v resolvconf >/dev/null || command -v dhclient >/dev/null;then die 'resolvconf/dhclient без NM/networkd: требуется отдельный адаптер DNS; откат.';fi
- fi
-}
-dns_guard(){
- [[ -f "$CFG" ]] || return 0
- source "$CFG"
- resolvectl dns "$WAN" ''
- resolvectl domain "$WAN" ''
- resolvectl default-route "$WAN" no
- if ip link show tailscale0 >/dev/null 2>&1;then resolvectl revert tailscale0;fi
-}
-configure_dns(){
- apt-get install -y systemd-resolved
- manager_dns
- mkdir -p /etc/systemd/resolved.conf.d
- cat > /etc/systemd/resolved.conf.d/90-bobarev-gemini-mullvad.conf <<EOF_DNS
-[Resolve]
-DNS=
-DNS=$DNS
-FallbackDNS=
-Domains=
-Domains=~.
-DNSOverTLS=yes
-DNSStubListener=yes
-Cache=yes
-EOF_DNS
- systemctl enable --now systemd-resolved
- ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
- systemctl restart systemd-resolved
- dns_guard
- resolvectl flush-caches
- systemd-analyze cat-config systemd/resolved.conf > "$TX/effective-resolved.txt"
- python3 - "$TX/effective-resolved.txt" "$DNS" <<'PY_EFFECTIVE'
-import sys
-values={'DNS':[],'FallbackDNS':[],'Domains':[]};scalar={};section=''
-for line in open(sys.argv[1]):
- line=line.strip()
- if not line or line.startswith(('#',';')):continue
- if line.startswith('['):section=line;continue
- if section!='[Resolve]' or '=' not in line:continue
- key,value=map(str.strip,line.split('=',1))
- if key in values:
-  if not value:values[key]=[]
-  else:values[key].extend(value.split())
- else:scalar[key]=value
-assert values['DNS']==[sys.argv[2]],'Сторонний DNS drop-in перекрывает выбор'
-assert not values['FallbackDNS'] and values['Domains']==['~.'],'Конфликт DNS routing/fallback'
-assert scalar.get('DNSOverTLS')=='yes' and scalar.get('DNSStubListener')=='yes','Конфликт режима resolver'
-PY_EFFECTIVE
- cat > /etc/systemd/system/bobarev-gemini-dns.service <<'UNIT_DNS'
-[Unit]
-Description=Bobarev DNS runtime reconciliation
-Wants=network-online.target systemd-resolved.service
-After=network-online.target systemd-resolved.service tailscaled.service NetworkManager.service systemd-networkd.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh dns-guard
-[Install]
-WantedBy=multi-user.target
-UNIT_DNS
- systemctl daemon-reload;systemctl enable bobarev-gemini-dns.service
-}
-configure_route(){
- printf 'WAN=%q\nDNS=%q\nNODE=%q\n' "$WAN" "$DNS" "$NODE" > "$CFG"
- cat > /etc/systemd/system/bobarev-gemini-return.service <<'UNIT_RETURN'
-[Unit]
-Description=Bobarev Google Gemini Edition IPv4 ingress reply routing
-Wants=network-online.target
-After=network-online.target ufw.service
-Before=tailscaled.service
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/lib/bobarev-gemini/mullvad.sh route-start
-ExecStop=/usr/local/lib/bobarev-gemini/mullvad.sh route-stop
-[Install]
-WantedBy=multi-user.target
-UNIT_RETURN
- systemctl daemon-reload;systemctl enable bobarev-gemini-return.service
- route_start
-}
-test_dot(){
- local ip=${DNS%%#*} host=${DNS#*#}
- timeout 12 openssl s_client -connect "$ip:853" -servername "$host" -verify_hostname "$host" -verify_return_error -CApath /etc/ssl/certs </dev/null > "$TX/dot-tls.txt" 2>&1
-}
-probe_ip(){
- local u value
- for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com;do
-  if value=$(curl -q -4 --noproxy '*' -fsS --connect-timeout 5 --max-time 12 "$u");then
-   if python3 - "$value" <<'PY_IP'
-import ipaddress,sys
-assert ipaddress.ip_address(sys.argv[1].strip()).version==4
-PY_IP
-   then printf '%s\n' "$value";return 0;fi
-  fi
- done
- return 1
-}
-smoke(){
- local ok=0 url
- for domain in www.google.com github.com;do timeout 15 resolvectl query "$domain";done
- for url in https://www.google.com https://www.debian.org;do
-  if curl -q -4 --noproxy '*' -fsSI --connect-timeout 5 --max-time 15 "$url";then ok=$((ok+1));fi
- done
- [[ $ok -gt 0 ]] || die 'HTTPS smoke-проверки не прошли.'
-}
-check_exit(){
- local n
- for n in {1..20};do if ip -4 route show table 52 | grep -q '^default dev tailscale0';then break;fi;sleep 1;done
- ip -4 route show table 52 | grep -q '^default dev tailscale0' || die 'Нет default в table 52.'
- tailscale status --json > "$TX/after-status.json"
- python3 - "$TX/after-status.json" <<'PY_EXIT'
-import json,sys
-j=json.load(open(sys.argv[1]))
-if not any(p.get('ExitNode') for p in j.get('Peer',{}).values()) and not (j.get('ExitNodeStatus') or {}).get('ID'):raise SystemExit('Tailscale не подтверждает выбранный exit node.')
-PY_EXIT
- test_dot;resolvectl flush-caches;smoke
- OUT_IP=$(probe_ip) || die 'Не удалось определить выходной IPv4 по трём сервисам.'
- [[ $OUT_IP != "$DIRECT_IP" ]] || die 'Внешний IPv4 не изменился: VPN не подтверждён.'
- log "WAN: $DIRECT_IP; сейчас: $OUT_IP. Проверьте соответствие выбранному узлу/стране."
-}
-renew_watchdog(){
- mkdir -p /run/systemd/system/bobarev-gemini-rollback.timer.d
- printf '[Timer]\nOnActiveSec=\nOnActiveSec=5min\n' > /run/systemd/system/bobarev-gemini-rollback.timer.d/window.conf
- systemctl daemon-reload;systemctl restart bobarev-gemini-rollback.timer
-}
-commit(){
- local answer=''
- log 'Откройте НОВУЮ SSH-сессию по публичному IPv4 и проверьте NaiveProxy/Shadowrocket.'
- log 'Проверьте выходной IP через клиентский прокси. Серверный curl этого не заменяет.'
- log 'Введите KEEP за 120 секунд только после успешной проверки. Иначе откат.'
- read -r -t 120 answer || die 'Нет подтверждения.'
- [[ $answer == KEEP ]] || die 'Изменения не подтверждены.'
- exec 8>"$BASE/state.lock";flock -w 10 8
- [[ -f "$PENDING" && $(cat "$PENDING") == "$TX" && ! -f "$TX/restored" ]] || die 'Транзакция уже откатилась.'
- GEMINI_APPLY=1 route_start
- dns_guard
- systemctl stop bobarev-gemini-rollback.timer
- rm -f "$PENDING";touch "$TX/committed"
- trap - ERR INT TERM HUP EXIT
- flock -u 8
- systemctl restart bobarev-gemini-return.service
- systemctl restart bobarev-gemini-dns.service
- log 'Применено. Теперь нужен reboot-тест. Резервная копия сохранена.'
-}
-build_caddy(){
- source "$LIB/build-pins.conf"
- local temp arch sha actual
- temp=$(mktemp -d "$TX/caddy-build-XXXXXX")
- arch=$(dpkg --print-architecture)
- case $arch in amd64) sha=$GO_SHA256_AMD64;;arm64) sha=$GO_SHA256_ARM64;;*) die 'Поддерживаются amd64/arm64.';;esac
- if ! command -v go >/dev/null || ! go version | grep -F "go${GO_VERSION_PIN}" >/dev/null;then
-  curl -q --proto '=https' -fSL --retry 2 --connect-timeout 10 --max-time 300 "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" -o "$temp/go.tar.gz"
-  actual=$(sha256sum "$temp/go.tar.gz" | awk '{print $1}')
-  [[ $actual == "$sha" ]] || die 'SHA256 Go не совпал с pin исходника; сборка остановлена.'
-  mkdir "$temp/toolchain";tar -C "$temp/toolchain" -xzf "$temp/go.tar.gz"
-  export PATH="$temp/toolchain/go/bin:$PATH"
- fi
- export GOPATH=/root/go GOCACHE=/root/.cache/go-build GOTMPDIR=$temp TMPDIR=$temp
- if [[ ! -x /usr/local/bin/caddy ]] || ! /usr/local/bin/caddy list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null;then
-  go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}"
-  "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" --output "$temp/caddy"
-  "$temp/caddy" list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null
-  install -m 755 "$temp/caddy" /usr/local/bin/caddy
- fi
- unset GOTMPDIR TMPDIR
- rm -rf "$temp"
-}
-setup_caddy(){
- local domain email user pass hash conflict
- read -r -p 'Домен NaiveProxy (A-запись уже на VPS): ' domain
- read -r -p 'Email ACME: ' email
- read -r -p 'Новый пользователь (a-z A-Z 0-9 _ -): ' user
- python3 - "$domain" "$email" "$user" <<'PY_INPUT'
-import re,sys
-assert re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',sys.argv[1]) and '.' in sys.argv[1],'Неверный домен'
-assert re.fullmatch(r'[A-Za-z0-9_.+%-]+@[A-Za-z0-9.-]+',sys.argv[2]),'Неверный email'
-assert re.fullmatch(r'[A-Za-z0-9_-]{1,64}',sys.argv[3]),'Неверный пользователь'
-PY_INPUT
- pass=$(openssl rand -hex 16)
- [[ ${#pass} == 32 ]] || die 'Генератор пароля не сработал.'
- for port in 80 443;do
-  conflict=$(ss -H -lntup "sport = :$port" | grep -v '"caddy"' || true)
-  [[ -z $conflict ]] || die "Порт $port занят: $conflict"
- done
- if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active';then
-  touch "$TX/ufw-changed"
-  ufw allow 80/tcp comment 'Google Gemini Edition ACME'
-  ufw allow 443/tcp comment 'Google Gemini Edition NaiveProxy'
- fi
- log '80/tcp и 443/tcp также должны быть разрешены в панели хостинга. Firewall не сбрасывается.'
- getent ahostsv4 "$domain" > "$TX/domain-addresses.txt"
- build_caddy
- mkdir -p /etc/caddy /etc/naiveproxy /var/www/html
- hash=$(printf '%s\n' "$pass" | htpasswd -niBC 12 "$user" | cut -d: -f2)
- [[ $hash == '$2'* ]] || die 'bcrypt не создан.'
- touch /etc/naiveproxy/users.conf /etc/naiveproxy/users.pass
- sed -i "/^${user}:/d" /etc/naiveproxy/users.conf /etc/naiveproxy/users.pass
- printf '%s:%s\n' "$user" "$hash" >> /etc/naiveproxy/users.conf
- printf '%s:%s\n' "$user" "$pass" >> /etc/naiveproxy/users.pass
- chmod 600 /etc/naiveproxy/users.conf /etc/naiveproxy/users.pass
- python3 - "$domain" "$email" <<'PY_CADDY'
-from pathlib import Path
-import re,sys
-rows=[]
-for line in Path('/etc/naiveproxy/users.conf').read_text().splitlines():
- u,h=line.split(':',1)
- if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',u) or not re.fullmatch(r'\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}',h):raise SystemExit('Некорректная существующая запись пользователя')
- rows.append('            '+u+' '+h)
-text='''{
+ source_path=$(readlink -f "${BASH_SOURCE[0]}") || return 1
+ case "$source_path" in /dev/fd/*|/proc/*) echo 'Сначала сохраните основной скрипт в обычный файл.';return 1;;esac
+ [[ -s "$source_path" ]] || return 1
+ if ! command -v python3 >/dev/null;then apt-get update && apt-get install -y python3 || return 1;fi
+ install -d -m 700 "$lib" || return 1
+ cat > "$lib/controller.py.new" <<'UNIFIED_CONTROLLER_3120'
+#!/usr/bin/env python3
+"""BOBAREV SHELL 3.12.0 — Unified Recovery Edition (Google Gemini lineage)."""
+import base64,contextlib,fcntl,ipaddress,json,os,pathlib,re,shlex,shutil,signal,subprocess,sys,time
+P=pathlib.Path
+BASE=P('/var/lib/bobarev-unified');LIB=P('/usr/local/lib/bobarev-unified')
+SELF=LIB/'controller.py';CFG=BASE/'config.json';PENDING=BASE/'pending';LATEST=BASE/'latest'
+PREFIX='bobarev-unified';PREF='1050';MARK='0x80000000/0x80000000'
+OLD_UNITS=['naive-return-route.service','bobarev-mullvad-return.service','bobarev-gemini-return.service','bobarev-gemini-dns.service']
+UNITS=OLD_UNITS+[PREFIX+'-return.service',PREFIX+'-dns.service','caddy.service','systemd-resolved.service']
+class Failure(RuntimeError):pass
+def say(s):print('[Unified Recovery] '+str(s),flush=True)
+def run(args,check=True,timeout=90,data=None):
+ args=[str(a) for a in args]
+ p=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+ try:out,err=p.communicate(data,timeout=timeout)
+ except BaseException:
+  with contextlib.suppress(ProcessLookupError):os.killpg(p.pid,signal.SIGKILL)
+  p.communicate();raise
+ r=subprocess.CompletedProcess(args,p.returncode,out,err)
+ if check and r.returncode:raise Failure('Ошибка команды '+shlex.join(args)+': '+r.stderr[-1800:])
+ return r
+def live(args,timeout=300):
+ p=subprocess.Popen([str(a) for a in args],start_new_session=True)
+ try:code=p.wait(timeout=timeout)
+ except BaseException:
+  with contextlib.suppress(ProcessLookupError):os.killpg(p.pid,signal.SIGKILL)
+  p.wait();raise
+ if code:raise Failure('Команда завершилась с ошибкой '+str(code))
+
+def text(args,**kw):return run(args,**kw).stdout.strip()
+def system(*args,**kw):return run(['systemctl',*args],**kw)
+def active(u):return system('is-active',u,check=False).returncode==0
+def atomic(path,obj):
+ path=P(path);path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+ tmp=path.with_name(path.name+'.tmp.'+str(os.getpid()))
+ with open(tmp,'w') as f:json.dump(obj,f,ensure_ascii=False,indent=2);f.flush();os.fsync(f.fileno())
+ tmp.chmod(0o600);os.replace(tmp,path)
+def load(path,default=None):return json.loads(P(path).read_text()) if P(path).exists() else default
+def write(path,body,mode=0o600):
+ p=P(path);p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body);p.chmod(mode)
+@contextlib.contextmanager
+def lock(name,nonblock=False):
+ BASE.mkdir(parents=True,exist_ok=True,mode=0o700)
+ with open(BASE/name,'a') as f:
+  try:fcntl.flock(f,fcntl.LOCK_EX|(fcntl.LOCK_NB if nonblock else 0))
+  except BlockingIOError:raise Failure('Другой мастер/откат уже работает.')
+  yield
+def root():
+ os.environ['LC_ALL']='C'
+ if os.geteuid()!=0 or not P('/run/systemd/system').exists():raise Failure('Нужны root и systemd.')
+def validate_dns(s):
+ try:addr,host=s.split('#');ip=ipaddress.ip_address(addr)
+ except ValueError:raise Failure('DNS должен иметь формат IPv4#TLS-hostname.')
+ if ip.version!=4 or not re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',host):raise Failure('Некорректный DNS.')
+ return addr,host
+def state():return load(CFG,{})
+def pid_token(pid):
+ try:return P('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()[19]
+ except (OSError,IndexError):return None
+def snapshot_file(tx,path):
+ path=P(path);m=load(tx/'files.json',[])
+ if any(x['path']==str(path) for x in m):return
+ dest=tx/'files'/str(path).lstrip('/');dest.parent.mkdir(parents=True,exist_ok=True)
+ exists=os.path.lexists(path)
+ if exists:
+  if path.is_symlink():dest.symlink_to(os.readlink(path))
+  elif path.is_dir():shutil.copytree(path,dest,symlinks=True)
+  else:shutil.copy2(path,dest)
+ m.append({'path':str(path),'exists':exists});atomic(tx/'files.json',m)
+def restore_files(tx):
+ for entry in reversed(load(tx/'files.json',[])):
+  p=P(entry['path']);src=tx/'files'/str(p).lstrip('/')
+  if p.is_symlink() or p.is_file():p.unlink()
+  elif p.is_dir():shutil.rmtree(p)
+  if not entry['exists']:continue
+  p.parent.mkdir(parents=True,exist_ok=True)
+  if src.is_symlink():p.symlink_to(os.readlink(src))
+  elif src.is_dir():shutil.copytree(src,p,symlinks=True)
+  else:shutil.copy2(src,p)
+def txpath(mode):
+ target=load(PENDING if mode=='pending' else LATEST)
+ if not target:return None
+ p=P(target)
+ if p.parent!=BASE/'transactions' or not p.is_dir():raise Failure('Некорректный путь транзакции.')
+ return p
+def preflight():
+ root()
+ if not shutil.which('apt-get'):raise Failure('Нужны Debian/Ubuntu с apt.')
+ if PENDING.exists():raise Failure('Незавершённая транзакция: сначала восстановление.')
+ for pending in ['/var/lib/bobarev-gemini-mullvad/pending']:
+  if P(pending).exists():raise Failure('Есть pending старого мастера. Сначала восстановите его старым контроллером.')
+ for timer in ['bobarev-mullvad-rollback.timer','bobarev-gemini-rollback.timer']:
+  if active(timer):raise Failure('Активен старый watchdog '+timer+'. Сначала завершите/откатите старую настройку.')
+ for p in ['/etc/bobarev-router-v2/config','/etc/default/bobarev-router','/etc/naiveproxy/mesh-upstream.port','/etc/naiveproxy/mesh-paused']:
+  if P(p).exists():raise Failure('LAN/mesh конфигурация: '+p+'. Этот мастер — только IPv4 VPS.')
+ routes=json.loads(text(['ip','-j','-4','route','show','table','main','default']))
+ if len(routes)!=1 or not routes[0].get('dev') or routes[0]['dev'].startswith(('tailscale','wg','tun','warp')):raise Failure('Нужен один физический IPv4 WAN default в table main.')
+ wan=routes[0]['dev']
+ for link in json.loads(text(['ip','-j','-6','addr','show'])):
+  if link['ifname']!='tailscale0' and any(a.get('scope')=='global' for a in link.get('addr_info',[])):raise Failure('Глобальный IPv6: нужна отдельная dual-stack схема.')
+ rules=text(['ip','-4','rule','show'])
+ if any(l.startswith(PREF+':') for l in rules.splitlines()) and not CFG.exists() and not P('/var/lib/bobarev-gemini-mullvad/config').exists():raise Failure('Приоритет '+PREF+' занят.')
+ if shutil.which('iptables-save'):
+  dump=text(['iptables-save','-t','mangle'])
+  known=('BMU_', 'BM_IN', 'BM_OUT', 'BMGE_')
+  for line in dump.splitlines():
+   if '0x80000000' in line and not any(k in line for k in known):raise Failure('Обнаружена чужая connmark 0x80000000: нужен аудит.')
+ return wan
+def unit_file(name,body):write('/etc/systemd/system/'+PREFIX+'-'+name,body)
+def watchdog(minutes):
+ unit_file('rollback.service','[Unit]\nDescription=Bobarev Unified transaction recovery\n[Service]\nType=oneshot\nExecStart=/usr/bin/python3 '+str(SELF)+' recover pending\n')
+ unit_file('rollback.timer','[Unit]\nDescription=Bobarev Unified watchdog\n[Timer]\nOnActiveSec='+str(minutes)+'min\nAccuracySec=1s\nUnit='+PREFIX+'-rollback.service\n')
+ system('daemon-reload');system('restart',PREFIX+'-rollback.timer')
+def begin(wan,rollback_policy='previous'):
+ tx=BASE/'transactions'/('tx-'+time.strftime('%Y%m%d-%H%M%S')+'-'+str(os.getpid()))
+ tx.mkdir(parents=True,mode=0o700)
+ paths=['/etc/resolv.conf','/etc/systemd/resolved.conf','/etc/systemd/resolved.conf.d','/etc/ufw','/etc/default/ufw','/etc/caddy','/etc/naiveproxy','/etc/default/bobarev-cascade','/usr/local/bin/caddy',str(CFG),str(BASE/'client-links.txt')]
+ paths+=['/etc/systemd/system/'+u for u in UNITS]
+ for p in paths:snapshot_file(tx,p)
+ meta={'wan':wan,'services':{},'sysctls':{},'link':{},'nm':[],'writer':os.getpid(),'start':pid_token(os.getpid()),'boot':P('/proc/sys/kernel/random/boot_id').read_text().strip(),'status':'pending','rollback_policy':rollback_policy}
+ for u in UNITS:meta['services'][u]={'active':active(u),'enabled':text(['systemctl','is-enabled',u],check=False)}
+ for k in ['net.ipv4.conf.all.rp_filter','net.ipv4.conf.'+wan+'.rp_filter']:meta['sysctls'][k]=text(['sysctl','-n',k])
+ if shutil.which('resolvectl'):
+  for k in ['dns','domain','default-route']:
+   r=run(['resolvectl',k,wan],check=False)
+   if r.returncode==0:meta['link'][k]=r.stdout.split('):',1)[-1].strip().split()
+ if shutil.which('tailscale'):
+  meta['prefs']=json.loads(text(['tailscale','debug','prefs']))
+  meta['tsstatus']=json.loads(text(['tailscale','status','--json']))
+ write(tx/'ip-rules.txt',text(['ip','-4','rule','show']))
+ if shutil.which('iptables-save'):write(tx/'iptables.txt',text(['iptables-save']))
+ atomic(tx/'meta.json',meta);atomic(PENDING,str(tx));atomic(LATEST,str(tx))
+ watchdog(45)
+ unit_file('boot-recover.service','[Unit]\nDescription=Recover interrupted Unified setup\nAfter=network-online.target tailscaled.service\nWants=network-online.target\nConditionPathExists='+str(PENDING)+'\n[Service]\nType=oneshot\nExecStart=/usr/bin/python3 '+str(SELF)+' recover pending\n[Install]\nWantedBy=multi-user.target\n')
+ system('daemon-reload');system('enable',PREFIX+'-boot-recover.service')
+ say('Снимок настроек: '+str(tx)+' (приватные данные).')
+ return tx
+def kill_writer(meta):
+ pid=meta['writer']
+ if pid in (os.getpid(),os.getppid()) or pid_token(pid)!=meta['start'] or P('/proc/sys/kernel/random/boot_id').read_text().strip()!=meta['boot']:return
+ parents={}
+ for p in P('/proc').iterdir():
+  if p.name.isdecimal():
+   try:parents[int(p.name)]=int((p/'stat').read_text().rsplit(')',1)[1].split()[1])
+   except (OSError,IndexError,ValueError):pass
+ victims={pid}
+ while True:
+  more=victims|{p for p,pp in parents.items() if pp in victims}
+  if more==victims:break
+  victims=more
+ if os.getpid() in victims:return
+ for p in victims:
+  try:os.kill(p,signal.SIGKILL)
+  except ProcessLookupError:pass
+def route_stop():
+ for parent,chain in [('PREROUTING','BMU_IN'),('OUTPUT','BMU_OUT'),('OUTPUT','BMU_MSS'),('FORWARD','BMU_MSS')]:
+  while run(['iptables','-w','-t','mangle','-D',parent,'-j',chain],check=False).returncode==0:pass
+ for c in ['BMU_IN','BMU_OUT','BMU_MSS']:
+  if run(['iptables','-w','-t','mangle','-S',c],check=False).returncode==0:
+   run(['iptables','-w','-t','mangle','-F',c]);run(['iptables','-w','-t','mangle','-X',c])
+ while run(['ip','-4','rule','del','pref',PREF,'fwmark',MARK,'lookup','main'],check=False).returncode==0:pass
+def route_start():
+ c=state();wan=c['wan'];rules=text(['ip','-4','rule','show'])
+ for line in rules.splitlines():
+  if line.startswith(PREF+':') and ('fwmark '+MARK+' lookup main') not in line:raise Failure('Конфликт ip rule '+PREF)
+ route_stop()
+ run(['ip','-4','rule','add','pref',PREF,'fwmark',MARK,'lookup','main'])
+ for chain in ['BMU_IN','BMU_OUT']:run(['iptables','-w','-t','mangle','-N',chain])
+ run(['iptables','-w','-t','mangle','-A','BMU_IN','-i',wan,'-m','addrtype','--dst-type','LOCAL','-m','conntrack','--ctdir','ORIGINAL','-j','CONNMARK','--set-xmark',MARK])
+ run(['iptables','-w','-t','mangle','-I','PREROUTING','1','-j','BMU_IN'])
+ run(['iptables','-w','-t','mangle','-A','BMU_OUT','-m','connmark','--mark',MARK,'-j','CONNMARK','--restore-mark','--nfmask','0x80000000','--ctmask','0x80000000'])
+ run(['iptables','-w','-t','mangle','-A','OUTPUT','-j','BMU_OUT'])
+ if c.get('mss')=='diagnostic1140':
+  run(['iptables','-w','-t','mangle','-N','BMU_MSS'])
+  run(['iptables','-w','-t','mangle','-A','BMU_MSS','-o','tailscale0','-p','tcp','--tcp-flags','SYN,RST','SYN','-j','TCPMSS','--set-mss','1140'])
+  for parent in ['OUTPUT','FORWARD']:run(['iptables','-w','-t','mangle','-A',parent,'-j','BMU_MSS'])
+ run(['sysctl','-w','net.ipv4.conf.all.rp_filter=2','net.ipv4.conf.'+wan+'.rp_filter=2'])
+def dns_guard():
+ c=state()
+ if not c:return
+ for kind,val in [('dns',''),('domain',''),('default-route','no')]:run(['resolvectl',kind,c['wan'],val])
+ if run(['ip','link','show','tailscale0'],check=False).returncode==0:run(['resolvectl','revert','tailscale0'])
+def save_meta(tx,meta):atomic(tx/'meta.json',meta)
+def network_dns(tx):
+ m=load(tx/'meta.json');wan=m['wan']
+ if active('NetworkManager') and shutil.which('nmcli'):
+  uuid=text(['nmcli','-g','GENERAL.CON-UUID','device','show',wan])
+  if not uuid or uuid=='--':raise Failure('Не определён UUID NetworkManager.')
+  for key in ['ipv4.ignore-auto-dns','ipv6.ignore-auto-dns','ipv4.dns','ipv6.dns','ipv4.dns-search','ipv6.dns-search']:
+   old=text(['nmcli','-g',key,'connection','show',uuid]);m['nm'].append([uuid,key,old]);save_meta(tx,m)
+   run(['nmcli','connection','modify',uuid,key,'yes' if key.endswith('ignore-auto-dns') else ''])
+ elif active('systemd-networkd'):
+  status=text(['networkctl','status',wan,'--no-pager']);match=re.search(r'Network File:\s*(\S+\.network)',status)
+  if not match:raise Failure('Не найден networkd .network WAN.')
+  path=P('/etc/systemd/network')/(P(match[1]).name+'.d')/'90-bobarev-unified.conf';snapshot_file(tx,path)
+  write(path,'[Network]\nDNS=\nDomains=\n[DHCPv4]\nUseDNS=no\nUseDomains=no\n[DHCPv6]\nUseDNS=no\nUseDomains=no\n[IPv6AcceptRA]\nUseDNS=no\nUseDomains=no\n')
+  run(['networkctl','reload'])
+ elif shutil.which('resolvconf') or shutil.which('dhclient'):raise Failure('dhclient/resolvconf без NM/networkd: нужен отдельный адаптер, изменения отменены.')
+def effective_dns(body,dns):
+ lists={'DNS':[],'FallbackDNS':[],'Domains':[]};scalars={};section=''
+ for l in body.splitlines():
+  l=l.strip()
+  if not l or l.startswith(('#',';')):continue
+  if l.startswith('['):section=l;continue
+  if section!='[Resolve]' or '=' not in l:continue
+  k,v=map(str.strip,l.split('=',1))
+  if k in lists:
+   if v:lists[k]+=v.split()
+   else:lists[k]=[]
+  else:scalars[k]=v
+ if lists!={'DNS':[dns],'FallbackDNS':[],'Domains':['~.']} or scalars.get('DNSOverTLS')!='yes' or scalars.get('DNSStubListener')!='yes':raise Failure('Конфликт сторонних resolved drop-in-файлов.')
+def configure(tx,c):
+ atomic(CFG,c)
+ unit_file('return.service','[Unit]\nDescription=Unified IPv4 ingress return path\nAfter=network-online.target ufw.service\nBefore=tailscaled.service\nWants=network-online.target\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/python3 '+str(SELF)+' route-start\nExecStop=/usr/bin/python3 '+str(SELF)+' route-stop\n[Install]\nWantedBy=multi-user.target\n')
+ system('daemon-reload');system('enable',PREFIX+'-return.service');route_start()
+ run(['apt-get','install','-y','systemd-resolved'],timeout=600)
+ network_dns(tx)
+ write('/etc/systemd/resolved.conf.d/99zz-bobarev-unified.conf','[Resolve]\nDNS=\nDNS='+c['dns']+'\nFallbackDNS=\nDomains=\nDomains=~.\nDNSOverTLS=yes\nDNSStubListener=yes\nCache=yes\n')
+ system('enable','--now','systemd-resolved')
+ p=P('/etc/resolv.conf');p.unlink(missing_ok=True);p.symlink_to('/run/systemd/resolve/stub-resolv.conf')
+ system('restart','systemd-resolved');dns_guard()
+ body=text(['systemd-analyze','cat-config','systemd/resolved.conf']);write(tx/'effective-resolved.txt',body);effective_dns(body,c['dns'])
+ unit_file('dns.service','[Unit]\nDescription=Unified DNS reconcile\nAfter=network-online.target systemd-resolved.service tailscaled.service NetworkManager.service systemd-networkd.service\nWants=network-online.target systemd-resolved.service\n[Service]\nType=oneshot\nExecStart=/usr/bin/python3 '+str(SELF)+' dns-guard\n[Install]\nWantedBy=multi-user.target\n')
+ system('daemon-reload');system('enable',PREFIX+'-dns.service')
+def migrate(tx):
+ # Never execute unknown old shell code: suppress old ExecStop, remove only exact owned chains/rules.
+ m=load(tx/'meta.json');m['legacy_rules']=[];m['legacy_firewall']=[];save_meta(tx,m)
+ for u in OLD_UNITS:
+  if not P('/etc/systemd/system',u).exists():continue
+  drop=P('/run/systemd/system')/(u+'.d')/'unified-migration.conf'
+  write(drop,'[Service]\nExecStop=\n')
+  try:system('daemon-reload');system('disable','--now',u)
+  finally:drop.unlink(missing_ok=True);system('daemon-reload')
+ specs=[]
+ legacy=P('/usr/local/sbin/bobarev-mullvad-return-route.sh')
+ if legacy.exists():
+  body=legacy.read_text();ip=re.search(r'^PUB_IP="([0-9.]+)"$',body,re.M);port=re.search(r'^SSH_P="([0-9]+)"$',body,re.M)
+  if not ip or not port:raise Failure('Старый Gemini helper не распознан. Нужна ручная миграция.')
+  ipaddress.IPv4Address(ip[1]);specs=[['from',ip[1]+'/32','table','main','priority','100']]+[['sport',str(p),'table','main','priority',str(pr)] for p,pr in [(int(port[1]),98),(443,99),(80,101)]]
+ for pref in ['109','1050']:
+  if any(m['services'].get(u,{}).get('active') or P('/etc/systemd/system',u).exists() for u in OLD_UNITS[1:]):specs.append(['pref',pref,'fwmark',MARK,'lookup','main'])
+ for args in specs:
+  while run(['ip','-4','rule','del',*args],check=False).returncode==0:m['legacy_rules'].append(args);save_meta(tx,m)
+ hooks=[('PREROUTING','BM_IN'),('OUTPUT','BM_OUT'),('PREROUTING','BMGE_IN'),('OUTPUT','BMGE_OUT'),('OUTPUT','BMGE_MSS'),('FORWARD','BMGE_MSS')]
+ if any(P('/etc/systemd/system',u).exists() for u in OLD_UNITS[1:]):
+  old_chains=[]
+  for chain in dict.fromkeys(chain for _,chain in hooks):
+   listing=run(['iptables','-w','-t','mangle','-S',chain],check=False)
+   if listing.returncode==0:
+    old_chains.append(chain)
+    m['legacy_firewall'] += [['iptables','-w','-t','mangle',*shlex.split(line)] for line in listing.stdout.splitlines() if line]
+  save_meta(tx,m)
+  for parent,chain in hooks:
+   while run(['iptables','-w','-t','mangle','-D',parent,'-j',chain],check=False).returncode==0:
+    m['legacy_firewall'].append(['iptables','-w','-t','mangle','-A',parent,'-j',chain]);save_meta(tx,m)
+  for chain in old_chains:
+   run(['iptables','-w','-t','mangle','-F',chain]);run(['iptables','-w','-t','mangle','-X',chain])
+
+ if legacy.exists():
+  for table,parent in [('nat','POSTROUTING'),('mangle','OUTPUT'),('mangle','FORWARD'),('mangle','POSTROUTING')]:
+   spec=['-o','tailscale0','-j','MASQUERADE'] if table=='nat' else ['-o','tailscale0','-p','tcp','--tcp-flags','SYN,RST','SYN','-j','TCPMSS','--set-mss','1140']
+   while run(['iptables','-w','-t',table,'-D',parent,*spec],check=False).returncode==0:m['legacy_firewall'].append(['iptables','-w','-t',table,'-A',parent,*spec]);save_meta(tx,m)
+def previous_ts(meta):
+ p=meta.get('prefs')
+ if not p:return
+ node=p.get('ExitNodeIP') or ''
+ if node in ('invalid IP','<nil>'):node=''
+ if not node and p.get('ExitNodeID'):
+  for peer in meta.get('tsstatus',{}).get('Peer',{}).values():
+   if peer.get('ID')==p['ExitNodeID']:node=next((ip for ip in peer.get('TailscaleIPs',[]) if ':' not in ip),'');break
+  if not node:raise Failure('Прежний exit node не найден. Оставлен WAN; восстановите вручную.')
+ boolean=lambda b:str(bool(b)).lower()
+ run(['tailscale','set','--exit-node='+node,'--exit-node-allow-lan-access='+boolean(node and p.get('ExitNodeAllowLANAccess')),'--accept-dns='+boolean(p.get('CorpDNS',True)),'--accept-routes='+boolean(p.get('RouteAll')),'--advertise-exit-node='+boolean(any(x in ('0.0.0.0/0','::/0') for x in p.get('AdvertiseRoutes',[]) or []))])
+def rollback_wan(meta,explicit=None):
+ return meta.get('rollback_policy','previous')=='wan' if explicit is None else bool(explicit)
+def recover(mode='pending',safe_wan=None):
+ root();tx=txpath(mode)
+ if not tx:say('Нет транзакции для восстановления.');return
+ meta=load(tx/'meta.json')
+ if meta.get('status')=='restored':say('Транзакция уже восстановлена.');return
+ with lock('state.lock'):
+  meta=load(tx/'meta.json')
+  if meta.get('status')=='restored':return
+  if mode=='pending' and (load(PENDING)!=str(tx) or meta.get('status')!='pending'):return
+  kill_writer(meta)
+  safe_wan=rollback_wan(meta,safe_wan)
+  errors=[]
+  def attempt(f):
+   try:f()
+   except Exception as e:errors.append(str(e))
+  if shutil.which('tailscale'):attempt(lambda:run(['tailscale','set','--exit-node=','--exit-node-allow-lan-access=false','--accept-dns=false']))
+  for u in [PREFIX+'-return.service',PREFIX+'-dns.service']:system('disable','--now',u,check=False)
+  if shutil.which('iptables'):attempt(route_stop)
+  for u,st in meta['services'].items():
+   if st['enabled'] not in ('enabled','enabled-runtime'):system('disable',u,check=False)
+  attempt(lambda:restore_files(tx));attempt(lambda:system('daemon-reload'))
+  for k,v in meta['sysctls'].items():attempt(lambda k=k,v=v:run(['sysctl','-w',k+'='+v]))
+  for uuid,k,v in meta.get('nm',[]):attempt(lambda uuid=uuid,k=k,v=v:run(['nmcli','connection','modify',uuid,k,v]))
+  if active('systemd-networkd'):attempt(lambda:run(['networkctl','reload']))
+  if meta.get('ufw_changed'):attempt(lambda:run(['ufw','reload']))
+  for rule in meta.get('legacy_rules',[]):attempt(lambda rule=rule:run(['ip','-4','rule','add',*rule]))
+  for rule in meta.get('legacy_firewall',[]):
+   if '-N' in rule:
+    idx=rule.index('-N');query=rule[:idx]+['-S',rule[idx+1]]
+    if run(query,check=False).returncode==0:continue
+   if '-A' in rule:
+    query=list(rule);query[query.index('-A')]='-C'
+    if run(query,check=False).returncode==0:continue
+   attempt(lambda rule=rule:run(rule))
+  for u,st in meta['services'].items():
+   if st['enabled'] in ('enabled','enabled-runtime'):attempt(lambda u=u:system('enable',u))
+   elif st['enabled']=='disabled':system('disable',u,check=False)
+   if st['active']:attempt(lambda u=u:system('restart',u))
+   else:system('stop',u,check=False)
+  if shutil.which('resolvectl'):
+   for k,values in meta['link'].items():attempt(lambda k=k,values=values:run(['resolvectl',k,meta['wan'],*(values or [''])]))
+  if not safe_wan and shutil.which('tailscale'):attempt(lambda:previous_ts(meta))
+  if errors:
+   atomic(tx/'recovery-errors.json',errors);raise Failure('Откат неполный: '+ '; '.join(errors))
+  meta['status']='restored';save_meta(tx,meta)
+  if load(PENDING)==str(tx):PENDING.unlink(missing_ok=True)
+  system('stop',PREFIX+'-rollback.timer',check=False);say('Восстановлено: '+str(tx)+('. Принудительно оставлен WAN.' if safe_wan else ''))
+def dependencies(tx):
+ run(['apt-get','update'],timeout=600)
+ run(['apt-get','install','-y','curl','ca-certificates','openssl','iptables','iproute2','git','wget','tar','unzip','apache2-utils','util-linux'],timeout=900)
+ if not shutil.which('tailscale'):
+  path=tx/'tailscale-install.sh';run(['curl','-q','--proto','=https','-fSL','--connect-timeout','10','--max-time','120','https://tailscale.com/install.sh','-o',path],timeout=150)
+  run(['sh','-n',path]);run(['sh',path],timeout=600)
+ system('enable','--now','tailscaled')
+ if json.loads(text(['tailscale','status','--json'])).get('BackendState')!='Running':
+  say('Авторизуйте Tailscale по ссылке (вывод ниже).')
+  live(['tailscale','up','--accept-dns=false','--accept-routes=false'],timeout=300)
+ if json.loads(text(['tailscale','status','--json'])).get('BackendState')!='Running':raise Failure('Tailscale не подключён.')
+ run(['tailscale','set','--exit-node=','--exit-node-allow-lan-access=false','--accept-dns=false'])
+def curl(url,extra=(),check=True):return run(['curl','-q','--noproxy','*','-4','-fsS','--connect-timeout','5','--max-time','15',*extra,url],check=check,timeout=20)
+def external_ip():
+ for url in ['https://api.ipify.org','https://ifconfig.me/ip','https://icanhazip.com']:
+  try:
+   val=curl(url).stdout.strip()
+   if ipaddress.ip_address(val).version==4:return val
+  except (Failure,ValueError,subprocess.TimeoutExpired):pass
+ raise Failure('Не удалось определить внешний IPv4 по трём сервисам.')
+def tests_exit(tx,c,direct):
+ for _ in range(20):
+  if re.search(r'^default dev tailscale0',text(['ip','-4','route','show','table','52']),re.M):break
+  time.sleep(1)
+ else:raise Failure('Нет default в table 52.')
+ j=json.loads(text(['tailscale','status','--json']))
+ if not any(p.get('ExitNode') for p in j.get('Peer',{}).values()) and not j.get('ExitNodeStatus'):raise Failure('Exit node не подтверждён Tailscale.')
+ addr,host=validate_dns(c['dns'])
+ r=run(['openssl','s_client','-connect',addr+':853','-servername',host,'-verify_hostname',host,'-verify_return_error','-CApath','/etc/ssl/certs'],data='',timeout=15);write(tx/'dot-tls.txt',r.stdout+r.stderr)
+ run(['resolvectl','flush-caches'])
+ for domain in ['www.google.com','github.com']:run(['resolvectl','query',domain],timeout=20)
+ if not any(curl(u,extra=['-I'],check=False).returncode==0 for u in ['https://www.google.com','https://www.debian.org']):raise Failure('HTTPS-проверки не прошли.')
+ out=external_ip()
+ if out==direct:raise Failure('Внешний IPv4 не изменился: выход не подтверждён.')
+ say('Прямой WAN: '+direct+'; через exit node: '+out)
+ return out
+CADDY_TEMPLATE='''{
     order forward_proxy before file_server
     email EMAIL
     servers {
@@ -7207,8 +6961,8 @@ text='''{
     }
 }
 DOMAIN {
-    @naive_proxy method CONNECT
-    route @naive_proxy {
+    @proxy method CONNECT
+    route @proxy {
         request_header Authorization "{http.request.header.Proxy-Authorization}"
         basic_auth bcrypt {
 AUTH
@@ -7222,176 +6976,170 @@ AUTH
     root * /var/www/html
     file_server
     handle_errors {
-        @auth_error expression {http.error.status_code} == 401
-        handle @auth_error {
+        @auth expression {http.error.status_code} == 401
+        handle @auth {
             header -WWW-Authenticate
             respond "Not Found" 404
         }
     }
 }
-'''.replace('EMAIL',sys.argv[2]).replace('DOMAIN',sys.argv[1]).replace('AUTH','\n'.join(rows))
-p=Path('/etc/caddy/Caddyfile');p.write_text(text);p.chmod(0o600)
-PY_CADDY
- /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
- cat > /etc/systemd/system/caddy.service <<'UNIT_CADDY'
-[Unit]
-Description=NaiveProxy Caddy — Google Gemini Edition
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=notify
-User=root
-ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
-ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=1048576
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=full
-[Install]
-WantedBy=multi-user.target
-UNIT_CADDY
- printf 'CASCADE_ROLE=%q\nNAIVE_DOMAIN=%q\nNAIVE_EMAIL=%q\nNAIVE_OUT_MODE=%q\n' standalone_naive "$domain" "$email" mullvad_ts > /etc/default/bobarev-cascade
- systemctl daemon-reload;systemctl enable caddy.service;systemctl restart caddy.service
- local n verified=0
- for n in {1..30};do
-  if curl -q --noproxy '*' --resolve "$domain:443:127.0.0.1" -fsSI --connect-timeout 3 --max-time 5 "https://$domain" > "$TX/local-caddy-check.txt" 2>&1;then verified=1;break;fi
-  sleep 3
- done
- [[ $verified == 1 ]] || die 'Caddy/сертификат не прошёл локальную TLS-проверку; journalctl -u caddy.'
- python3 - "$domain" "$user" "$pass" "$BASE/client-links.txt" <<'PY_LINKS'
-import base64,pathlib,sys,urllib.parse
-host,u,p,dest=sys.argv[1:];b=base64.b64encode(f'{u}:{p}@{host}:443'.encode()).decode()
-text=f'http2://{b}?obfs=none#{host}-{u}\nhttps://{urllib.parse.quote(u,safe="")}:{urllib.parse.quote(p,safe="")}@{host}:443?padding=true\n'
-f=pathlib.Path(dest);f.write_text(text);f.chmod(0o600)
-PY_LINKS
- log "Ссылки с паролем: $BASE/client-links.txt (root-only)."
+'''
+def setup_caddy(tx):
+ domain=input('Домен NaiveProxy (A-запись на VPS): ').strip();email=input('Email ACME: ').strip();user=input('Имя нового пользователя: ').strip()
+ if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{1,250}[A-Za-z0-9]',domain) or '.' not in domain or not re.fullmatch(r'[A-Za-z0-9_.+%-]+@[A-Za-z0-9.-]+',email) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',user):raise Failure('Неверные домен/email/пользователь.')
+ for port in ['80','443']:
+  occupied=text(['ss','-H','-lntup','sport = :'+port])
+  if any('"caddy"' not in l for l in occupied.splitlines()):raise Failure('Порт '+port+' занят сторонним процессом.')
+ if shutil.which('ufw') and 'Status: active' in text(['ufw','status']):
+  m=load(tx/'meta.json');m['ufw_changed']=True;save_meta(tx,m)
+  for port in ['80/tcp','443/tcp']:run(['ufw','allow',port,'comment','Bobarev Unified'])
+ say('Firewall провайдера тоже должен пропускать 80/tcp и 443/tcp.')
+ run(['getent','ahostsv4',domain]);run(['bash',LIB/'main.sh','--unified-build-only'],timeout=1800)
+ secret=os.urandom(16).hex();hashed=text(['htpasswd','-niBC','12',user],data=secret+'\n').split(':',1)[1]
+ users=P('/etc/naiveproxy/users.conf');passwords=P('/etc/naiveproxy/users.pass')
+ rows={}
+ if users.exists():
+  for line in users.read_text().splitlines():
+   u,h=line.split(':',1)
+   if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',u) or not re.fullmatch(r'\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}',h):raise Failure('Некорректная старая запись пользователя.')
+   rows[u]=h
+ rows[user]=hashed;write(users,''.join(u+':'+h+'\n' for u,h in rows.items()))
+ old=passwords.read_text().splitlines() if passwords.exists() else [];write(passwords,'\n'.join(l for l in old if not l.startswith(user+':'))+'\n'+user+':'+secret+'\n')
+ cfg=CADDY_TEMPLATE.replace('EMAIL',email).replace('DOMAIN',domain).replace('AUTH','\n'.join('            '+u+' '+h for u,h in rows.items()))
+ write('/etc/caddy/Caddyfile',cfg);P('/var/www/html').mkdir(parents=True,exist_ok=True)
+ run(['/usr/local/bin/caddy','validate','--config','/etc/caddy/Caddyfile','--adapter','caddyfile'])
+ write('/etc/systemd/system/caddy.service','[Unit]\nDescription=NaiveProxy Unified Recovery Edition\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=notify\nUser=root\nExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile\nExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=1048576\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=full\n[Install]\nWantedBy=multi-user.target\n')
+ write('/etc/default/bobarev-cascade','CASCADE_ROLE=standalone_naive\nNAIVE_DOMAIN='+shlex.quote(domain)+'\nNAIVE_EMAIL='+shlex.quote(email)+'\nNAIVE_OUT_MODE=mullvad_ts\n')
+ system('daemon-reload');system('enable','caddy');system('restart','caddy')
+ for _ in range(30):
+  if curl('https://'+domain,extra=['-I','--resolve',domain+':443:127.0.0.1'],check=False).returncode==0:break
+  time.sleep(3)
+ else:raise Failure('Caddy/ACME не прошёл локальную TLS-проверку.')
+ token=base64.b64encode((user+':'+secret+'@'+domain+':443').encode()).decode()
+ write(BASE/'client-links.txt','http2://'+token+'?obfs=none#'+domain+'-'+user+'\nhttps://'+user+':'+secret+'@'+domain+':443?padding=true\n')
+ say('Ссылки с паролем: '+str(BASE/'client-links.txt')+' (root-only).')
+def apply(kind='exit',mss='auto'):
+ with lock('wizard.lock',True):
+  wan=preflight();tx=None
+  if kind=='mss':
+   c=state()
+   if not c or mss not in ('auto','diagnostic1140'):raise Failure('Сначала настройте выход; MSS auto/diagnostic1140.')
+   c['mss']=mss
+  else:
+   dns=input('DoT IPv4#TLS-имя [9.9.9.9#dns.quad9.net]: ').strip() or '9.9.9.9#dns.quad9.net';validate_dns(dns)
+   node=input('Exit node IP/имя (Enter — список после установки): ').strip()
+   if node and not re.fullmatch(r'[A-Za-z0-9_.:-]+',node):raise Failure('Некорректный узел.')
+   c={'wan':wan,'dns':dns,'node':node,'mss':'auto'}
+  say('Нужны снимок VPS и консоль провайдера. Это НЕ kill switch. Откат можно выполнить к прежнему состоянию или в безопасный WAN.')
+  policy=input('Автооткат previous (как было) или wan (прямой выход) [previous]: ').strip() or 'previous'
+  if policy not in ('previous','wan'):raise Failure('Политика отката previous или wan.')
+  if input('Введите APPLY: ').strip()!='APPLY':return
+  try:
+   tx=begin(wan,policy)
+   if kind!='mss':
+    if shutil.which('tailscale'):run(['tailscale','set','--exit-node=','--exit-node-allow-lan-access=false','--accept-dns=false'])
+    migrate(tx);dependencies(tx)
+    if not c['node']:
+     say(text(['tailscale','exit-node','list']));c['node']=input('IP/имя выбранного exit node: ').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.:-]+',c['node']):raise Failure('Неверный узел.')
+    direct=external_ip()
+    if kind=='full':setup_caddy(tx)
+    if load(tx/'meta.json')['status']!='pending' or load(PENDING)!=str(tx):raise Failure('Транзакция прервана.')
+    watchdog(5);configure(tx,c)
+    run(['tailscale','set','--advertise-exit-node=false','--accept-dns=false','--exit-node='+c['node'],'--exit-node-allow-lan-access=true'])
+    c['direct_ip']=direct;c['out_ip']=tests_exit(tx,c,direct);atomic(CFG,c)
+   else:
+    watchdog(5);atomic(CFG,c);route_start()
+    run(['resolvectl','query','www.google.com'],timeout=20)
+    curl('https://www.google.com',extra=['-I'])
+   say('Откройте НОВЫЙ SSH и проверьте NaiveProxy/внешний IP клиентом. Введите KEEP за 120 секунд.')
+   # No thread can outlive this deadline. poll terminal input instead of global socket settings.
+   import select
+   if not select.select([sys.stdin],[],[],120)[0] or sys.stdin.readline().strip()!='KEEP':raise Failure('Нет подтверждения.')
+   with lock('state.lock'):
+    if load(PENDING)!=str(tx) or load(tx/'meta.json')['status']!='pending':raise Failure('Транзакция уже восстановлена.')
+    system('restart',PREFIX+'-return.service');system('restart',PREFIX+'-dns.service')
+    system('stop',PREFIX+'-rollback.timer');m=load(tx/'meta.json');m['status']='committed';save_meta(tx,m);PENDING.unlink()
+   say('Применено. Теперь обязателен reboot-тест.')
+  except BaseException:
+   if tx is None:
+    candidate=txpath('pending')
+    if candidate and load(candidate/'meta.json').get('writer')==os.getpid():tx=candidate
+   if tx and load(PENDING)==str(tx):
+    try:recover('pending')
+    except Exception as e:say('Откат неполный: '+str(e))
+   raise
+def diag():
+ for cmd in [['ip','-4','rule'],['ip','-4','route','show','table','52'],['resolvectl','status'],['tailscale','debug','prefs']]:
+  r=run(cmd,check=False);say(shlex.join(cmd)+'\n'+r.stdout+r.stderr)
+ try:say('Внешний IPv4: '+external_ip())
+ except Exception as e:say(e)
+def main():
+ root();os.umask(0o077)
+ def interrupted(signum,frame):raise KeyboardInterrupt('signal '+str(signum))
+ for sig in (signal.SIGTERM,signal.SIGHUP,signal.SIGINT):signal.signal(sig,interrupted)
+ cmd=sys.argv[1] if len(sys.argv)>1 else 'diag'
+ if cmd in ('full','exit'):apply(cmd)
+ elif cmd=='mss':apply('mss',sys.argv[2] if len(sys.argv)>2 else 'auto')
+ elif cmd=='recover':recover(sys.argv[2] if len(sys.argv)>2 else 'pending',True if '--wan' in sys.argv[3:] else False if '--previous' in sys.argv[3:] else None)
+ elif cmd=='route-start':route_start()
+ elif cmd=='route-stop':route_stop()
+ elif cmd=='dns-guard':dns_guard()
+ elif cmd=='direct':run(['tailscale','set','--exit-node=','--exit-node-allow-lan-access=false']);say('Прямой WAN; DNS сохранён.')
+ elif cmd=='links':print((BASE/'client-links.txt').read_text())
+ elif cmd=='diag':diag()
+ else:raise Failure('Команды: full exit mss auto|diagnostic1140 recover pending|latest [--wan] direct diag links')
+if __name__=='__main__':
+ try:main()
+ except (Exception,KeyboardInterrupt) as e:say('ОШИБКА: '+str(e));sys.exit(1)
+UNIFIED_CONTROLLER_3120
+ python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$lib/controller.py.new" || return 1
+ chmod 700 "$lib/controller.py.new" || return 1
+ mv -f "$lib/controller.py.new" "$lib/controller.py" || return 1
+ if [[ "$source_path" != "$lib/main.sh" ]];then install -m 700 "$source_path" "$lib/main.sh" || return 1;fi
 }
-apply(){
- local kind=${1:-exit} answer
- preflight
- [[ -t 0 ]] || die 'Нужен интерактивный терминал.'
- log 'Публичный Mullvad DNS объявлен к отключению 02.11.2026; по умолчанию Quad9 DoT.'
- read -r -p 'DoT IPv4#TLS-hostname [9.9.9.9#dns.quad9.net]: ' DNS
- DNS=${DNS:-9.9.9.9#dns.quad9.net};validate_dns "$DNS"
- read -r -p 'IP/имя exit node (Enter — показать список после установки): ' NODE
- [[ -z $NODE || $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
- log 'Новые исходящие соединения VPS пойдут через exit node; это НЕ VPN kill switch.'
- log 'Откат восстанавливает прежние настройки, включая прежний exit node, если он был.'
- read -r -p 'Создать резервную копию и продолжить? Введите APPLY: ' answer
- [[ $answer == APPLY ]] || return 0
- transaction
- export GEMINI_APPLY=1
- if command -v tailscale >/dev/null;then tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false;fi
- migrate_legacy
- install_dependencies
- if [[ -z $NODE ]];then tailscale exit-node list;read -r -p 'Выберите IP/имя exit node из списка: ' NODE;fi
- [[ $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
- DIRECT_IP=$(probe_ip) || die 'Не определён прямой WAN IPv4; исходный интернет не подтверждён.'
- log "Прямой WAN IPv4: $DIRECT_IP"
- if [[ $kind == full ]];then setup_caddy;fi
- [[ -f "$PENDING" && $(cat "$PENDING") == "$TX" && ! -f "$TX/restored" ]] || die 'Транзакция была прервана во время подготовки.'
- renew_watchdog
- configure_route
- configure_dns
- test_dot
- timeout 15 resolvectl query www.google.com
- tailscale set --advertise-exit-node=false --accept-dns=false --exit-node="$NODE" --exit-node-allow-lan-access=true
- check_exit
- printf 'DIRECT_IP=%q\nOUT_IP=%q\n' "$DIRECT_IP" "$OUT_IP" >> "$CFG"
- commit
-}
-diag(){
- log 'Диагностика без изменения сети:'
- ip -4 rule show;ip -4 route show table main;ip -4 route show table 52 || true
- command -v tailscale >/dev/null && tailscale debug prefs | grep -E 'ExitNode|CorpDNS|RouteAll' || true
- command -v resolvectl >/dev/null && resolvectl status || true
- for s in bobarev-gemini-return bobarev-gemini-dns bobarev-gemini-rollback.timer caddy;do systemctl status "$s" --no-pager -l || true;done
- if [[ -f "$CFG" ]];then source "$CFG";log "WAN=$WAN NODE=$NODE DNS=$DNS";fi
- if command -v resolvectl >/dev/null;then timeout 15 resolvectl query www.google.com || true;fi
- if value=$(probe_ip);then log "Текущий IPv4: $value";else log 'Проверка внешнего IP не прошла.';fi
-}
-mss_change(){
- root;[[ -f "$CFG" ]] || die 'Сначала настройте exit node.'
- [[ ${1:-} == auto || ${1:-} == diagnostic1140 ]] || die 'Профиль auto или diagnostic1140.'
- local profile=$1 confirm
- preflight
- read -r -p 'Диагностический MSS-профиль. APPLY для применения с откатом: ' confirm
- [[ $confirm == APPLY ]] || return 0
- source "$CFG"
- transaction
- export GEMINI_APPLY=1
- sed -i '/^MSS_PROFILE=/d' "$CFG"
- printf 'MSS_PROFILE=%q\n' "$profile" >> "$CFG"
- source "$CFG"
- renew_watchdog
- route_start
- smoke
- commit
-}
-case ${1:-help} in
- --library) :;;
- full|exit) root;mkdir -p "$BASE";exec 9>"$BASE/wizard.lock";flock -n 9 || die 'Мастер уже работает.';apply "$1";;
- recover) trap - ERR;set +e;recover "${2:-pending}";;
- route-start) route_start;;
- route-stop) route_stop;;
- dns-guard) root;dns_guard;;
- diag) diag;;
- direct) root;tailscale set --exit-node= --exit-node-allow-lan-access=false;log 'Exit node отключён; DNS и обратный путь сохранены.';;
- mss) root;mkdir -p "$BASE";exec 9>"$BASE/wizard.lock";flock -n 9 || die 'Мастер уже работает.';mss_change "${2:-auto}";;
- links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
- *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
-esac
-GEMINI_ENGINE_3116
- bash -n "$lib/mullvad.sh.new" || return 1
- chmod 700 "$lib/mullvad.sh.new" || return 1
- mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
- {
-  printf 'GO_VERSION_PIN=%q\n' "$GO_VERSION_PIN"
-  printf 'GO_SHA256_AMD64=%q\n' "$GO_SHA256_AMD64"
-  printf 'GO_SHA256_ARM64=%q\n' "$GO_SHA256_ARM64"
-  printf 'CADDY_VERSION_PIN=%q\n' "$CADDY_VERSION_PIN"
-  printf 'XCADDY_VERSION_PIN=%q\n' "$XCADDY_VERSION_PIN"
-  printf 'FORWARDPROXY_REF_PIN=%q\n' "$FORWARDPROXY_REF_PIN"
- } > "$lib/build-pins.conf"
- chmod 600 "$lib/build-pins.conf"
-}
-# Old function retained as a compatibility message, never a silent DNS rewrite.
 ensure_mullvad_return_route_and_dot_dns() {
- echo 'Используйте мастер пункта 24: изменения применяются только транзакцией с откатом.'
+ echo 'Используйте транзакционный мастер пункта 24; отдельная скрытая перенастройка DNS отключена.'
  return 1
 }
 manage_naive_mullvad_menu() {
- local pick='' profile=''
- local ctl=/usr/local/lib/bobarev-gemini/mullvad.sh
- gemini_install_mullvad_runtime || return 1
+ local choice='' profile='' mode=''
+ local ctl=/usr/local/lib/bobarev-unified/controller.py
+ unified_install_runtime || return 1
  while true;do
-  smart_menu 'Google Gemini Edition — NaiveProxy / Mullvad' \
-   'VPS IPv4. Мастер с резервной копией, conntrack return-path, строгим DoT и откатом. Перед стартом нужны консоль хостинга, A-запись и открытые 80/443. LAN и глобальный IPv6 требуют отдельной схемы.' \
-   24 "$WT_WIDTH" 10 pick \
-   1 'Мастер под ключ: Tailscale + NaiveProxy + DNS + exit node' \
+  smart_menu 'BOBAREV — Unified Recovery Edition' \
+   'Пункт 24: NaiveProxy / Tailscale Mullvad. IPv4 VPS, снимок настроек, строгий DoT, conntrack return-path, независимый откат. LAN/глобальный IPv6 не перенастраиваются.' \
+   25 "$WT_WIDTH" 10 choice \
+   1 'Полный мастер: Tailscale + NaiveProxy + DNS + exit node' \
    2 'Список доступных exit nodes' \
-   3 'Подключить / сменить exit node и DNS (без сборки Caddy)' \
+   3 'Подключить / сменить exit node и DNS без пересборки Caddy' \
    4 'Прямой WAN (сохранить DNS и return-path)' \
-   5 'Восстановить последнюю транзакцию / отменить незавершённую' \
-   6 'Пользователи NaiveProxy / ссылки' \
-   7 'Диагностика и проверка после перезагрузки' \
-   8 'Диагностический MSS: auto / 1140 (с откатом)' \
+   5 'Откат: прежнее состояние ИЛИ безопасный WAN' \
+   6 'Пользователи NaiveProxy / ссылки нового мастера' \
+   7 'Диагностика / контроль после reboot' \
+   8 'MSS-профиль: auto / diagnostic1140 (транзакционно)' \
+   9 'Обычное меню Tailscale (авторизация и настройки)' \
    0 'Назад' || return 0
-  case "$pick" in
+  case "$choice" in
    0) return 0;;
-   1) bash "$ctl" full || echo 'Мастер завершился без подтверждённого успеха; проверьте сообщения и откат.';pause_enter;;
-   2) if command -v tailscale >/dev/null;then tailscale exit-node list || true;else echo 'Tailscale ещё не установлен: пункт 1.';fi;pause_enter;;
-   3) bash "$ctl" exit || echo 'Изменения не подтверждены; проверьте откат.';pause_enter;;
-   4) if nm_yes 'Отключить exit node? DNS и обратный путь будут сохранены.';then bash "$ctl" direct || echo 'Не удалось отключить exit node.';fi;pause_enter;;
-   5) if nm_yes 'Восстановить сохранённые файлы и прежний exit node? Поздние ручные изменения могут быть заменены.';then
-       if [[ -f /var/lib/bobarev-gemini-mullvad/pending ]];then bash "$ctl" recover pending || echo 'Откат неполный!';else bash "$ctl" recover latest || echo 'Откат неполный!';fi
+   1) python3 "$ctl" full || echo 'Установка не подтверждена. Проверьте сообщения об откате.';pause_enter;;
+   2) if command -v tailscale >/dev/null;then tailscale exit-node list || true;else echo 'Tailscale не установлен: используйте пункт 1.';fi;pause_enter;;
+   3) python3 "$ctl" exit || echo 'Изменения не подтверждены. Проверьте откат.';pause_enter;;
+   4) if nm_yes 'Отключить exit node? DNS сохранится.';then python3 "$ctl" direct || echo 'Ошибка отключения.';fi;pause_enter;;
+   5) mode=''
+      smart_menu 'Режим восстановления' 'Прежнее состояние может включать неработающий exit node. WAN восстанавливает файлы, но не включает прежний exit node/DNS Tailscale.' 16 "$WT_WIDTH" 3 mode \
+       previous 'Вернуть прежние файлы и Tailscale-настройки' wan 'Восстановить файлы, оставить прямой WAN' cancel 'Отмена' || continue
+      [[ "$mode" != cancel ]] || continue
+      if nm_yes 'Восстановить последнюю транзакцию? Поздние ручные правки могут быть заменены.';then
+       local target=latest;[[ ! -f /var/lib/bobarev-unified/pending ]] || target=pending
+       if [[ "$mode" == wan ]];then python3 "$ctl" recover "$target" --wan || echo 'Откат неполный!';else python3 "$ctl" recover "$target" --previous || echo 'Откат неполный!';fi
       fi;pause_enter;;
-   6) manage_naive_users_menu; if nm_yes 'Показать сохранённые мастером ссылки (содержат пароль)?';then bash "$ctl" links || true;fi;pause_enter;;
-   7) bash "$ctl" diag || true;pause_enter;;
-   8) MODULE_CANCELED=false;prompt_default 'Профиль: auto (без принудительного MSS) или diagnostic1140' auto profile
-      if [[ "$MODULE_CANCELED" == false ]];then bash "$ctl" mss "$profile" || echo 'Профиль не применён.';fi;pause_enter;;
+   6) manage_naive_users_menu
+      if nm_yes 'Показать сохранённые новым мастером ссылки (содержат пароль)?';then python3 "$ctl" links || true;fi;pause_enter;;
+   7) python3 "$ctl" diag || true;pause_enter;;
+   8) MODULE_CANCELED=false;prompt_default 'auto (без принудительного MSS) или diagnostic1140' auto profile
+      if [[ "$MODULE_CANCELED" == false ]];then python3 "$ctl" mss "$profile" || echo 'Профиль не применён.';fi;pause_enter;;
+   9) mod_tailscale;;
   esac
  done
 }
@@ -9211,10 +8959,15 @@ NM_EXIT_SCRIPT
 # ------------------------------------------------------------------------------
 if [ "${1:-}" != "" ]; then
     case "${1:-}" in
-        --gemini-mullvad)
-            gemini_install_mullvad_runtime
+        --unified-build-only)
+            ensure_go_and_build_caddy_naive
+            "$CADDY_BIN" list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null
+            exit 0
+            ;;
+        --unified-mullvad)
+            unified_install_runtime
             shift
-            bash /usr/local/lib/bobarev-gemini/mullvad.sh "$@"
+            python3 /usr/local/lib/bobarev-unified/controller.py "$@"
             exit $?
             ;;
         --audit|-a)
@@ -9240,7 +8993,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.11.6 (Google Gemini Edition — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.12.0 (Unified Recovery Edition — Google Gemini lineage)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

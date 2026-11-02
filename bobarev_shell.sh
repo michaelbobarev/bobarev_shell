@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.13.8 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.13.9 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -965,8 +965,8 @@ print_naive_shadowrocket_links() {
     done < "$NAIVE_PASS_FILE"
 
     echo -e "\n${C_BLUE} Почему основная ссылка http2:// работает быстрее и стабильнее чем https://:${C_RESET}"
-    echo -e "   Схема ${C_BOLD}http2://${C_RESET} жестко фиксирует протокол ${C_GREEN}HTTP/2${C_RESET} в самой ссылке — тумблер в Shadowrocket никогда не выключается сам!"
-    echo -e "   Все видеопотоки YouTube и Apple Music идут внутри одного постоянного мультиплексированного TLS-соединения без пауз."
+    echo -e "   Схема ${C_BOLD}http2://${C_RESET} выбирает HTTP/2 в ссылке. Фактический протокол и стабильность зависят от клиента, сети и сайта."
+    echo -e "   HTTP/2 может мультиплексировать несколько запросов в одном TLS-соединении, но не гарантирует отсутствие пауз или лучшую скорость."
 }
 
 write_bobarev_cascade_ru_script() {
@@ -6608,9 +6608,9 @@ install_bobarev_mullvad_runtime() {
   return 0
  fi
  install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3138'
+ cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3139'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.13.8
+# BOBAREV SHELL 3.13.9
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7103,6 +7103,7 @@ UNIT_RETURN
  route_start
 }
 test_dot(){
+ [[ "$DNS" != *#* ]] && return 0
  local ip=${DNS%%#*} host=${DNS#*#}
  timeout 12 openssl s_client -connect "$ip:853" -servername "$host" -verify_hostname "$host" -verify_return_error -CApath /etc/ssl/certs </dev/null > "$TX/dot-tls.txt" 2>&1
 }
@@ -7180,6 +7181,13 @@ build_caddy(){
   export PATH="$temp/toolchain/go/bin:$PATH"
  fi
  export GOPATH=/root/go GOCACHE=/root/.cache/go-build GOTMPDIR=$temp TMPDIR=$temp
+ local caddy_cache="$BASE/caddy/caddy"
+ if [[ ! -x /usr/local/bin/caddy ]] || ! /usr/local/bin/caddy list-modules 2>/dev/null | grep -F 'http.handlers.forward_proxy' >/dev/null;then
+  if [[ -x "$caddy_cache" ]] && "$caddy_cache" list-modules 2>/dev/null | grep -F 'http.handlers.forward_proxy' >/dev/null;then
+   install -m 755 "$caddy_cache" /usr/local/bin/caddy
+   log 'Восстановлен ранее собранный Caddy из локального кэша — сборка не требуется.'
+  fi
+ fi
  if [[ ! -x /usr/local/bin/caddy ]] || ! /usr/local/bin/caddy list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null;then
   log 'Сборка Caddy с NaiveProxy: это может занять несколько минут.'
   if ! go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" >"$TX/caddy-build.log" 2>&1;then
@@ -7192,7 +7200,9 @@ build_caddy(){
   fi
   "$temp/caddy" list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null
   install -m 755 "$temp/caddy" /usr/local/bin/caddy
-  log 'Caddy собран успешно.'
+  mkdir -p "$(dirname "$caddy_cache")"
+  install -m 755 "$temp/caddy" "$caddy_cache"
+  log 'Caddy собран успешно и сохранён в локальный кэш.'
  fi
  unset GOTMPDIR TMPDIR
  rm -rf "$temp"
@@ -7401,7 +7411,7 @@ case ${1:-help} in
  links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
  *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
 esac
-BOBAREV_ENGINE_3138
+BOBAREV_ENGINE_3139
  bash -n "$lib/mullvad.sh.new" || return 1
  chmod 700 "$lib/mullvad.sh.new" || return 1
  mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
@@ -9298,7 +9308,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.13.8 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.13.9 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

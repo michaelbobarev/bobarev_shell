@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.1 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.2 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6608,9 +6608,9 @@ install_bobarev_mullvad_runtime() {
   return 0
  fi
  install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3141'
+ cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3142'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.1
+# BOBAREV SHELL 3.14.2
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7047,10 +7047,10 @@ DNSOverTLS=$dot_mode
 DNSStubListener=yes
 Cache=yes
 EOF_DNS
- chmod 755 /etc/systemd/resolved.conf.d
- chmod 644 /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf
  systemctl enable --now systemd-resolved
  ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+ chmod 755 /etc/systemd/resolved.conf.d
+ chmod 644 /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf
  if ! systemctl restart systemd-resolved;then
   journalctl -u systemd-resolved --since "5 minutes ago" --no-pager > "$TX/resolved-failure.log" 2>&1 || true
   echo 'Не удалось перезапустить systemd-resolved. Последние строки журнала:' >&2
@@ -7139,7 +7139,30 @@ smoke(){
 check_exit(){
  local n
  for n in {1..20};do if ip -4 route show table 52 | grep -q '^default dev tailscale0';then break;fi;sleep 1;done
- ip -4 route show table 52 | grep -q '^default dev tailscale0' || die 'Нет default в table 52.'
+ if ! ip -4 route show table 52 | grep -q '^default dev tailscale0';then
+  echo 'Маршрут exit node не появился за 20 секунд. Повторяю применение exit node.' >&2
+  tailscale set --advertise-exit-node=false --accept-dns=false --exit-node="$NODE" --exit-node-allow-lan-access=true || true
+  for n in {1..20};do if ip -4 route show table 52 | grep -q '^default dev tailscale0';then break;fi;sleep 1;done
+ fi
+ if ! ip -4 route show table 52 | grep -q '^default dev tailscale0';then
+  {
+   echo '=== ip -4 route show table 52 ==='
+   ip -4 route show table 52
+   echo '=== ip -4 rule ==='
+   ip -4 rule
+   echo '=== tailscale status ==='
+   tailscale status 2>&1 || true
+   echo '=== tailscale status --json (exit node part) ==='
+   tailscale status --json 2>/dev/null | python3 -c 'import json,sys;j=json.load(sys.stdin);print(json.dumps({"ExitNodeStatus":j.get("ExitNodeStatus"),"Peer":{k:{kk:vv for kk,vv in v.items() if kk in ("HostName","Online","ExitNode","ExitNodeOption","AdvertisedExitNode")}} for k,v in j.get("Peer",{}).items()},indent=2))' || true
+   echo '=== journalctl -u tailscaled ==='
+   journalctl -u tailscaled --since "10 minutes ago" --no-pager 2>&1 | tail -n 60 || true
+  } > "$TX/exit-node-failure.log" 2>&1 || true
+  echo 'Exit node не подтвердился. Диагностика сохранена и показана ниже.' >&2
+  tail -n 80 "$TX/exit-node-failure.log" >&2
+  echo "Полный лог: $TX/exit-node-failure.log" >&2
+  echo 'Проверьте в tailscale status, что узел '"$NODE"' Online=true и ExitNode=true (advertise).' >&2
+  die 'Exit node недоступен или не объявлен; установка остановлена до smoke-проверок.'
+ fi
  tailscale status --json > "$TX/after-status.json"
  python3 - "$TX/after-status.json" <<'PY_EXIT'
 import json,sys
@@ -7431,7 +7454,7 @@ case ${1:-help} in
  links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
  *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
 esac
-BOBAREV_ENGINE_3141
+BOBAREV_ENGINE_3142
  bash -n "$lib/mullvad.sh.new" || return 1
  chmod 700 "$lib/mullvad.sh.new" || return 1
  mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
@@ -9328,7 +9351,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.2 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

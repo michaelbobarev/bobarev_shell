@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.12.1 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.12.2 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -958,8 +958,8 @@ print_naive_shadowrocket_links() {
     done < "$NAIVE_PASS_FILE"
 
     echo -e "\n${C_BLUE} Почему основная ссылка http2:// работает быстрее и стабильнее чем https://:${C_RESET}"
-    echo -e "   Схема ${C_BOLD}http2://${C_RESET} жестко фиксирует протокол ${C_GREEN}HTTP/2${C_RESET} в самой ссылке — тумблер в Shadowrocket никогда не выключается сам!"
-    echo -e "   Все видеопотоки YouTube и Apple Music идут внутри одного постоянного мультиплексированного TLS-соединения без пауз."
+    echo -e "   Схема ${C_BOLD}http2://${C_RESET} выбирает HTTP/2 в ссылке. Фактический протокол и стабильность зависят от клиента, сети и сайта."
+    echo -e "   HTTP/2 может мультиплексировать несколько запросов в одном TLS-соединении, но не гарантирует отсутствие пауз или лучшую скорость."
 }
 
 write_bobarev_cascade_ru_script() {
@@ -2794,569 +2794,22 @@ setup_cascade_hysteria_server1_ru() {
 
     ensure_go_and_build_caddy_naive || return 1
 
-    # Отключаем перехват маршрутов от Каскада 1 (wg-cascade / udp2raw) и Tailscale Exit Node,
-    # чтобы трафик шел строго по цепочке: Caddy (NaiveProxy) -> socks5://127.0.0.1:1080 (Hysteria 2 Client) -> Сервер 2
-    echo -e "${C_BLUE} Очистка конфликтующих маршрутов wg-cascade и старых экземпляров Hysteria...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service hysteria-server.service hysteria-client.service
+    # Очистка только маршрутов/правил этого каскада. Уже выбранный Tailscale/Mullvad
+    # exit node сохраняется: Xray REALITY и Mullvad — разные исходящие политики.
+    echo -e "${C_BLUE} Очистка маршрутов wg-cascade и старых экземпляров Xray...${C_RESET}"
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade
     ip link del dev wg-cascade 2>/dev/null || true
     ip route flush table 51888 2>/dev/null || true
-    while ip rule del priority 30000 2>/dev/null; do :; done
     while ip rule del lookup 51888 2>/dev/null; do :; done
     clean_duplicate_cascade_iptables
     if command -v tailscale &>/dev/null; then
-        silent_run tailscale set --exit-node=
-    fi
-
-    mkdir -p /etc/hysteria
-    local h_server_target="${s2_ip}:${s2_port}"
-    if [[ "$s2_ip" =~ : ]]; then
-        h_server_target="[${s2_ip}]:${s2_port}"
-    fi
-    cat << EOF > /etc/hysteria/client.yaml
-server: ${h_server_target}
-auth: "${s2_pass}"
-
-tls:
-  sni: www.bing.com
-  insecure: true
-
-quic:
-  initStreamReceiveWindow: 16777216
-  maxStreamReceiveWindow: 16777216
-  initConnReceiveWindow: 67108864
-  maxConnReceiveWindow: 67108864
-  maxIdleTimeout: 60s
-  keepAlivePeriod: 15s
-  disablePathMTUDiscovery: false
-
-socks5:
-  listen: 127.0.0.1:1080
-EOF
-    chmod 600 /etc/hysteria/client.yaml
-
-    cat << 'SVC_EOF' > /etc/systemd/system/hysteria-client.service
-[Unit]
-Description=Bobarev Shell Hysteria 2 Client (SOCKS5 127.0.0.1:1080)
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-Nice=-10
-LimitNOFILE=1048576
-ExecStart=/usr/local/bin/hysteria client --config /etc/hysteria/client.yaml
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-SVC_EOF
-
-    silent_run systemctl daemon-reload
-    silent_run systemctl enable --now hysteria-client.service
-    systemctl restart hysteria-client.service || true
-    sleep 2
-
-    if ! systemctl is-active --quiet hysteria-client.service; then
-        echo -e "${C_RED} Служба hysteria-client НЕ запустилась! Журнал:${C_RESET}"
-        journalctl -u hysteria-client.service -n 15 --no-pager || true
-        return 1
-    fi
-
-    # Сначала записываем CASCADE_ROLE="ru_hysteria_entry", чтобы render_naive_caddyfile()
-    # гарантированно добавил директиву `upstream socks5://127.0.0.1:1080` в блок forward_proxy!
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="ru_hysteria_entry"
-NAIVE_DOMAIN="$n_dom"
-NAIVE_EMAIL="$n_email"
-HYSTERIA_SERVER="$s2_ip"
-HYSTERIA_PORT="$s2_port"
-TCP_TUNE_PROFILE="balanced"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    apply_naive_tcp_tuning_profile "balanced"
-    render_naive_caddyfile
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
-        silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
-        silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
-    fi
-
-    echo -e "${C_BLUE} Проверка выходного IP через локальный SOCKS5-мост Hysteria 2 (127.0.0.1:1080)...${C_RESET}"
-    local test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-    if [ -z "$test_ip" ]; then
-        test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность UDP-порта ${s2_port} на Сервере 2")
-    fi
-    echo -e "\n${C_GREEN} Каскад 2 (NaiveProxy -> Hysteria 2 SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
-    echo -e "   Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
-    print_naive_shadowrocket_links
-}
-
-manage_cascade_hysteria_menu() {
-    while true; do
-        MODULE_CANCELED=false
-        local c_state="Не активен"
-        if systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
-            if is_warp_active; then
-                c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Cloudflare WARP)"
-            else
-                c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Чистый IP сервера)"
-            fi
-        elif systemctl is-active --quiet hysteria-client.service 2>/dev/null; then
-            c_state="Активен Сервер 1 (РФ: NaiveProxy -> Hysteria 2 Client)"
+        local ts_exit_now=""
+        ts_exit_now=$(tailscale get exit-node 2>/dev/null || echo "")
+        if [ -n "$ts_exit_now" ] && [ "$ts_exit_now" != "none" ] && [ "$ts_exit_now" != "false" ]; then
+            echo -e "${C_YELLOW} Сохраняю текущий Tailscale exit node: $ts_exit_now.${C_RESET}"
         fi
-
-        local c_choice
-        if ! smart_menu " Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
-        "1" " Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
-        "2" " Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
-        "3" " Управление пользователями NaiveProxy" \
-        "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
-        "6" " Показать токен подключения" \
-        "7" " Остановить службу Hysteria 2" \
-        "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
-            break
-        fi
-
-        clear
-        case "$c_choice" in
-            1) setup_cascade_hysteria_server2_foreign || true; pause_enter ;;
-            2) setup_cascade_hysteria_server1_ru || true; pause_enter ;;
-            3) manage_naive_users_menu ;;
-            4) print_naive_shadowrocket_links; pause_enter ;;
-            5) toggle_foreign_warp_menu; pause_enter ;;
-            6)
-                if [ -f /etc/default/bobarev-cascade ]; then
-                    # shellcheck disable=SC1091
-                    source /etc/default/bobarev-cascade
-                    if [ -n "${HYSTERIA_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN} Токены Hysteria 2 для подключения Сервера 1 (РФ):${C_RESET}\n"
-                        echo -e "   ${C_BOLD}Основной токен (IPv4):${C_RESET}"
-                        echo -e "    ${C_BOLD}${C_GREEN}${HYSTERIA_TOKEN}${C_RESET}\n"
-                        if [ -n "${HYSTERIA_TOKEN_V6:-}" ]; then
-                            echo -e "   ${C_BOLD}Резервный токен (IPv6):${C_RESET}"
-                            echo -e "    ${C_BOLD}${C_CYAN}${HYSTERIA_TOKEN_V6}${C_RESET}\n"
-                        fi
-                    else
-                        echo -e "${C_YELLOW} Токен Hysteria 2 еще не создан на этом сервере.${C_RESET}"
-                    fi
-                fi
-                pause_enter
-                ;;
-            7)
-                if prompt_yn "Остановить и отключить службы Hysteria 2 на этом сервере?" "false"; then
-                    silent_run systemctl stop hysteria-server.service hysteria-client.service
-                    silent_run systemctl disable hysteria-server.service hysteria-client.service
-                    rm -f /etc/hysteria/client.yaml /etc/hysteria/config.yaml
-                    if [ -f /etc/default/bobarev-cascade ]; then
-                        sed -i 's/CASCADE_ROLE="ru_hysteria_entry"/CASCADE_ROLE="none"/' /etc/default/bobarev-cascade 2>/dev/null || true
-                        render_naive_caddyfile 2>/dev/null || true
-                    fi
-                    echo -e "${C_GREEN} Службы Hysteria 2 остановлены и отключены.${C_RESET}"
-                fi
-                pause_enter
-                ;;
-        esac
-    done
-}
-
-
-# ==============================================================================
-# МОДУЛЬ 21: КАСКАД 3 (NAIVEPROXY -> XRAY REALITY VLESS -> WARP / ЧИСТЫЙ IP)
-# ==============================================================================
-ensure_xray_installed() {
-    if [ -x "/usr/local/bin/xray" ]; then
-        return 0
-    fi
-    echo -e "${C_BLUE} Скачивание и установка Xray-core с официального репозитория XTLS...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -yq curl wget unzip ca-certificates >/dev/null 2>&1
-
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    local x_zip="Xray-linux-64.zip"
-    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
-        x_zip="Xray-linux-arm64-v8a.zip"
-    fi
-
-    local tmp_xray=$(mktemp -d /root/.xray-XXXXXX)
-    local x_url="https://github.com/XTLS/Xray-core/releases/latest/download/${x_zip}"
-
-    if ! curl -fsSL "$x_url" -o "${tmp_xray}/xray.zip"; then
-        rm -rf "$tmp_xray"
-        echo -e "${C_RED} Ошибка скачивания архива Xray-core с GitHub.${C_RESET}"
-        return 1
-    fi
-
-    unzip -qo "${tmp_xray}/xray.zip" -d "$tmp_xray"
-    if [ -f "${tmp_xray}/xray" ]; then
-        cp -f "${tmp_xray}/xray" /usr/local/bin/xray
-        chmod +x /usr/local/bin/xray
-    else
-        rm -rf "$tmp_xray"
-        echo -e "${C_RED} Бинарник xray не найден в распакованном архиве!${C_RESET}"
-        return 1
-    fi
-    rm -rf "$tmp_xray"
-    echo -e "${C_GREEN} Xray-core успешно установлен: $(/usr/local/bin/xray version 2>/dev/null | head -n 1 || echo "готов")${C_RESET}"
-    return 0
-}
-
-write_xray_service() {
-    cat << 'SVC_EOF' > /etc/systemd/system/bobarev-xray.service
-[Unit]
-Description=Bobarev Shell Xray-core Cascade Service
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-Nice=-10
-LimitNOFILE=1048576
-ExecStart=/usr/local/bin/xray run -c /etc/xray/config.json
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-SVC_EOF
-    silent_run systemctl daemon-reload
-}
-
-render_xray_server_config() {
-    local x_port="$1"
-    local x_uuid="$2"
-    local x_priv="$3"
-    local x_short_id="$4"
-    local x_sni="$5"
-    local exit_mode="${6:-direct}"
-
-    mkdir -p /etc/xray
-    local outbound_sockopt=""
-    if [ "$exit_mode" = "warp" ]; then
-        outbound_sockopt=',
-      "streamSettings": {
-        "sockopt": {
-          "interface": "warp"
-        }
-      }'
-    fi
-
-    cat << EOF > /etc/xray/config.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "port": ${x_port},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${x_uuid}",
-            "flow": ""
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${x_sni}:443",
-          "xver": 0,
-          "serverNames": [
-            "${x_sni}"
-          ],
-          "privateKey": "${x_priv}",
-          "shortIds": [
-            "${x_short_id}"
-          ]
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "UseIPv4"
-      }${outbound_sockopt}
-    }
-  ]
-}
-EOF
-    chmod 600 /etc/xray/config.json
-}
-
-render_xray_client_config() {
-    local s2_ip="$1"
-    local s2_port="$2"
-    local s2_uuid="$3"
-    local s2_pub="$4"
-    local s2_short_id="$5"
-    local s2_sni="$6"
-
-    mkdir -p /etc/xray
-    cat << EOF > /etc/xray/config.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "listen": "127.0.0.1",
-      "port": 10808,
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": true
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "proxy",
-      "protocol": "vless",
-      "settings": {
-        "vnext": [
-          {
-            "address": "${s2_ip}",
-            "port": ${s2_port},
-            "users": [
-              {
-                "id": "${s2_uuid}",
-                "encryption": "none"
-              }
-            ]
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "fingerprint": "chrome",
-          "serverName": "${s2_sni}",
-          "publicKey": "${s2_pub}",
-          "shortId": "${s2_short_id}",
-          "spiderX": ""
-        },
-        "sockopt": {
-          "dialerProxy": "fragment",
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "fragment",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "AsIs",
-        "fragment": {
-          "packets": "1-3",
-          "length": "100-200",
-          "interval": "10-20"
-        }
-      },
-      "streamSettings": {
-        "sockopt": {
-          "tcpNoDelay": true
-        }
-      }
-    }
-  ]
-}
-EOF
-    chmod 600 /etc/xray/config.json
-}
-
-setup_cascade_xray_server2_foreign() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): XRAY REALITY -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
-    ensure_xray_installed || return 1
-    enable_routing_optimizations || true
-    apply_naive_tcp_tuning_profile "balanced"
-
-    local x_port="8443"
-    prompt_default "1/3. Введите TCP-порт для приема VLESS-REALITY (рекомендуется 8443 или 443):" "$x_port" x_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
-    x_port="${x_port//[^0-9]/}"
-
-    local x_sni="gateway.icloud.com"
-    prompt_default "2/3. Введите целевой SNI-домен для маскировки REALITY (TLS 1.3):" "$x_sni" x_sni
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
-
-    local exit_choice=""
-    if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Xray REALITY)" "
-Как выпускать трафик из Xray в интернет?" 16 $WT_WIDTH 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"     "2" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
-        return 0
-    fi
-
-    local exit_mode="direct"
-    [ "$exit_choice" = "2" ] && exit_mode="warp"
-
-    # Генерация ключей x25519, UUID и ShortId
-    local keys=$(/usr/local/bin/xray x25519 2>/dev/null || true)
-    local x_priv=$(echo "$keys" | grep -i "Private" | awk '{print $NF}' | tr -d '[:space:]')
-    local x_pub=$(echo "$keys" | grep -i "Public" | awk '{print $NF}' | tr -d '[:space:]')
-    local x_uuid=$(/usr/local/bin/xray uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-    local x_short_id=$(openssl rand -hex 8)
-
-    if [ -z "$x_priv" ] || [ -z "$x_pub" ]; then
-        echo -e "${C_RED} Ошибка генерации ключей x25519 через бинарник xray!${C_RESET}"
-        return 1
-    fi
-
-    silent_run systemctl stop bobarev-xray.service
-    apply_foreign_exit_mode "$exit_mode"
-    render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "$exit_mode"
-    write_xray_service
-
-    silent_run systemctl enable --now bobarev-xray.service
-    systemctl restart bobarev-xray.service || true
-    sleep 2
-
-    if ! systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал ошибок:${C_RESET}"
-        journalctl -u bobarev-xray.service -n 15 --no-pager || true
-        return 1
-    fi
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${x_port}/tcp" comment 'Xray REALITY TCP'
-        silent_run ufw reload
-    fi
-
-    local wan_dev=$(get_wan_if)
-    local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-ens3}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
-    if [ -z "$pub_ip" ]; then
-        pub_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
-    fi
-    local pub_ipv6=""
-    pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
-    if [ -z "$pub_ipv6" ]; then
-        pub_ipv6=$(curl -6 -s --max-time 4 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
-    fi
-
-    local bridge_token=$(printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 | tr -d '\n\r ')
-    local bridge_token_v6=""
-    if [ -n "$pub_ipv6" ]; then
-        bridge_token_v6=$(printf '%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 | tr -d '\n\r ')
-    fi
-
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="foreign_xray_exit"
-FOREIGN_EXIT_MODE="$exit_mode"
-XRAY_PORT="$x_port"
-XRAY_UUID="$x_uuid"
-XRAY_PRIV="$x_priv"
-XRAY_PUB="$x_pub"
-XRAY_SHORT_ID="$x_short_id"
-XRAY_SNI="$x_sni"
-XRAY_TOKEN="$bridge_token"
-XRAY_TOKEN_V6="$bridge_token_v6"
-SERVER_PUB_IP="$pub_ip"
-SERVER_PUB_IPV6="$pub_ipv6"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    echo -e "\n${C_GREEN} Сервер 2 (Xray VLESS-REALITY [порт: $x_port/tcp, SNI: $x_sni, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "\n${C_CYAN} ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ):${C_RESET}"
-    echo -e "   ${C_BOLD}Основной токен (IPv4):${C_RESET}"
-    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}"
-    if [ -n "$bridge_token_v6" ]; then
-        echo -e "\n   ${C_BOLD}Резервный токен (IPv6 — обход блокировки IPv4):${C_RESET}"
-        echo -e "    ${C_BOLD}${C_CYAN}${bridge_token_v6}${C_RESET}"
-    fi
-    echo ""
-}
-
-setup_cascade_xray_server1_ru() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> XRAY REALITY ===${C_RESET}"
-    ensure_xray_installed || return 1
-    enable_routing_optimizations || true
-
-    local saved_dom=""
-    local saved_email=""
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        saved_dom="${NAIVE_DOMAIN:-}"
-        saved_email="${NAIVE_EMAIL:-}"
-    fi
-
-    local token_in=""
-    prompt_clean "1/4. Вставьте Токен соединения Xray REALITY с Зарубежного Сервера 2:" token_in
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ]; then return 0; fi
-
-    local clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
-    local decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '
-
-' || echo "")
-    local s2_ip="" s2_port="" s2_uuid="" s2_pub="" s2_short_id="" s2_sni=""
-    IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni <<< "$decoded"
-
-    if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_uuid" ] || [ -z "$s2_pub" ]; then
-        echo -e "${C_RED} Ошибка: Неверный формат Токена Xray REALITY! Скопируйте свежий токен с Сервера 2.${C_RESET}"
-        return 1
-    fi
-
-    local n_dom=""
-    prompt_default "2/4. Введите ваш домен на этом РФ-сервере (A-запись DNS):" "${saved_dom:-ru.yourdomain.com}" n_dom
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
-
-    local n_email=""
-    prompt_default "3/4. Введите Email для выпуска SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then return 0; fi
-
-    if [ ! -s "$NAIVE_PASS_FILE" ]; then
-        local n_user=""
-        prompt_default "4/4. Введите имя пользователя для Shadowrocket:" "user1" n_user
-        if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
-        n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
-
-        local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || echo "ProxyPass2026")
-        local n_pass=""
-        prompt_default "Пароль для пользователя $n_user:" "$rand_pass" n_pass
-        if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
-        add_or_update_naive_user "$n_user" "$n_pass"
-    else
-        echo -e "${C_GREEN} Существующие пользователи NaiveProxy сохранены!${C_RESET}"
-    fi
-
-    ensure_go_and_build_caddy_naive || return 1
-
-    echo -e "${C_BLUE} Очистка конфликтующих служб и старых маршрутов...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run wg-quick down wg-cascade 2>/dev/null || true
-    ip link del dev wg-cascade 2>/dev/null || true
-    ip route flush table 51888 2>/dev/null || true
-    while ip rule del priority 100 2>/dev/null; do :; done
-    while ip rule del priority 101 2>/dev/null; do :; done
-    while ip rule del priority 102 2>/dev/null; do :; done
-    while ip rule del priority 103 2>/dev/null; do :; done
-    while ip rule del priority 104 2>/dev/null; do :; done
-    while ip rule del priority 30000 2>/dev/null; do :; done
-    while ip rule del lookup 51888 2>/dev/null; do :; done
-    clean_duplicate_cascade_iptables
-    if command -v tailscale &>/dev/null; then
-        silent_run tailscale set --exit-node=
     fi
 
     render_xray_client_config "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni"
@@ -3392,13 +2845,26 @@ EOF
     fi
 
     echo -e "${C_BLUE} Проверка выходного IP через локальный SOCKS5-мост Xray REALITY (127.0.0.1:10808)...${C_RESET}"
-    local test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:10808 --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
+    local test_ip="" probe_url="" direct_ip=""
+    for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org"; do
+        test_ip=$(curl -q -4 --noproxy '*' --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 12 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]')
+        if [ -z "$test_ip" ]; then
+            test_ip=$(curl -q -4 --noproxy '*' --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 12 "$probe_url" 2>/dev/null | tr -d '[:space:]')
+        fi
+        if [ -n "$test_ip" ]; then break; fi
+    done
     if [ -z "$test_ip" ]; then
-        test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:10808 --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность TCP-порта ${s2_port} на Сервере 2")
+        echo -e "${C_RED} SOCKS5-мост Xray REALITY не вернул внешний IPv4.${C_RESET}"
+        echo -e "${C_YELLOW} Проверьте доступность TCP-порта ${s2_port} на Сервере 2, его firewall и журнал:${C_RESET}"
+        echo "journalctl -u bobarev-xray.service -n 100 --no-pager"
+        return 1
     fi
-    echo -e "
-${C_GREEN} Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
+    direct_ip=$(curl -q -4 --noproxy '*' --connect-timeout 5 --max-time 12 https://api.ipify.org 2>/dev/null || echo "")
+    echo -e "\n${C_GREEN} Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "   Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
+    if [ -n "$direct_ip" ] && [ "$test_ip" = "$direct_ip" ]; then
+        echo -e "${C_YELLOW} Внимание: IP через SOCKS5 совпадает с прямым WAN. Проверьте маршрут Xray на Сервере 2.${C_RESET}"
+    fi
     print_naive_shadowrocket_links
 }
 
@@ -6581,7 +6047,7 @@ ts_exit_node_works() {
  /usr/bin/curl -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1
 }
 
-# Изолированный fail-fast контроллер Mullvad Safe Edition.
+# Mullvad Safe Edition: isolated fail-fast network controller.
 install_mullvad_safe_runtime() {
  local lib=/usr/local/lib/bobarev-mullvad-safe
  [[ $EUID == 0 ]] || { echo 'Нужен root.';return 1; }
@@ -6592,7 +6058,7 @@ install_mullvad_safe_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'MULLVAD_SAFE_ENGINE'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.12.1 — Mullvad Safe Edition / Mullvad VPS Safety Revision
+# BOBAREV SHELL 3.12.2 — Mullvad Safe Edition / Mullvad VPS Safety Revision
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7255,7 +6721,6 @@ UNIT_CADDY
  printf 'CASCADE_ROLE=%q\nNAIVE_DOMAIN=%q\nNAIVE_EMAIL=%q\nNAIVE_OUT_MODE=%q\n' standalone_naive "$domain" "$email" mullvad_ts > /etc/default/bobarev-cascade
  systemctl daemon-reload;systemctl enable caddy.service;systemctl restart caddy.service
  local n verified=0
- : > "$TX/local-caddy-check.txt"
  for n in {1..30};do
   if curl -q --noproxy '*' --resolve "$domain:443:127.0.0.1" -fsSI --connect-timeout 3 --max-time 5 "https://$domain" > "$TX/local-caddy-check.txt" 2>&1;then verified=1;break;fi
   sleep 3
@@ -9253,7 +8718,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.12.1 (Mullvad Safe Edition — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.12.2 (Mullvad Safe Edition — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

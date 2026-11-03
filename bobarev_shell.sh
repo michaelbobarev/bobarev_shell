@@ -376,6 +376,9 @@ flush_and_reload_nat() {
     if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
         /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
     fi
+    if [ -x /usr/local/sbin/bobarev-router-v2 ] && [ -f /etc/bobarev-router-v2/config ] && systemctl is-active --quiet bobarev-router-v2.service 2>/dev/null; then
+        /usr/local/sbin/bobarev-router-v2 start >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -4848,6 +4851,18 @@ mod_ufw() {
             echo -e "${C_BLUE} Восстановлен профиль роутера: сеть $ROUTER_LAN_IF направлена в $ROUTER_OUT_IF (защита от утечки IP: $ks_human).${C_RESET}"
         fi
     fi
+    if [ -f /etc/bobarev-router-v2/config ]; then
+        # shellcheck disable=SC1091
+        source /etc/bobarev-router-v2/config
+        if [ -n "${LAN:-}" ] && [ -n "${OUT:-}" ]; then
+            silent_run ufw allow in on "$LAN" to any port 67 proto udp comment 'Bobarev router v2 DHCP'
+            silent_run ufw allow in on "$LAN" to any port 53 proto udp comment 'Bobarev router v2 DNS UDP'
+            silent_run ufw allow in on "$LAN" to any port 53 proto tcp comment 'Bobarev router v2 DNS TCP'
+            silent_run ufw route allow in on "$LAN" out on "$OUT" comment 'Bobarev LAN router'
+            silent_run ufw route allow in on "$OUT" out on "$LAN" comment 'Bobarev LAN router return'
+            echo -e "${C_BLUE} Восстановлены правила UFW для локального маршрутизатора v2: $LAN <-> $OUT.${C_RESET}"
+        fi
+    fi
 
     if [ -n "$netdev" ]; then
         if prompt_yn "Запретить контейнерам Docker обходить брандмауэр из внешней сети?" "true"; then
@@ -4897,6 +4912,9 @@ mod_ufw() {
     fi
     if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
         /usr/local/bin/bobarev-router-up.sh || true
+    fi
+    if [ -x /usr/local/sbin/bobarev-router-v2 ] && [ -f /etc/bobarev-router-v2/config ] && systemctl is-active --quiet bobarev-router-v2.service 2>/dev/null; then
+        /usr/local/sbin/bobarev-router-v2 start || true
     fi
     echo -e "${C_GREEN} Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
     print_network_health_summary
@@ -6288,22 +6306,29 @@ mod_router_sbc() {
     echo '=== Службы ==='
     systemctl status bobarev-router-v2.service --no-pager -l || true
     systemctl status bobarev-router-dhcp.service --no-pager -l || true
-    echo '=== DHCP-сокет ==='
-    ss -lunp | grep ':67' || true
+    systemctl status bobarev-router-watchdog.timer --no-pager -l 2>/dev/null || true
+    echo '=== DHCP и DNS сокеты ==='
+    ss -tulnp | grep -E ':67|:53' || true
     echo '=== Маршрутизация ==='
     ip -4 rule || true
     if [[ -f /etc/bobarev-router-v2/config ]]; then
      source /etc/bobarev-router-v2/config
      if [[ "${OUT:-}" == "tailscale0" ]]; then
-      ip -4 route show table 52 | head -n 3 || true
+      echo '--- Таблица 52 (Tailscale) ---'
+      ip -4 route show table 52 | head -n 10 || true
+      echo '--- Статус Tailscale Exit Node ---'
+      tailscale status 2>/dev/null | grep -E 'exit node|active;' || true
      else
       ip -4 route show table 199 2>/dev/null || true
      fi
     fi
-    echo '=== NAT ==='
-    iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
+    echo '=== NAT и FORWARD ==='
+    iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT|BR2_NAT' || true
+    iptables -t nat -S BR2_NAT 2>/dev/null || true
+    iptables -S BR2_FWD 2>/dev/null || true
+    iptables -t mangle -S BR2_MSS 2>/dev/null || true
     pause_enter ;;
-   2) mod_router_sbc_setup; return 0 ;;
+   2) mod_router_sbc_setup || true; pause_enter ;;
    3)
     [[ -f /etc/bobarev-router-v2/config ]] || { echo 'Сначала выполните мастер настройки.'; pause_enter; continue; }
     systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true
@@ -6311,6 +6336,7 @@ mod_router_sbc() {
     systemctl status bobarev-router-dhcp.service --no-pager -l || true
     pause_enter ;;
    4)
+    systemctl stop bobarev-router-watchdog.timer bobarev-router-watchdog.service 2>/dev/null || true
     systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service || true
     echo 'Маршрутизатор и DHCP остановлены.'
     pause_enter ;;
@@ -6318,12 +6344,14 @@ mod_router_sbc() {
     [[ -f /etc/bobarev-router-v2/config ]] || { echo 'Маршрутизатор не установлен.'; pause_enter; continue; }
     nm_yes 'Удалить настройки LAN-маршрутизатора? Конфигурация будет сохранена в /root.' || continue
     br_snapshot || true
+    systemctl disable --now bobarev-router-watchdog.timer bobarev-router-watchdog.service 2>/dev/null || true
     systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || true
     local d="/root/bobarev-router-removed-$(date +%Y%m%d-%H%M%S)"
     mkdir -m 700 "$d"
     cp -a /etc/bobarev-router-v2 "$d/" 2>/dev/null || true
     cp -a /etc/systemd/system/bobarev-router-v2.service.d "$d/" 2>/dev/null || true
     rm -rf /etc/bobarev-router-v2 /etc/systemd/system/bobarev-router-v2.service.d
+    rm -f /etc/systemd/system/bobarev-router-watchdog.service /etc/systemd/system/bobarev-router-watchdog.timer /usr/local/sbin/bobarev-router-watchdog
     systemctl daemon-reload
     echo "Настройки удалены. Резервная копия: $d"
     pause_enter ;;
@@ -6340,7 +6368,7 @@ mod_router_sbc_setup() {
   [[ -e /sys/class/net/$iface/device && "$iface" != "$wan_if" ]] && items+=("$iface" "LAN (не WAN)")
  done
  ((${#items[@]})) || { echo 'Нет свободного физического LAN-порта.'; return 1; }
- smart_menu 'LAN маршрутизатора' 'Первый роутер  WAN NanoPi; LAN NanoPi  WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
+ smart_menu 'LAN маршрутизатора' 'Первый роутер -> WAN NanoPi; LAN NanoPi -> WAN (глобус) Google Wi-Fi. Не LAN Google Wi-Fi!' 16 "$WT_WIDTH" 5 lan_if "${items[@]}" || return 0
  local exit_items=() exit_choice='' custom_if=''
  exit_items+=("$wan_if" "WAN — чистый интернет ($wan_if)")
  [[ -e /sys/class/net/tailscale0 ]] && exit_items+=('tailscale0' 'Tailscale exit node')
@@ -6363,11 +6391,11 @@ mod_router_sbc_setup() {
  else
   out_if="$exit_choice"
  fi
- [[ "$out_if" =~ ^[a-zA-Z0-9_.-]+$ && "$out_if" != "$lan_if" ]] || { echo 'Неверное имя интерфейса.'; pause_enter; return 0; }
- ip link show "$out_if" >/dev/null 2>&1 || { echo "Интерфейс $out_if не существует."; pause_enter; return 0; }
+ [[ "$out_if" =~ ^[a-zA-Z0-9_.-]+$ && "$out_if" != "$lan_if" ]] || { echo 'Неверное имя интерфейса.'; return 0; }
+ ip link show "$out_if" >/dev/null 2>&1 || { echo "Интерфейс $out_if не существует."; return 0; }
  prompt_default 'LAN IPv4 /24 (сеть не должна совпадать с WAN и LAN Google Wi-Fi)' 192.168.199.1 lan_ip
  [[ "$MODULE_CANCELED" == false ]] || return 0
- dns_servers='8.8.8.8, 1.1.1.1'
+ local dns_servers='8.8.8.8,1.1.1.1'
  python3 - "$lan_ip" "$wan_if" <<'PY'
 import ipaddress,json,subprocess,sys
 x=ipaddress.IPv4Interface(sys.argv[1]+'/24')
@@ -6382,10 +6410,9 @@ PY
    echo 'Tailscale сейчас offline. Нельзя направить LAN через tailscale0.'
    echo 'Проверьте связь Tailscale и повторите мастер настройки.'
    echo 'Команды: tailscale status; tailscale netcheck'
-   pause_enter
    return 0
   fi
-  if ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
+  while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
    echo 'Tailscale exit node пока не выбран или не активен.'
    local ts_choice='' ts_node=''
    smart_menu 'Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
@@ -6396,10 +6423,11 @@ PY
      MODULE_CANCELED=false
      prompt_default 'IP или имя exit node' '' ts_node
      [[ "$MODULE_CANCELED" == false && -n "$ts_node" ]] || continue
-     if tailscale set --advertise-exit-node=false --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
+     if tailscale set --advertise-exit-node=false --exit-node="$ts_node" --exit-node-allow-lan-access=true --stateful-filtering=false 2>/dev/null || tailscale set --advertise-exit-node=false --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
       if ts_wait_exit_node; then
        if ts_exit_node_works; then
         echo -e "${C_GREEN}Exit node применён, активен и проверен: $ts_node${C_RESET}"
+        break
        else
         echo -e "${C_YELLOW}Маршрут появился, но интернет через exit node не проходит.${C_RESET}"
         echo 'Откатываю exit node.'
@@ -6420,11 +6448,19 @@ PY
      fi
      ;;
    esac
+  done
+  # Даже если exit node уже был выбран ранее, гарантируем включенный LAN access и отключенный stateful-filtering для транзита с LAN
+  local cur_ts_exit=""
+  cur_ts_exit=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("ExitNodeStatus") or {}).get("TailscaleIPs",[""])[0].split("/")[0])' 2>/dev/null || true)
+  if [[ -n "$cur_ts_exit" ]]; then
+   tailscale set --advertise-exit-node=false --exit-node="$cur_ts_exit" --exit-node-allow-lan-access=true --stateful-filtering=false 2>/dev/null || tailscale set --advertise-exit-node=false --exit-node="$cur_ts_exit" --exit-node-allow-lan-access=true 2>/dev/null || true
+  else
+   tailscale set --exit-node-allow-lan-access=true --stateful-filtering=false 2>/dev/null || tailscale set --exit-node-allow-lan-access=true 2>/dev/null || true
   fi
  fi
  echo "Будет: LAN $lan_if $lan_ip/24 -> $out_if. DHCP .50-.200, DNS $dns_servers."
  echo 'Существующий dnsmasq будет остановлен и заменён отдельной DHCP-службой. Старые конфиги сохраняются.'
- echo 'SSH/WAN/Tailscale не перенастраиваются. IPv6 клиентов через LAN не блокируется (IPv6-интернет зависит от провайдера).'
+ echo 'SSH/WAN/Tailscale не перенастраиваются. При выходе через VPN/Tailscale IPv6-форвардинг из LAN блокируется от утечек.'
  nm_yes 'Применить маршрутизатор?' || return 0
  apt-get install -y dnsmasq-base iptables iproute2 dnsutils || return 1
  br_snapshot || return 1
@@ -6433,12 +6469,16 @@ PY
   systemctl stop dnsmasq.service || return 1
  fi
  install -d -m 700 /etc/bobarev-router-v2
- printf 'LAN=%q\nOUT=%q\nWAN=%q\nADDR=%q\n' "$lan_if" "$out_if" "$wan_if" "$lan_ip" > /etc/bobarev-router-v2/config
+ printf 'LAN=%q
+OUT=%q
+WAN=%q
+ADDR=%q
+' "$lan_if" "$out_if" "$wan_if" "$lan_ip" > /etc/bobarev-router-v2/config
  local prefix=${lan_ip%.*}
  local dns_dnat_target=""
- dns_dnat_target=$(iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$lan_if\"" | grep -- "--dport 53" | grep -oP 'to-destination:\K[0-9.]+' | head -n1 || true)
+ dns_dnat_target=$(iptables -w -t nat -S PREROUTING 2>/dev/null | grep -E -- "-i ${lan_if}([[:space:]]|$)" | grep -E -- "--dport 53([[:space:]]|$)" | grep -oP 'to-destination[[:space:]:]+\K[0-9.]+' | head -n1 || true)
  local dns_dnat_ok=false
- if [[ -n "$dns_dnat_target" ]]; then
+ if [[ -n "$dns_dnat_target" && "$dns_dnat_target" != "$lan_ip" ]]; then
   if dig +time=3 +tries=1 "@$dns_dnat_target" cloudflare.com +short >/dev/null 2>&1; then
    dns_dnat_ok=true
   fi
@@ -6449,24 +6489,44 @@ PY
   echo "Существующий DNS ${dns_dnat_target} отвечает — DNAT сохраняется."
  else
   if [[ -n "$dns_dnat_target" ]]; then
-   echo "DNS ${dns_dnat_target} не отвечает — удаляю DNAT, включаю DNS на NanoPi."
-   iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$lan_if\"" | grep -- "--dport 53" | grep -F "DNAT" | sed "s/^-A PREROUTING /-D PREROUTING /" | while read -r stale_rule; do
-    iptables -w -t nat $stale_rule 2>/dev/null || true
-   done || true
+   echo "Переключаю перехват DNS с ${dns_dnat_target} на локальный DNS NanoPi ($lan_ip:53)."
+   while read -r stale_rule; do
+    [[ -n "$stale_rule" ]] && iptables -w -t nat $stale_rule 2>/dev/null || true
+   done < <(iptables -w -t nat -S PREROUTING 2>/dev/null | grep -E -- "-i ${lan_if}([[:space:]]|$)" | grep -E -- "--dport 53([[:space:]]|$)" | grep -F "DNAT" | sed "s/^-A PREROUTING /-D PREROUTING /" || true)
   fi
   dnsmasq_dns_port=53
   dhcp_dns="$lan_ip"
  fi
+ # Освобождаем 53 порт на LAN IP, если systemd-resolved слушает 0.0.0.0:53
+ if [[ "$dnsmasq_dns_port" == "53" ]] && ss -H -tulnp "sport = :53" 2>/dev/null | grep -qE "(0\.0\.0\.0|\*|${lan_ip}):53"; then
+  if systemctl is-active --quiet systemd-resolved.service 2>/dev/null; then
+   mkdir -p /etc/systemd/resolved.conf.d
+   printf '[Resolve]
+DNSStubListenerExtra=
+' > /etc/systemd/resolved.conf.d/99-bobarev-lan-dns.conf 2>/dev/null || true
+  fi
+ fi
  {
-  printf 'port=%s\n' "$dnsmasq_dns_port"
-  printf 'interface=%s\n' "$lan_if"
-  printf 'bind-dynamic\n'
-  printf 'dhcp-range=%s.50,%s.200,255.255.255.0,12h\n' "$prefix" "$prefix"
-  printf 'dhcp-option=3,%s\n' "$lan_ip"
-  printf 'dhcp-option=6,%s\n' "$dhcp_dns"
-  printf 'dhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
+  printf 'port=%s
+' "$dnsmasq_dns_port"
+  printf 'interface=%s
+' "$lan_if"
+  printf 'bind-dynamic
+'
+  printf 'dhcp-range=%s.50,%s.200,255.255.255.0,12h
+' "$prefix" "$prefix"
+  printf 'dhcp-option=3,%s
+' "$lan_ip"
+  printf 'dhcp-option=6,%s
+' "$dhcp_dns"
+  printf 'dhcp-leasefile=/var/lib/misc/bobarev-router.leases
+'
   if [[ "$dnsmasq_dns_port" == "53" ]]; then
-   printf 'no-resolv\nserver=8.8.8.8\nserver=1.1.1.1\n'
+   printf 'no-resolv
+server=8.8.8.8
+server=1.1.1.1
+cache-size=1500
+'
   fi
  } > /etc/bobarev-router-v2/dhcp.conf
  dnsmasq --test --conf-file=/etc/bobarev-router-v2/dhcp.conf || return 1
@@ -6483,13 +6543,17 @@ clean() {
   iptables -w -t "$table" -X "$chain" 2>/dev/null || true
  done
  while ip6tables -w -D FORWARD -i "$LAN" -j DROP 2>/dev/null; do :; done
- ip rule del pref 11991 iif "$LAN" lookup 199 2>/dev/null || true
+ while ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null; do :; done
+ while ip rule del pref 11991 iif "$LAN" lookup 199 2>/dev/null; do :; done
  ip route flush table 199 2>/dev/null || true
 }
-if [[ ${1:-} == stop ]]; then clean; exit; fi
+if [[ ${1:-} == stop ]]; then clean; exit 0; fi
 ip link show "$LAN" >/dev/null
 ip link show "$OUT" >/dev/null
-sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
+sysctl -w "net.ipv4.conf.${LAN}.rp_filter=0" "net.ipv4.conf.${OUT}.rp_filter=0" >/dev/null 2>&1 || true
+[[ -n "${WAN:-}" ]] && sysctl -w "net.ipv4.conf.${WAN}.rp_filter=0" >/dev/null 2>&1 || true
 ip link set "$LAN" up
 ip address replace "$ADDR/24" dev "$LAN"
 clean
@@ -6499,19 +6563,36 @@ if [[ "$OUT" != tailscale0 ]]; then
  if [[ -n "$GW" ]]; then ip route replace table 199 default via "$GW" dev "$OUT" onlink
  else ip route replace table 199 default dev "$OUT"; fi
  ip rule add pref 11991 iif "$LAN" lookup 199
+ if [[ -n "${WAN:-}" && "$OUT" != "$WAN" ]]; then
+  ip6tables -w -I FORWARD 1 -i "$LAN" -j DROP 2>/dev/null || true
+ fi
 else
- ip -4 route show table 52 | grep -q '^default dev tailscale0' || { echo 'Нет exit node'; exit 1; }
+ for _ in $(seq 1 15); do
+  ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && break
+  sleep 1
+ done
+ ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' || { echo 'Нет активного маршрута Tailscale exit node в таблице 52'; exit 1; }
+ ip route replace table 199 "$NET" dev "$LAN" scope link src "$ADDR"
+ ip rule add pref 11991 iif "$LAN" to "$NET" lookup 199
+ ip rule add pref 11990 iif "$LAN" lookup 52
+ ip6tables -w -I FORWARD 1 -i "$LAN" -j DROP 2>/dev/null || true
 fi
 iptables -w -N BR2_FWD
 iptables -w -A BR2_FWD -i "$LAN" -o "$OUT" -s "$NET" -j ACCEPT
-iptables -w -A BR2_FWD -i "$LAN" -j DROP
+iptables -w -A BR2_FWD -i "$LAN" -o "$LAN" -j ACCEPT
 iptables -w -A BR2_FWD -o "$LAN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -w -A BR2_FWD -i "$LAN" -j DROP
 iptables -w -I FORWARD 1 -j BR2_FWD
 iptables -w -t nat -N BR2_NAT
 iptables -w -t nat -A BR2_NAT -s "$NET" -o "$OUT" -j MASQUERADE
 iptables -w -t nat -I POSTROUTING 1 -j BR2_NAT
 iptables -w -t mangle -N BR2_MSS
+if [[ "$OUT" == tailscale0 ]]; then
+ iptables -w -t mangle -A BR2_MSS -i "$LAN" -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
+ iptables -w -t mangle -A BR2_MSS -i tailscale0 -o "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
+fi
 iptables -w -t mangle -A BR2_MSS -i "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+iptables -w -t mangle -A BR2_MSS -o "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -w -t mangle -I FORWARD 1 -j BR2_MSS
 BR
  chmod 700 /usr/local/sbin/bobarev-router-v2
@@ -6539,59 +6620,45 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 UNIT
- # DHCP allowed only on the chosen LAN; do not reset existing firewall.
+ # DHCP and DNS allowed on the chosen LAN; do not reset existing firewall.
  if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
   ufw allow in on "$lan_if" to any port 67 proto udp comment 'Bobarev router v2 DHCP' || return 1
+  if [[ "$dnsmasq_dns_port" == "53" ]]; then
+   ufw allow in on "$lan_if" to any port 53 proto udp comment 'Bobarev router v2 DNS UDP' || true
+   ufw allow in on "$lan_if" to any port 53 proto tcp comment 'Bobarev router v2 DNS TCP' || true
+  fi
+  ufw route allow in on "$lan_if" out on "$out_if" comment 'Bobarev LAN router' || true
+  ufw route allow in on "$out_if" out on "$lan_if" comment 'Bobarev LAN router return' || true
  fi
  if [[ "$out_if" == "tailscale0" ]]; then
   mkdir -p /etc/systemd/system/bobarev-router-v2.service.d
   cat > /etc/systemd/system/bobarev-router-v2.service.d/override.conf <<EOF
 [Unit]
-After=network-online.target tailscaled.service
+After=network-online.target tailscaled.service ufw.service
 Wants=network-online.target tailscaled.service
 
 [Service]
-ExecStartPre=/bin/sleep 5
-ExecStartPost=-/sbin/ip rule del pref 11990 iif $lan_if lookup 52
-ExecStartPost=/sbin/ip rule add pref 11990 iif $lan_if lookup 52
+ExecStartPre=/bin/sleep 3
 EOF
-  ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
-  ip rule add pref 11990 iif "$lan_if" lookup 52
   cat > /usr/local/sbin/bobarev-router-watchdog <<'WD'
 #!/bin/bash
 set -u
+[ -f /etc/bobarev-router-v2/config ] || exit 0
 source /etc/bobarev-router-v2/config
-LAN_DNS="${LAN_DNS:-192.168.199.153}"
 if [ "${OUT:-}" = "tailscale0" ]; then
-  ok=0
-  for i in 1 2 3; do
-    if curl -4 -s --max-time 8 https://api.ipify.org >/dev/null 2>&1; then ok=1; break; fi
-    sleep 5
-  done
-  if [ "$ok" != "1" ]; then
-    logger -t bobarev-router "Exit node unavailable: fallback to direct WAN ${WAN:-}"
-    tailscale set --exit-node= 2>/dev/null || true
-    sed -i "s/^OUT=.*/OUT=${WAN:-}/" /etc/bobarev-router-v2/config 2>/dev/null || true
-    systemctl restart bobarev-router-v2.service 2>/dev/null || true
+  # Проверяем наличие правил маршрутизации и цепочек после возможных перезапусков tailscaled/ufw
+  if ! ip -4 rule show | grep -q "11990:.*iif ${LAN} lookup 52"; then
+    ip rule add pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
   fi
-fi
-if dig +time=3 +tries=1 "@$LAN_DNS" cloudflare.com +short >/dev/null 2>&1; then
-  if ! iptables -w -t nat -C PREROUTING -i "${LAN:-}" -p udp --dport 53 -j DNAT --to-destination "$LAN_DNS" 2>/dev/null; then
-    logger -t bobarev-router "LAN DNS ${LAN_DNS} back online: restoring DNAT"
-    iptables -w -t nat -A PREROUTING -i "${LAN:-}" -p udp --dport 53 -j DNAT --to-destination "$LAN_DNS" 2>/dev/null || true
-    iptables -w -t nat -A PREROUTING -i "${LAN:-}" -p tcp --dport 53 -j DNAT --to-destination "$LAN_DNS" 2>/dev/null || true
-    if [ -f /etc/bobarev-router-v2/dhcp.conf ] && grep -q '^port=53' /etc/bobarev-router-v2/dhcp.conf; then
-      sed -i 's/^port=53/port=0/' /etc/bobarev-router-v2/dhcp.conf
-      sed -i '/^no-resolv$/d; /^server=8.8.8.8$/d; /^server=1.1.1.1$/d' /etc/bobarev-router-v2/dhcp.conf
-      systemctl restart bobarev-router-dhcp.service 2>/dev/null || true
-    fi
+  if ! iptables -w -t filter -C FORWARD -j BR2_FWD 2>/dev/null || ! iptables -w -t nat -C POSTROUTING -j BR2_NAT 2>/dev/null; then
+    /usr/local/sbin/bobarev-router-v2 start 2>/dev/null || true
   fi
 fi
 WD
   chmod 700 /usr/local/sbin/bobarev-router-watchdog
   cat > /etc/systemd/system/bobarev-router-watchdog.service <<'WDS'
 [Unit]
-Description=Bobarev router exit-node watchdog
+Description=Bobarev router exit-node rule integrity watchdog
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
@@ -6604,8 +6671,8 @@ WDS
 Description=Bobarev router exit-node watchdog timer
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
+OnBootSec=1min
+OnUnitActiveSec=1min
 AccuracySec=15s
 
 [Install]
@@ -6613,11 +6680,9 @@ WantedBy=timers.target
 WDT
   systemctl daemon-reload
   systemctl enable --now bobarev-router-watchdog.timer
- fi
-
- if command -v ufw >/dev/null && ufw status | grep -q 'Status: active'; then
-  ufw route allow in on "$lan_if" out on "$out_if" comment 'Bobarev LAN router' || true
-  ufw route allow in on "$out_if" out on "$lan_if" comment 'Bobarev LAN router return' || true
+ else
+  systemctl disable --now bobarev-router-watchdog.timer bobarev-router-watchdog.service 2>/dev/null || true
+  rm -rf /etc/systemd/system/bobarev-router-v2.service.d
  fi
 
  systemctl daemon-reload
@@ -6633,9 +6698,9 @@ WDT
  fi
  echo 'Настройки применены.'
  if [[ "$out_if" == "tailscale0" ]]; then
-  echo 'LAN-клиенты направлены через Tailscale exit node (правило 11990).'
+  echo 'LAN-клиенты направлены через Tailscale exit node (правило 11990 -> таблица 52, MSS 1140, DNS 53 открыт).'
  else
-  echo "LAN-клиенты направлены через WAN: $out_if"
+  echo "LAN-клиенты направлены через выход: $out_if (таблица 199)."
  fi
  echo "Google Wi-Fi: WAN DHCP, LAN другая подсеть (например 192.168.86.0/24). Обновите WAN-аренду Google Wi-Fi."
  echo 'Проверьте LAN-клиент: https://ifconfig.me'
@@ -6668,7 +6733,7 @@ ts_is_online() {
 
 ts_wait_exit_node() {
  local i
- for i in $(seq 1 15); do
+ for i in $(seq 1 20); do
   ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && return 0
   sleep 1
  done
@@ -6676,7 +6741,11 @@ ts_wait_exit_node() {
 }
 
 ts_exit_node_works() {
- /usr/bin/curl -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1
+ local u
+ for u in https://1.1.1.1/cdn-cgi/trace https://api.ipify.org https://ifconfig.me/ip; do
+  /usr/bin/curl -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS "$u" >/dev/null 2>&1 && return 0
+ done
+ return 1
 }
 
 # BOBAREV SHELL: isolated fail-fast network controller.
@@ -7691,6 +7760,7 @@ mod_network_reset() {
   item=${item//\"/}
   case "$item" in
    LAN_ROUTER)
+    systemctl disable --now bobarev-router-watchdog.timer bobarev-router-watchdog.service 2>/dev/null || true
     systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || true
     if [[ -f /etc/bobarev-router-dnsmasq-was-active ]]; then
      systemctl start dnsmasq.service || true

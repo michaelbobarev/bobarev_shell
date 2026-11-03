@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.16 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.17 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6405,7 +6405,18 @@ PY
      [[ "$MODULE_CANCELED" == false ]] || continue
      [[ -n "$ts_node" ]] || { echo 'IP/имя не введены — попробуйте ещё раз.'; pause_enter; continue; }
      if tailscale set --advertise-exit-node=false --exit-node="$ts_node" --exit-node-allow-lan-access=true --stateful-filtering=false; then
+      local route_ok=false
       if ts_wait_exit_node; then
+       route_ok=true
+      else
+       echo 'Узел подключается — жду ещё 45 секунд...'
+       local i
+       for i in $(seq 1 45); do
+        ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && { route_ok=true; break; }
+        sleep 1
+       done
+      fi
+      if [[ "$route_ok" == true ]]; then
        if ts_exit_node_works; then
         echo -e "${C_GREEN}Exit node применён, активен и проверен: $ts_node${C_RESET}"
         break
@@ -6416,7 +6427,7 @@ PY
         continue
        fi
       else
-       echo -e "${C_YELLOW}За 15 секунд default в table 52 не появился.${C_RESET}"
+       echo -e "${C_YELLOW}За 60 секунд default в table 52 так и не появился.${C_RESET}"
        echo 'Проверьте: узел online и на нём включён --advertise-exit-node.'
        tailscale set --exit-node="" || true
        pause_enter
@@ -6722,7 +6733,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.16
+# BOBAREV SHELL 3.14.17
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9512,7 +9523,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.16 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.17 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

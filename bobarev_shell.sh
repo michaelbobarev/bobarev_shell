@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.7 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.8 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6468,6 +6468,11 @@ sysctl -w net.ipv4.ip_forward=1
 ip link set "$LAN" up
 ip address replace "$ADDR/24" dev "$LAN"
 clean
+# Удаляем устаревшие DNAT-правила DNS на LAN: если их цель (например, 192.168.199.153)
+# недоступна, у клиентов ломается DNS и "пропадает интернет".
+iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$LAN\"" | grep -- "--dport 53" | grep -F "DNAT" | sed "s/^-A PREROUTING /-D PREROUTING /" | while read -r stale_rule; do
+  iptables -w -t nat $stale_rule 2>/dev/null || true
+done
 if [[ "$OUT" != tailscale0 ]]; then
  if [[ "$OUT" == "$LAN" ]]; then exit 1; fi
  GW=$(ip -4 route show table main default dev "$OUT" | awk '/via/{print $3;exit}')
@@ -6650,7 +6655,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.7
+# BOBAREV SHELL 3.14.8
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9440,7 +9445,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.7 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.8 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

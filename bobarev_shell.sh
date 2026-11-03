@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.10 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.11 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6385,13 +6385,19 @@ PY
    pause_enter
    return 0
   fi
-  if ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
+  while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
    echo 'Tailscale exit node пока не выбран или не активен.'
    local ts_choice='' ts_node=''
    smart_menu 'Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
    case "$ts_choice" in
     0) return 0 ;;
-    1) tailscale exit-node list || true; pause_enter ;;
+    1)
+     tailscale exit-node list || true
+     echo
+     echo 'Скопируйте IP нужного узла и выберите пункт 2.'
+     pause_enter
+     continue
+     ;;
     2)
      MODULE_CANCELED=false
      prompt_default 'IP или имя exit node' '' ts_node
@@ -6400,27 +6406,29 @@ PY
       if ts_wait_exit_node; then
        if ts_exit_node_works; then
         echo -e "${C_GREEN}Exit node применён, активен и проверен: $ts_node${C_RESET}"
+        break
        else
         echo -e "${C_YELLOW}Маршрут появился, но интернет через exit node не проходит.${C_RESET}"
         echo 'Откатываю exit node.'
         tailscale set --exit-node="" || true
         pause_enter
-        return 0
+        continue
        fi
       else
        echo -e "${C_YELLOW}За 20 секунд default в table 52 не появился.${C_RESET}"
        tailscale set --exit-node="" || true
        pause_enter
-       return 0
+       continue
       fi
      else
       echo -e "${C_RED}Не удалось применить exit node.${C_RESET}"
       pause_enter
-      return 0
+      continue
      fi
      ;;
    esac
-  fi
+  done
+  ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' || { echo 'Exit node не активен — применение отменено.'; pause_enter; return 0; }
  fi
  echo "Будет: LAN $lan_if $lan_ip/24 -> $out_if. DHCP .50-.200, DNS $dns_servers."
  echo 'Существующий dnsmasq будет остановлен и заменён отдельной DHCP-службой. Старые конфиги сохраняются.'
@@ -6690,7 +6698,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.10
+# BOBAREV SHELL 3.14.11
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9480,7 +9488,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.10 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.11 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

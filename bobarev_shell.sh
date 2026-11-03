@@ -6424,7 +6424,7 @@ PY
  fi
  echo "Будет: LAN $lan_if $lan_ip/24 -> $out_if. DHCP .50-.200, DNS $dns_servers."
  echo 'Существующий dnsmasq будет остановлен и заменён отдельной DHCP-службой. Старые конфиги сохраняются.'
- echo 'SSH/WAN/Tailscale не перенастраиваются. IPv6 клиентов через LAN блокируется (без IPv6 VPN/NAT).'
+ echo 'SSH/WAN/Tailscale не перенастраиваются. IPv6 клиентов через LAN не блокируется (IPv6-интернет зависит от провайдера).'
  nm_yes 'Применить маршрутизатор?' || return 0
  apt-get install -y dnsmasq-base iptables iproute2 || return 1
  br_snapshot || return 1

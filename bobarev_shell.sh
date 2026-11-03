@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.15 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.16 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6443,7 +6443,7 @@ PY
   systemctl stop dnsmasq.service || return 1
  fi
  install -d -m 700 /etc/bobarev-router-v2
- printf 'LAN=%q\nOUT=%q\nADDR=%q\n' "$lan_if" "$out_if" "$lan_ip" > /etc/bobarev-router-v2/config
+ printf 'LAN=%q\nOUT=%q\nWAN=%q\nADDR=%q\n' "$lan_if" "$out_if" "$wan_if" "$lan_ip" > /etc/bobarev-router-v2/config
  local prefix=${lan_ip%.*}
  local dns_dnat_target=""
  dns_dnat_target=$(iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$lan_if\"" | grep -- "--dport 53" | grep -oP 'to-destination:\K[0-9.]+' | head -n1 || true)
@@ -6540,7 +6540,7 @@ if [[ "$OUT" == "tailscale0" ]]; then
  iptables -w -t mangle -A BR2_MSS -i tailscale0 -o "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
 fi
 iptables -w -t mangle -I FORWARD 1 -j BR2_MSS
-if [[ "$OUT" != "$WAN" ]]; then
+if [[ "$OUT" != "${WAN:-$OUT}" ]]; then
  ip6tables -w -I FORWARD 1 -i "$LAN" -j DROP
 fi
 BR
@@ -6722,7 +6722,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.15
+# BOBAREV SHELL 3.14.16
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9512,7 +9512,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.15 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.16 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

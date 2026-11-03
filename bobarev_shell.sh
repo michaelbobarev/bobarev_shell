@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.6 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.7 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6433,7 +6433,7 @@ PY
   systemctl stop dnsmasq.service || return 1
  fi
  install -d -m 700 /etc/bobarev-router-v2
- printf 'LAN=%q\nOUT=%q\nADDR=%q\n' "$lan_if" "$out_if" "$lan_ip" > /etc/bobarev-router-v2/config
+ printf 'LAN=%q\nOUT=%q\nWAN=%q\nADDR=%q\n' "$lan_if" "$out_if" "$wan_if" "$lan_ip" > /etc/bobarev-router-v2/config
  local prefix=${lan_ip%.*}
  cat > /etc/bobarev-router-v2/dhcp.conf <<EOF
 port=0
@@ -6488,7 +6488,6 @@ iptables -w -t nat -I POSTROUTING 1 -j BR2_NAT
 iptables -w -t mangle -N BR2_MSS
 iptables -w -t mangle -A BR2_MSS -i "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -w -t mangle -I FORWARD 1 -j BR2_MSS
-ip6tables -w -I FORWARD 1 -i "$LAN" -j DROP
 BR
  chmod 700 /usr/local/sbin/bobarev-router-v2
  cat > /etc/systemd/system/bobarev-router-v2.service <<'UNIT'
@@ -6533,6 +6532,47 @@ ExecStartPost=/sbin/ip rule add pref 11990 iif $lan_if lookup 52
 EOF
   ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
   ip rule add pref 11990 iif "$lan_if" lookup 52
+  cat > /usr/local/sbin/bobarev-router-watchdog <<'WD'
+#!/bin/bash
+set -u
+source /etc/bobarev-router-v2/config
+[ "${OUT:-}" = "tailscale0" ] || exit 0
+for i in 1 2 3; do
+  if curl -4 -s --max-time 8 https://api.ipify.org >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 5
+done
+logger -t bobarev-router "Exit node недоступен: откат на прямой WAN ${WAN:-}"
+tailscale set --exit-node= 2>/dev/null || true
+sed -i "s/^OUT=.*/OUT=${WAN:-}/" /etc/bobarev-router-v2/config 2>/dev/null || true
+systemctl restart bobarev-router-v2.service 2>/dev/null || true
+WD
+  chmod 700 /usr/local/sbin/bobarev-router-watchdog
+  cat > /etc/systemd/system/bobarev-router-watchdog.service <<'WDS'
+[Unit]
+Description=Bobarev router exit-node watchdog
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bobarev-router-watchdog
+WDS
+  cat > /etc/systemd/system/bobarev-router-watchdog.timer <<'WDT'
+[Unit]
+Description=Bobarev router exit-node watchdog timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+WDT
+  systemctl daemon-reload
+  systemctl enable --now bobarev-router-watchdog.timer
  fi
 
  if command -v ufw >/dev/null && ufw status | grep -q 'Status: active'; then
@@ -6610,7 +6650,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.6
+# BOBAREV SHELL 3.14.7
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9400,7 +9440,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.6 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.7 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

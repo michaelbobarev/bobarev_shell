@@ -6435,7 +6435,6 @@ PY
  install -d -m 700 /etc/bobarev-router-v2
  printf 'LAN=%q\nOUT=%q\nWAN=%q\nADDR=%q\n' "$lan_if" "$out_if" "$wan_if" "$lan_ip" > /etc/bobarev-router-v2/config
  local prefix=${lan_ip%.*}
- # --- DNS health-check: живой DNAT-цель сохраняем, мёртвую заменяем dnsmasq-DNS ---
  local dns_dnat_target=""
  dns_dnat_target=$(iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$lan_if\"" | grep -- "--dport 53" | grep -oP 'to-destination:\K[0-9.]+' | head -n1 || true)
  local dns_dnat_ok=false
@@ -6450,7 +6449,7 @@ PY
   echo "Существующий DNS ${dns_dnat_target} отвечает — DNAT сохраняется."
  else
   if [[ -n "$dns_dnat_target" ]]; then
-   echo "DNS ${dns_dnat_target} не отвечает — удаляю DNAT и включаю DNS на NanoPi."
+   echo "DNS ${dns_dnat_target} не отвечает — удаляю DNAT, включаю DNS на NanoPi."
    iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$lan_if\"" | grep -- "--dport 53" | grep -F "DNAT" | sed "s/^-A PREROUTING /-D PREROUTING /" | while read -r stale_rule; do
     iptables -w -t nat $stale_rule 2>/dev/null || true
    done || true
@@ -6458,19 +6457,18 @@ PY
   dnsmasq_dns_port=53
   dhcp_dns="$lan_ip"
  fi
- cat > /etc/bobarev-router-v2/dhcp.conf <<EOF
-port=$dnsmasq_dns_port
-interface=$lan_if
-bind-dynamic
-dhcp-range=$prefix.50,$prefix.200,255.255.255.0,12h
-dhcp-option=3,$lan_ip
-dhcp-option=6,$dhcp_dns
-dhcp-leasefile=/var/lib/misc/bobarev-router.leases
-EOF
- if [[ "$dnsmasq_dns_port" == "53" ]]; then
-  printf 'no-resolv\nserver=8.8.8.8\nserver=1.1.1.1\n' >> /etc/bobarev-router-v2/dhcp.conf
- fi
-EOF
+ {
+  printf 'port=%s\n' "$dnsmasq_dns_port"
+  printf 'interface=%s\n' "$lan_if"
+  printf 'bind-dynamic\n'
+  printf 'dhcp-range=%s.50,%s.200,255.255.255.0,12h\n' "$prefix" "$prefix"
+  printf 'dhcp-option=3,%s\n' "$lan_ip"
+  printf 'dhcp-option=6,%s\n' "$dhcp_dns"
+  printf 'dhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
+  if [[ "$dnsmasq_dns_port" == "53" ]]; then
+   printf 'no-resolv\nserver=8.8.8.8\nserver=1.1.1.1\n'
+  fi
+ } > /etc/bobarev-router-v2/dhcp.conf
  dnsmasq --test --conf-file=/etc/bobarev-router-v2/dhcp.conf || return 1
  cat > /usr/local/sbin/bobarev-router-v2 <<'BR'
 #!/bin/bash
@@ -6564,8 +6562,6 @@ EOF
 set -u
 source /etc/bobarev-router-v2/config
 LAN_DNS="${LAN_DNS:-192.168.199.153}"
-
-# --- 1. Exit node health: откат на прямой WAN, если узел умер ---
 if [ "${OUT:-}" = "tailscale0" ]; then
   ok=0
   for i in 1 2 3; do
@@ -6573,17 +6569,15 @@ if [ "${OUT:-}" = "tailscale0" ]; then
     sleep 5
   done
   if [ "$ok" != "1" ]; then
-    logger -t bobarev-router "Exit node недоступен: откат на прямой WAN ${WAN:-}"
+    logger -t bobarev-router "Exit node unavailable: fallback to direct WAN ${WAN:-}"
     tailscale set --exit-node= 2>/dev/null || true
     sed -i "s/^OUT=.*/OUT=${WAN:-}/" /etc/bobarev-router-v2/config 2>/dev/null || true
     systemctl restart bobarev-router-v2.service 2>/dev/null || true
   fi
 fi
-
-# --- 2. LAN DNS auto-restore: если .153 ожил, вернуть DNAT и вернуть dnsmasq в DHCP-only ---
 if dig +time=3 +tries=1 "@$LAN_DNS" cloudflare.com +short >/dev/null 2>&1; then
   if ! iptables -w -t nat -C PREROUTING -i "${LAN:-}" -p udp --dport 53 -j DNAT --to-destination "$LAN_DNS" 2>/dev/null; then
-    logger -t bobarev-router "LAN DNS ${LAN_DNS} снова доступен: восстанавливаю DNAT"
+    logger -t bobarev-router "LAN DNS ${LAN_DNS} back online: restoring DNAT"
     iptables -w -t nat -A PREROUTING -i "${LAN:-}" -p udp --dport 53 -j DNAT --to-destination "$LAN_DNS" 2>/dev/null || true
     iptables -w -t nat -A PREROUTING -i "${LAN:-}" -p tcp --dport 53 -j DNAT --to-destination "$LAN_DNS" 2>/dev/null || true
     if [ -f /etc/bobarev-router-v2/dhcp.conf ] && grep -q '^port=53' /etc/bobarev-router-v2/dhcp.conf; then

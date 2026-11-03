@@ -6468,11 +6468,13 @@ sysctl -w net.ipv4.ip_forward=1
 ip link set "$LAN" up
 ip address replace "$ADDR/24" dev "$LAN"
 clean
-# Удаляем устаревшие DNAT-правила DNS на LAN: если их цель (например, 192.168.199.153)
-# недоступна, у клиентов ломается DNS и "пропадает интернет".
-iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$LAN\"" | grep -- "--dport 53" | grep -F "DNAT" | sed "s/^-A PREROUTING /-D PREROUTING /" | while read -r stale_rule; do
-  iptables -w -t nat $stale_rule 2>/dev/null || true
-done
+# Удаляем устаревшие DNAT-правила DNS на LAN: если их цель недоступна,
+# у клиентов ломается DNS и "пропадает интернет". Безопасно при отсутствии правил.
+if iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$LAN\"" | grep -- "--dport 53" | grep -qF "DNAT"; then
+  iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$LAN\"" | grep -- "--dport 53" | grep -F "DNAT" | sed "s/^-A PREROUTING /-D PREROUTING /" | while read -r stale_rule; do
+    iptables -w -t nat $stale_rule 2>/dev/null || true
+  done || true
+fi
 if [[ "$OUT" != tailscale0 ]]; then
  if [[ "$OUT" == "$LAN" ]]; then exit 1; fi
  GW=$(ip -4 route show table main default dev "$OUT" | awk '/via/{print $3;exit}')

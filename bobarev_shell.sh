@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.29 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.33 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -11,8 +11,13 @@ BOBAREV_SECTION_TITLE=''
 whiptail() {
  local -a forwarded=()
  while (($#)); do
-  if [[ "$1" == --title && -n "${BOBAREV_SECTION_TITLE:-}" ]]; then shift; (($#)) && shift; continue; fi
-  forwarded+=("$1"); shift
+  if [[ "$1" == --title && -n "${BOBAREV_SECTION_TITLE:-}" ]]; then
+   shift
+   if (($#)); then shift; fi
+   continue
+  fi
+  forwarded+=("$1")
+  shift
  done
  if [[ -n "${BOBAREV_SECTION_TITLE:-}" ]]; then
   command whiptail --title "$BOBAREV_SECTION_TITLE" "${forwarded[@]}"
@@ -90,7 +95,7 @@ get_system_type_short() {
 }
 
 get_wan_if() {
-    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
 }
 
 DEFAULT_WAN_IF=$(get_wan_if)
@@ -196,10 +201,15 @@ is_wg0_active() {
 
 ensure_wg_kernel_modules() {
     silent_run modprobe wireguard
+    silent_run modprobe nf_conntrack
+    silent_run modprobe tcp_bbr
     silent_run modprobe ip6table_mangle
     silent_run modprobe xt_TCPMSS
     mkdir -p /etc/modules-load.d
     cat << 'MOD_EOF' > /etc/modules-load.d/bobarev-network-modules.conf
+wireguard
+nf_conntrack
+tcp_bbr
 ip6table_mangle
 xt_TCPMSS
 MOD_EOF
@@ -509,6 +519,17 @@ CAMO_EOF
 }
 
 ensure_go_and_build_caddy_naive() {
+    local caddy_cache="/var/lib/bobarev-shell-mullvad/caddy/caddy"
+    if [ -x "$CADDY_BIN" ] && { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
+        echo -e "${C_GREEN} Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
+        return 0
+    fi
+    if [ -x "$caddy_cache" ] && { "$caddy_cache" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
+        install -m 755 "$caddy_cache" "$CADDY_BIN"
+        echo -e "${C_GREEN} Восстановлен ранее собранный Caddy с NaiveProxy из локального кэша.${C_RESET}"
+        return 0
+    fi
+
     export DEBIAN_FRONTEND=noninteractive
     if ! command -v curl &>/dev/null || ! command -v wget &>/dev/null || ! command -v git &>/dev/null || ! command -v htpasswd &>/dev/null; then
         echo -e "${C_BLUE} Доустановка утилит сборки Caddy (git, openssl, apache2-utils)...${C_RESET}"
@@ -556,12 +577,6 @@ ensure_go_and_build_caddy_naive() {
         echo -e "${C_GREEN} Компилятор Go ${GO_VERSION_PIN} успешно установлен.${C_RESET}"
     fi
 
-    if [ -x "$CADDY_BIN" ] && { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
-        rm -rf "$build_tmp_dir"
-        echo -e "${C_GREEN} Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
-        return 0
-    fi
-
     echo -e "${C_BLUE} Сборка Caddy ${CADDY_VERSION_PIN} с модулем klzgrad/forwardproxy@naive (занимает 3-10 минут)...${C_RESET}"
     export GOPATH="/root/go"
     export GOCACHE="/root/.cache/go-build"
@@ -576,20 +591,15 @@ ensure_go_and_build_caddy_naive() {
         --output "$tmp_caddy_bin" || true
 
     if [ -f "$tmp_caddy_bin" ]; then
-        chmod +x "$tmp_caddy_bin"
-        mv -f "$tmp_caddy_bin" "$CADDY_BIN"
+        install -m 755 "$tmp_caddy_bin" "$CADDY_BIN"
+        mkdir -p "$(dirname "$caddy_cache")"
+        install -m 755 "$tmp_caddy_bin" "$caddy_cache" 2>/dev/null || true
     fi
 
     rm -rf "$build_tmp_dir"
     unset GOTMPDIR TMPDIR
 
-    if [ ! -f "$CADDY_BIN" ]; then
-        echo -e "${C_RED} Ошибка сборки: бинарный файл $CADDY_BIN не был создан (проверьте наличие свободного места на диске df -h).${C_RESET}"
-        return 1
-    fi
-
-    chmod +x "$CADDY_BIN"
-    if ! { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
+    if [ ! -x "$CADDY_BIN" ] || ! { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
         echo -e "${C_RED} Ошибка сборки: модуль http.handlers.forward_proxy не найден в Caddy.${C_RESET}"
         return 1
     fi
@@ -625,6 +635,7 @@ render_naive_caddyfile() {
     cat << EOF > "$CADDYFILE"
 {
     order forward_proxy before file_server
+    email ${email}
     servers :443 {
         protocols h1 h2 h3
     }
@@ -636,7 +647,7 @@ render_naive_caddyfile() {
     }
 }
 
-:443, ${dom} {
+${dom} {
     tls ${email}
 
     @naive_proxy method CONNECT
@@ -683,12 +694,9 @@ ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
-LimitNPROC=512
 PrivateTmp=true
 ProtectSystem=full
 NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=5s
 
@@ -790,7 +798,7 @@ manage_naive_users_menu() {
     while true; do
         MODULE_CANCELED=false
         local u_cnt=0
-        [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || echo 0)
+        [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || true); u_cnt="${u_cnt:-0}"
 
         local u_choice
         if ! smart_menu "Управление пользователями NaiveProxy" "\nАктивных пользователей: $u_cnt\nВыберите действие:" 15 $WT_WIDTH 4 "u_choice" \
@@ -835,7 +843,7 @@ manage_naive_users_menu() {
 tune_fq_qdisc_interfaces() {
     command -v tc &>/dev/null || return 0
     local wan_if=$(get_wan_if)
-    for dev in $wan_if tailscale0 wg-cascade warp; do
+    for dev in $wan_if tailscale0 wg0 wg-cascade warp; do
         [ -z "$dev" ] && continue
         if ip link show "$dev" >/dev/null 2>&1; then
             tc qdisc replace dev "$dev" root fq limit 30000 flow_limit 10000 2>/dev/null || true
@@ -850,7 +858,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.8.55: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.33: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -893,7 +901,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.8.55: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.33: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -1007,7 +1015,7 @@ else
     sysctl -w net.ipv4.tcp_no_metrics_save=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_autocorking=0 >/dev/null 2>&1 || true
 fi
-WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$WAN_IF" ] && command -v tc &>/dev/null; then
     tc qdisc replace dev "$WAN_IF" root fq limit 30000 flow_limit 10000 2>/dev/null || true
 fi
@@ -1116,12 +1124,12 @@ setup_hybrid_wg_routing() {
         cp /etc/wireguard/wg0.conf "$tmp_wg"
     fi
 
-    local priv=$(awk -F'= ' '/^PrivateKey/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
-    local addr=$(awk -F'= ' '/^Address/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
-    local pub=$(awk -F'= ' '/^PublicKey/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
-    local psk=$(awk -F'= ' '/^PresharedKey/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
-    local ep=$(awk -F'= ' '/^Endpoint/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
-    local keepalive=$(awk -F'= ' '/^PersistentKeepalive/{print $2}' "$tmp_wg" 2>/dev/null | head -n 1 | tr -d '[:space:]')
+    local priv=$(awk -F'=' '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' "$tmp_wg" 2>/dev/null | tr -d '[:space:]')
+    local addr=$(awk -F'=' '/^[[:space:]]*Address[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' "$tmp_wg" 2>/dev/null | tr -d '[:space:]')
+    local pub=$(awk -F'=' '/^[[:space:]]*PublicKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' "$tmp_wg" 2>/dev/null | tr -d '[:space:]')
+    local psk=$(awk -F'=' '/^[[:space:]]*PresharedKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' "$tmp_wg" 2>/dev/null | tr -d '[:space:]')
+    local ep=$(awk -F'=' '/^[[:space:]]*Endpoint[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' "$tmp_wg" 2>/dev/null | tr -d '[:space:]')
+    local keepalive=$(awk -F'=' '/^[[:space:]]*PersistentKeepalive[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' "$tmp_wg" 2>/dev/null | tr -dc '0-9')
     [ -z "$keepalive" ] && keepalive="25"
     rm -f "$tmp_wg"
 
@@ -1184,11 +1192,11 @@ PostUp = ip rule del lookup 150 priority 30000 2>/dev/null || true
 PostUp = ip rule add lookup 150 priority 30000
 
 # 5. ФОРВАРДИНГ, MSS CLAMPING И NAT
-PostUp = iptables -A FORWARD -i tailscale0 -o wg0 -j ACCEPT 2>/dev/null || true
-PostUp = iptables -A FORWARD -i wg0 -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostUp = iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || true
-PostUp = iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-PostUp = iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -C FORWARD -i tailscale0 -o wg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o wg0 -j ACCEPT 2>/dev/null || true
+PostUp = iptables -C FORWARD -i wg0 -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg0 -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostUp = iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || true
+PostUp = iptables -t mangle -C FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostUp = iptables -t mangle -C OUTPUT -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A OUTPUT -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
 # --- ПРАВИЛА ОЧИСТКИ ПРИ ОСТАНОВКЕ (PostDown) ---
 PostDown = ip rule del lookup 150 priority 30000 2>/dev/null || true
@@ -1199,6 +1207,8 @@ PostDown = ip rule del sport $ssh_p lookup main priority 98 2>/dev/null || true
 PostDown = ip rule del sport 41641 lookup main priority 97 2>/dev/null || true
 PostDown = ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null || true
 PostDown = ip rule del fwmark 51820 lookup main priority 95 2>/dev/null || true
+PostDown = iptables -t mangle -D OUTPUT -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+PostDown = iptables -t mangle -D FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg0 -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i tailscale0 -o wg0 -j ACCEPT 2>/dev/null || true
@@ -1251,17 +1261,21 @@ EOF
         [ -n "$test_ip" ] && break
         sleep 1
     done
-    [ -z "$test_ip" ] && test_ip=$(curl -4 -s --max-time 5 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте пир WireGuard")
+    [ -z "$test_ip" ] && test_ip=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || echo "Проверьте пир WireGuard")
 
     echo -e "
 ${C_GREEN} Гибридный шлюз успешно активирован!${C_RESET}"
     echo -e "   Исходящий IP туннеля (WireGuard wg0): ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     echo -e "   Клиенты NaiveProxy (Shadowrocket) и Tailscale Exit Node выходят в интернет через: ${C_BOLD}wg0${C_RESET}"
-    echo -e "   Входящие подключения к серверу и SSH защищены и работают напрямую через: ${C_BOLD}ens3${C_RESET}"
+    echo -e "   Входящие подключения к серверу и SSH защищены и работают напрямую через физический интерфейс: ${C_BOLD}${DEFAULT_WAN_IF:-ens3}${C_RESET}"
     return 0
 }
 
 disable_hybrid_wg_routing() {
+    local cleanup_ssh_port=''
+    if [[ -r /etc/wireguard/wg0.conf ]]; then
+        cleanup_ssh_port=$(sed -nE 's/^[[:space:]]*PostUp[[:space:]]*=[[:space:]]*ip rule add sport ([0-9]+) lookup main priority 98[[:space:]]*$/\1/p' /etc/wireguard/wg0.conf | awk 'NR==1 {print}')
+    fi
     echo -e "${C_YELLOW} Отключение туннеля wg0 и возврат к прямому выходу в интернет...${C_RESET}"
     silent_run systemctl stop wg-quick@wg0
     silent_run systemctl disable wg-quick@wg0
@@ -1273,6 +1287,9 @@ disable_hybrid_wg_routing() {
     while ip rule del fwmark 51820 lookup main priority 95 2>/dev/null; do :; done
     while ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null; do :; done
     while ip rule del sport 41641 lookup main priority 97 2>/dev/null; do :; done
+    if [[ "$cleanup_ssh_port" =~ ^[0-9]+$ ]]; then
+        while ip rule del sport "$cleanup_ssh_port" lookup main priority 98 2>/dev/null; do :; done
+    else echo 'Сохранённый SSH-порт правила 98 не найден; неизвестное правило не удаляется.'; fi
     while ip rule del sport 443 lookup main priority 99 2>/dev/null; do :; done
     while ip rule del sport 80 lookup main priority 100 2>/dev/null; do :; done
 
@@ -1323,7 +1340,7 @@ setup_standalone_naive() {
         fi
 
         local u_cnt=0
-        [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || echo 0)
+        [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || true); u_cnt="${u_cnt:-0}"
 
         local sc_choice=""
         if [ "$is_configured" = true ]; then
@@ -1619,10 +1636,10 @@ ensure_warp_installed_and_configured() {
 
     if [ "$need_patch" = true ]; then
         # Безопасная генерация /etc/wireguard/warp.conf без многострочных sed
-        local w_priv=$(awk -F'= ' '/^PrivateKey/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | tr -d '[:space:]')
-        local w_addr=$(awk -F'= ' '/^Address/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | cut -d',' -f1 | tr -d '[:space:]')
-        local w_pub=$(awk -F'= ' '/^PublicKey/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | tr -d '[:space:]')
-        local w_end=$(awk -F'= ' '/^Endpoint/{print $2}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | tr -d '[:space:]')
+        local w_priv=$(awk -F'=' '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | tr -d '[:space:]')
+        local w_addr=$(awk -F'=' '/^[[:space:]]*Address[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | cut -d',' -f1 | tr -d '[:space:]')
+        local w_pub=$(awk -F'=' '/^[[:space:]]*PublicKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | tr -d '[:space:]')
+        local w_end=$(awk -F'=' '/^[[:space:]]*Endpoint[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | tr -d '[:space:]')
         [ -z "$w_addr" ] && w_addr="172.16.0.2/32"
         [ -z "$w_end" ] && w_end="engage.cloudflareclient.com:2408"
 
@@ -1644,17 +1661,17 @@ PostUp = ip link set dev warp mtu 1280 txqueuelen 10000 || true
 PostUp = tc qdisc replace dev warp root fq limit 30000 flow_limit 10000 2>/dev/null || true
 PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
 PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT
-PostUp = iptables -C FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
-PostUp = iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
 PostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
 PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
 PostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
 [Peer]
 PublicKey = $w_pub
@@ -1886,16 +1903,18 @@ ensure_hysteria_installed() {
 
 clean_udp2raw_iptables() {
     local rline=""
+    local -a rule_args=()
     while read -r rline; do
         [ -z "$rline" ] && continue
-        eval "iptables ${rline/-A /-D }" 2>/dev/null || true
+        read -r -a rule_args <<< "${rline/-A /-D }"
+        iptables -w 5 "${rule_args[@]}" 2>/dev/null || true
     done < <(iptables -S INPUT 2>/dev/null | grep "udp2rawDwrW_" || true)
 
     local cname=""
     while read -r cname; do
         [ -z "$cname" ] && continue
-        iptables -F "$cname" 2>/dev/null || true
-        iptables -X "$cname" 2>/dev/null || true
+        iptables -w 5 -F "$cname" 2>/dev/null || true
+        iptables -w 5 -X "$cname" 2>/dev/null || true
     done < <(iptables -S 2>/dev/null | awk '/^-N udp2rawDwrW_/{print $2}' || true)
 }
 
@@ -1906,11 +1925,11 @@ clean_duplicate_cascade_iptables() {
     fi
     local wan_dev=$(get_wan_if)
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     if [ -n "$wan_dev" ]; then
         while iptables -D FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
-        while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+        while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
         while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     fi
     for mss_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
@@ -1951,13 +1970,13 @@ apply_foreign_exit_mode() {
     while iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null; do :; done
     tune_fq_qdisc_interfaces
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i "$wan_dev" -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+    while iptables -D FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     for mss_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
         while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
@@ -1977,9 +1996,9 @@ apply_foreign_exit_mode() {
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
 
         iptables -C FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o "$wan_dev" -j ACCEPT
-        iptables -C FORWARD -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o "$wan_dev" -j ACCEPT
-        iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         apply_wan_exit_nat "$wan_dev" "true"
 
         # Для прямого WG-моста: MSS 1200; для Tailscale (с учетом заголовка Disco): MSS 1140
@@ -2005,9 +2024,9 @@ apply_foreign_exit_mode() {
         ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 
         iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
-        iptables -C FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT
-        iptables -C FORWARD -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
 
         iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
@@ -2247,9 +2266,9 @@ PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST 
 PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 || true
 PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i warp -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -D FORWARD -i wg-cascade -o $wan_dev -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i $wan_dev -o wg-cascade -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i $wan_dev -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
@@ -2587,7 +2606,7 @@ EOF
     done
     local test_ip=$(curl -4 -s --interface wg-cascade --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
     if [ -z "$test_ip" ]; then
-        test_ip=$(curl -4 -s --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Установка рукопожатия...")
+        test_ip=$(curl -4 -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || echo "Установка рукопожатия...")
     fi
     [ -z "$test_ip" ] && test_ip="Установка рукопожатия..."
     echo -e "   Выходной IP каскада: ${C_GREEN}${test_ip}${C_RESET}"
@@ -2822,7 +2841,7 @@ setup_cascade_hysteria_server1_ru() {
     # Отключаем перехват маршрутов от Каскада 1 (wg-cascade / udp2raw) и Tailscale Exit Node,
     # чтобы трафик шел строго по цепочке: Caddy (NaiveProxy) -> socks5://127.0.0.1:1080 (Hysteria 2 Client) -> Сервер 2
     echo -e "${C_BLUE} Очистка конфликтующих маршрутов wg-cascade и старых экземпляров Hysteria...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service hysteria-server.service hysteria-client.service
+    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade
     ip link del dev wg-cascade 2>/dev/null || true
@@ -2915,7 +2934,7 @@ EOF
     echo -e "${C_BLUE} Проверка выходного IP через локальный SOCKS5-мост Hysteria 2 (127.0.0.1:1080)...${C_RESET}"
     local test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
     if [ -z "$test_ip" ]; then
-        test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://ip.gs 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность UDP-порта ${s2_port} на Сервере 2")
+        test_ip=$(curl -4 -s --socks5-hostname 127.0.0.1:1080 --max-time 6 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || echo "Проверьте доступность UDP-порта ${s2_port} на Сервере 2")
     fi
     echo -e "\n${C_GREEN} Каскад 2 (NaiveProxy -> Hysteria 2 SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "   Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
@@ -3330,9 +3349,7 @@ setup_cascade_xray_server1_ru() {
     if [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ]; then return 0; fi
 
     local clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
-    local decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '
-
-' || echo "")
+    local decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\r\n' || echo "")
     local s2_ip="" s2_port="" s2_uuid="" s2_pub="" s2_short_id="" s2_sni=""
     IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni <<< "$decoded"
 
@@ -3950,12 +3967,12 @@ enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 tries=0
-while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" >/dev/null 2>&1; do
+while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -ge 15 ] && exit 0
     sleep 2
 done
-NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
 if [ -n "$NETDEV" ]; then
     if systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null || [ -f /etc/systemd/system/bobarev-udp2raw.service ]; then
         # Для сырых сокетов udp2raw (PF_PACKET) склейка UDP GRO и аппаратный оффлоад TCP вызывают сбои инкапсуляции и дропы пакетов > MTU на virtio_net
@@ -4194,7 +4211,7 @@ check_system_resources() {
             silent_run mkswap /swapfile
             silent_run swapon /swapfile
             if ! grep -q "/swapfile" /etc/fstab; then
-                echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null 2>&1 || true
+                echo '/swapfile none swap sw 0 0' >> /etc/fstab 2>/dev/null || true
             fi
             echo -e "${C_GREEN} Swap-файл (2 ГБ) успешно создан и активирован.${C_RESET}"
         else
@@ -4240,7 +4257,7 @@ fi
 
 # 1. Часовой пояс и синхронизация времени
 mod_timezone() {
-    echo -e "${C_CYAN} === 1/21. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
+    echo -e "${C_CYAN} === 1/27. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Europe/Moscow")
     echo "Текущий часовой пояс: $current_tz"
     local tz=""
@@ -4254,7 +4271,7 @@ mod_timezone() {
 
 # 2. Имя хоста
 mod_hostname() {
-    echo -e "${C_CYAN} === 2/21. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
+    echo -e "${C_CYAN} === 2/27. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
     echo "Текущее имя хоста: $(hostname)"
     
     local default_brand_host="Server-VPS"
@@ -4289,7 +4306,7 @@ mod_hostname() {
 
 # 3. Обновление пакетов
 mod_apt_update() {
-    echo -e "${C_CYAN} === 3/21. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
+    echo -e "${C_CYAN} === 3/27. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
 
     if [ -f /etc/gai.conf ]; then
@@ -4348,7 +4365,7 @@ ZRAM_EOF
 
 # 4. Пользователь и Sudo (с гарантированным приоритетом 99-zzz- в /etc/sudoers.d)
 mod_user_setup() {
-    echo -e "${C_CYAN} === 4/21. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
+    echo -e "${C_CYAN} === 4/27. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
     local active_user=$(get_active_user)
     local username=""
     prompt_default "Имя администратора:" "$active_user" username
@@ -4429,7 +4446,7 @@ mod_user_setup() {
 
 # 5. SSH-ключи
 mod_ssh_key() {
-    echo -e "${C_CYAN} === 5/21. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN} === 5/27. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
     local active_user=$(get_active_user)
     local target_user=""
     prompt_default "Для какого пользователя привязать ключ?" "$active_user" target_user
@@ -4494,7 +4511,7 @@ mod_ssh_key() {
 
 # 6. Конфигурация SSH (с поддержкой полной Zero-Trust изоляции на tailscale0)
 mod_ssh_config() {
-    echo -e "${C_CYAN} === 6/21. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN} === 6/27. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
 
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
@@ -4667,7 +4684,7 @@ SSH_HARDENING_EOF
 
 # 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6 форвардингом)
 mod_hardening() {
-    echo -e "${C_CYAN} === 7/21. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
+    echo -e "${C_CYAN} === 7/27. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
     sed -i -E '/^\s*(net\.core\.(rmem|wmem)_(max|default)|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc)\s*=/d' /etc/sysctl.conf 2>/dev/null || true
     backup_file "/etc/sysctl.d/99-zzz-server-hardening.conf"
@@ -4751,7 +4768,7 @@ HARDENING_EOF
 
 # 8. Firewall UFW (сохраняет правила личного DERP, Каскада NaiveProxy/WARP/WG-Cascade и открывает 41641/udp при наличии Tailscale)
 mod_ufw() {
-    echo -e "${C_CYAN} === 8/21. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
+    echo -e "${C_CYAN} === 8/27. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     
     local active_ssh_port="22"
@@ -4852,7 +4869,15 @@ mod_ufw() {
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         if [ -n "${WG_CASCADE_PORT:-}" ]; then
-            silent_run ufw allow "${WG_CASCADE_PORT}/udp" comment 'WG Direct Cascade Bridge'
+            silent_run ufw allow "${WG_CASCADE_PORT}/udp" comment 'WG Direct Cascade UDP'
+            silent_run ufw allow "${WG_CASCADE_PORT}/tcp" comment 'WG Direct Cascade FakeTCP'
+        fi
+        if [ -n "${HYSTERIA_PORT:-}" ] && systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
+            silent_run ufw allow "${HYSTERIA_PORT}/udp" comment 'Hysteria 2 QUIC UDP'
+            silent_run ufw allow "${HYSTERIA_PORT}/tcp" comment 'Hysteria 2 TCP'
+        fi
+        if [ -n "${XRAY_PORT:-}" ] && [ "${CASCADE_ROLE:-}" = "foreign_xray_exit" ]; then
+            silent_run ufw allow "${XRAY_PORT}/tcp" comment 'Xray REALITY TCP'
         fi
     fi
 
@@ -4941,7 +4966,7 @@ mod_lock_root() {
         return 0
     fi
 
-    echo -e "${C_CYAN} === 9/21. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
+    echo -e "${C_CYAN} === 9/27. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
     local root_choice
     if ! smart_menu "Системный доступ" "Выберите желаемое действие:" 12 $WT_WIDTH 2 "root_choice" \
@@ -5227,7 +5252,7 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 
 # 11. Управление логированием (Интерактивный менеджер)
 mod_logging_manager() {
-    echo -e "${C_CYAN} === 11/21. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
+    echo -e "${C_CYAN} === 11/27. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
     local cur_usage="N/A"
     if command -v journalctl &>/dev/null; then
@@ -5364,7 +5389,7 @@ CONF
 
 # 12. Оптимизация RAM / Flash (с префиксом 99-zzz-)
 mod_ram_flash_opt() {
-    echo -e "${C_CYAN} === 12/21. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
+    echo -e "${C_CYAN} === 12/27. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
 
     local target_swappiness=1
@@ -5509,7 +5534,7 @@ mod_swap_manager() {
 
 # 14. Системные утилиты и режим процессора
 mod_desktop_apps() {
-    echo -e "${C_CYAN} === 14/21. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
+    echo -e "${C_CYAN} === 14/27. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
     local gov_choice
     if smart_menu "Управление питанием процессора" "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 "gov_choice" \
@@ -5603,7 +5628,7 @@ EOF
 
 # 15. Программный сброс HDMI
 mod_hdmi_reset() {
-    echo -e "${C_CYAN} === 15/21. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
+    echo -e "${C_CYAN} === 15/27. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
     cat << 'HDMI_EOF' > /usr/local/bin/reset-hdmi.sh
 #!/bin/bash
 HDMI_OUTPUT=$(xrandr 2>/dev/null | grep -E "^HDMI-[0-9A-Z-]+ connected" | awk '{print $1}' | head -n 1 || true)
@@ -5633,7 +5658,7 @@ HDMI_EOF
 
 # 16. Диагностика времени загрузки
 mod_boot_diag() {
-    echo -e "${C_CYAN} === 16/21. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
+    echo -e "${C_CYAN} === 16/27. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
         echo -e "${C_RED} Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
@@ -6307,6 +6332,9 @@ br26_apply() {
   occupied=$(ip -4 rule show | awk -v p="$pref:" '$1==p {print}')
   [[ -z "$occupied" || "$occupied" == *"iif $lan lookup $table"* ]] || { echo "Приоритет $pref занят"; exit 1; }
  done
+ local -a networkd_pairs=()
+ for i in "${!LANS[@]}"; do networkd_pairs+=("${LANS[i]}=${ADDRS[i]}"); done
+ python3 "$p/networkd.py" check "${networkd_pairs[@]}" || exit 1
  if [[ "$OUT" == tailscale0 ]]; then
   if [[ -n "$EXIT_NODE" ]]; then
    tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true --accept-routes=false || exit 1
@@ -6346,6 +6374,9 @@ BR26_LEGACY
  install -m 600 "$p/config" /etc/bobarev-router-v2/config
  install -m 600 "$p/dhcp.conf" /etc/bobarev-router-v2/dhcp.conf
  install -m 700 "$p/runtime" /usr/local/sbin/bobarev-router-v2
+ install -m 700 "$p/performance" /usr/local/sbin/bobarev-router-performance
+ install -m 700 "$p/networkd.py" /usr/local/sbin/bobarev-router-networkd.py
+ python3 /usr/local/sbin/bobarev-router-networkd.py apply "${networkd_pairs[@]}" || exit 1
  rm -f /etc/systemd/system/bobarev-router-v2.service.d/override.conf
  cat > /etc/systemd/system/bobarev-router-v2.service <<'UNIT'
 [Unit]
@@ -6555,7 +6586,7 @@ print(', '.join(x['name'] for x in d['interfaces'] if x['name'] in names and (x[
 BR29_WARN
  )
  if [[ -n "$wanted" ]]; then
-  nm_yes "ВНИМАНИЕ: $wanted определён как WAN/VPN. Назначение LAN меняет его адрес и может оборвать управление. Продолжить расширенную настройку?" || return 0
+  echo "Нельзя автоматически закрепить WAN/VPN как LAN в networkd: $wanted. Выберите другой клиентский порт."; return 1
  fi
  suggestions=$(br29_scan suggest "$scan" "${lans[@]}") || return 1
  for i in "${!lans[@]}"; do
@@ -6622,7 +6653,7 @@ for route in json.loads(subprocess.check_output(['ip','-j','-4','route','show','
 
 BR26_VALIDATE
  [[ $? == 0 ]] || return 1
- nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN, бэкапов и автоотката. Отсутствующие интерфейсы НЕ создаются: применение отложится. Автоподбор проверяет только видимые ОС сети, не скрытые подсети за другими роутерами. WAN/SSH не перенастраиваются. Смена exit node влияет на выход хоста." || return 0
+ nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN, бэкапов и автоотката. Фиксировано: PMTU forwarding=1, очереди/RPS/XPS f, DHCP MTU=1280, общий MSS clamp. Профиль ядра влияет на весь хост. Отсутствующие интерфейсы НЕ создаются: применение отложится. Автоподбор проверяет только видимые ОС сети, не скрытые подсети за другими роутерами. LAN закрепляется в systemd-networkd: static /24, без link-local, сохраняется при потере кабеля. Применение: reload + reconfigure выбранных LAN; WAN намеренно не перезапускается. Возможен обрыв доступа через LAN. Смена exit node влияет на выход хоста." || return 0
  install -d -m 700 /etc/bobarev-router-v2/pending
  p=/etc/bobarev-router-v2/pending
  {
@@ -6634,6 +6665,7 @@ BR26_VALIDATE
  } > "$p/config"
  {
   printf 'port=53\nbind-dynamic\nno-resolv\ndhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
+  if [[ "$dhcp" == true ]]; then printf 'dhcp-option=26,1280\n'; fi
   for i in "${!lans[@]}"; do
    printf 'interface=%s\n' "${lans[i]}"
    if [[ "$dhcp" == true ]]; then
@@ -6645,9 +6677,142 @@ BR26_VALIDATE
   local -a resolvers=(); IFS=',' read -ra resolvers <<< "$dns"
   for dev in "${resolvers[@]}"; do printf 'server=%s\n' "$dev"; done
  } > "$p/dhcp.conf"
+ cat > "$p/networkd.py" <<'BR33_NETWORKD'
+#!/usr/bin/env python3
+import argparse,ipaddress,os,pathlib,re,subprocess,sys
+ROOT=pathlib.Path('/etc/systemd/network')
+MARK='# BOBAREV_ROUTER_NETWORKD_33'
+def run(args):
+ return subprocess.run(args,text=True,capture_output=True,env=dict(os.environ,LC_ALL='C',SYSTEMD_COLORS='0'))
+def rows(values):
+ result=[];networks=[];names=set()
+ for v in values:
+  name,addr=v.split('=',1)
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',name) or name=='lo' or name in names:raise ValueError('Неверное/повторное имя LAN')
+  x=ipaddress.IPv4Interface(addr+'/24')
+  if x.ip in (x.network.network_address,x.network.broadcast_address):raise ValueError('Неверный адрес LAN')
+  if any(x.network.overlaps(n) for n in networks):raise ValueError('Сети LAN пересекаются')
+  networks.append(x.network);names.add(name);result.append((name,str(x.ip)))
+ if not result:raise ValueError('Не выбраны LAN')
+ return result
+def filename(dev):return '05-bobarev-lan-'+dev+'.network'
+def content(dev,addr):
+ return f'''{MARK}
+[Match]
+Name={dev}
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address={addr}/24
+DHCP=no
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+'''
+def current_file(dev):
+ p=run(['networkctl','status',dev,'--no-pager'])
+ m=re.search(r'^\s*Network File:\s*(.+)$',p.stdout,re.M)
+ if not m:return None
+ x=m[1].strip()
+ return pathlib.Path(x) if x.startswith('/') else None
+
+def check(data):
+ if run(['systemctl','is-active','--quiet','systemd-networkd.service']).returncode:
+  raise ValueError('systemd-networkd не активен. Мастер не включает новый сетевой менеджер автоматически; текущая настройка не заменена.')
+ if run(['systemctl','is-active','--quiet','NetworkManager.service']).returncode==0:
+  for dev,addr in data:
+   p=run(['nmcli','-g','GENERAL.NM-MANAGED','device','show',dev])
+   if p.returncode or p.stdout.strip().lower() not in ('no','нет'):
+    raise ValueError('LAN '+dev+' управляется NetworkManager либо статус не определён. Сначала согласуйте управление LAN; автоматического перехвата нет.')
+ for dev,addr in data:
+  target=ROOT/filename(dev)
+  if target.exists() and MARK not in target.read_text():raise ValueError('Целевой файл занят чужой конфигурацией: '+str(target))
+  old=current_file(dev)
+  if old and old.name<filename(dev) and old!=target:
+   raise ValueError('Более ранний .network может перекрыть LAN '+dev+': '+str(old)+'. Нужна ручная проверка; файл не удалён.')
+ return data
+
+def apply(data):
+ check(data)
+ ROOT.mkdir(parents=True,exist_ok=True)
+ keep={filename(dev) for dev,addr in data}
+ for f in ROOT.glob('05-bobarev-lan-*.network'):
+  if f.name not in keep and MARK in f.read_text():f.unlink()
+ for dev,addr in data:
+  f=ROOT/filename(dev);f.write_text(content(dev,addr));f.chmod(0o644)
+ # Do not restart the complete network manager or deliberately reconfigure WAN.
+ help=run(['networkctl','--help']).stdout
+ args=['networkctl','reload']
+ if '--no-reconfigure' in help:args.append('--no-reconfigure')
+ p=run(args)
+ if p.returncode:raise RuntimeError('networkctl reload: '+p.stderr)
+ for dev,addr in data:
+  p=run(['networkctl','reconfigure',dev])
+  if p.returncode:raise RuntimeError('networkctl reconfigure '+dev+': '+p.stderr)
+  actual=current_file(dev)
+  if actual is None or actual.name!=filename(dev):
+   raise RuntimeError('Не подтверждён выбор созданного .network для '+dev+'. Проверьте networkctl status '+dev+'. Файлы сохранены; автоотката нет.')
+  print('LAN '+dev+': '+addr+'/24; файл '+str(ROOT/filename(dev)))
+
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument('action',choices=['check','apply','plan']);ap.add_argument('interfaces',nargs='+');a=ap.parse_args();data=rows(a.interfaces)
+ if a.action=='plan':
+  for dev,addr in data:print(str(ROOT/filename(dev))+'\n'+content(dev,addr))
+ elif a.action=='check':check(data);print('Проверка systemd-networkd пройдена')
+ else:apply(data)
+if __name__=='__main__':
+ try:main()
+ except (ValueError,RuntimeError,OSError) as e:print('ОШИБКА networkd: '+str(e),file=sys.stderr);sys.exit(1)
+BR33_NETWORKD
+ cat > "$p/performance" <<'BR32_PERFORMANCE'
+#!/bin/bash
+set -euo pipefail
+PERF_SYSCTL=/etc/sysctl.d/99-router-performance.conf
+mkdir -p /etc/sysctl.d
+cat > "$PERF_SYSCTL" <<'FIXED_SYSCTL'
+# Fixed local-router performance settings
+net.ipv4.ip_forward = 1
+net.ipv4.ip_forward_use_pmtu = 1
+net.ipv4.ip_no_pmtu_disc = 0
+net.ipv4.tcp_mtu_probing = 1
+net.core.netdev_max_backlog = 10000
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
+FIXED_SYSCTL
+profile_errors=0
+if ! sysctl -p "$PERF_SYSCTL"; then echo 'Часть sysctl не применена; проверьте поддержку ядром.' >&2; profile_errors=1; fi
+source /etc/bobarev-router-v2/config
+all_devs=("${LANS[@]}" "$OUT")
+while read -r dev; do [[ -n "$dev" ]] && all_devs+=("$dev"); done < <(ip -4 route show table main default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+[[ -d /sys/class/net/tailscale0 ]] && all_devs+=(tailscale0)
+declare -A seen=()
+for dev in "${all_devs[@]}"; do
+ [[ -n "$dev" && "$dev" != lo && -z "${seen[$dev]:-}" ]] || continue
+ seen[$dev]=1
+ [[ -d "/sys/class/net/$dev" ]] || { echo "Интерфейс $dev отсутствует; очереди пропущены."; continue; }
+ if ! ip link set dev "$dev" txqueuelen 10000; then echo "Не удалось txqueuelen $dev" >&2; profile_errors=1; fi
+ for q in /sys/class/net/"$dev"/queues/rx-*; do
+  [[ -d "$q" && -e "$q/rps_cpus" ]] || continue
+  if ! { printf 'f\n' > "$q/rps_cpus"; } 2>/dev/null; then echo "RPS не поддержан: $q" >&2; profile_errors=1; fi
+ done
+ for q in /sys/class/net/"$dev"/queues/tx-*; do
+  [[ -d "$q" && -e "$q/xps_cpus" ]] || continue
+  if ! { printf 'f\n' > "$q/xps_cpus"; } 2>/dev/null; then echo "XPS не поддержан: $q" >&2; profile_errors=1; fi
+ done
+ done
+if ! iptables -w 5 -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+ iptables -w 5 -t mangle -I FORWARD 1 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+fi
+if ((profile_errors)); then echo 'Фиксированный профиль применён частично; автоотката нет.' >&2; exit 1; fi
+echo 'Фиксированные параметры применены. Скорость и задержку проверьте отдельно.'
+BR32_PERFORMANCE
  cat > "$p/runtime" <<'BR26_RUNTIME'
 #!/bin/bash
 set -euo pipefail
+[[ -r /etc/bobarev-router-v2/config ]] || { echo 'Маршрутизатор не настроен. Выберите «Настроить».' >&2; exit 1; }
 source /etc/bobarev-router-v2/config
 clean() {
  for spec in 'filter FORWARD BR2_FWD' 'nat POSTROUTING BR2_NAT' 'mangle FORWARD BR2_MSS'; do
@@ -6690,7 +6855,6 @@ for i in "${!LANS[@]}"; do
  iptables -w 5 -A BR2_FWD -i "$lan" -j DROP
  iptables -w 5 -A BR2_FWD -o "$lan" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
  iptables -w 5 -t nat -A BR2_NAT -s "$net" -o "$OUT" -j MASQUERADE
- iptables -w 5 -t mangle -A BR2_MSS -i "$lan" -o "$OUT" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
  ip6tables -w 5 -I FORWARD 1 -i "$lan" -j DROP
  done
 iptables -w 5 -I FORWARD 1 -j BR2_FWD
@@ -6700,8 +6864,11 @@ for i in "${!LANS[@]}"; do
  ip -4 rule add pref "$((5100+i))" iif "${LANS[i]}" lookup "$((199+i))"
  ip -4 route get 1.1.1.1 from "${STARTS[i]}" iif "${LANS[i]}"
 done
+if ! /usr/local/sbin/bobarev-router-performance; then
+ echo 'ВНИМАНИЕ: профиль применён не полностью; проверьте журнал. Основная маршрутизация настроена.' >&2
+fi
 BR26_RUNTIME
- chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime"
+ chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime" "$p/performance" "$p/networkd.py"
  br26_apply
 }
 
@@ -6754,7 +6921,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.29
+# BOBAREV SHELL 3.14.33
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7169,7 +7336,7 @@ dns_guard(){
  if ip link show tailscale0 >/dev/null 2>&1;then resolvectl revert tailscale0;fi
 }
 configure_dns(){
- apt-get install -y systemd-resolved whiptail whiptail
+ apt-get install -y systemd-resolved whiptail
  manager_dns
  mkdir -p /etc/systemd/resolved.conf.d
  for f in /etc/systemd/resolved.conf.d/*.conf;do
@@ -7518,7 +7685,7 @@ WantedBy=multi-user.target
 UNIT_CADDY
  printf 'CASCADE_ROLE=%q\nNAIVE_DOMAIN=%q\nNAIVE_EMAIL=%q\nNAIVE_OUT_MODE=%q\n' standalone_naive "$domain" "$email" mullvad_ts > /etc/default/bobarev-cascade
  systemctl daemon-reload;systemctl enable caddy.service;systemctl restart caddy.service
- local http_code=""
+ local http_code="" verified=0
  for n in {1..30};do
   http_code=$(curl -q --noproxy '*' --resolve "$domain:443:127.0.0.1" -o /dev/null -sS -w '%{http_code}' --connect-timeout 3 --max-time 5 "https://$domain" 2>>"$TX/local-caddy-check.txt" || true)
   if [[ $http_code =~ ^[1-5][0-9][0-9]$ ]];then verified=1;break;fi
@@ -7777,7 +7944,7 @@ mod_network_reset() {
 
 
 mod_backup_manager() {
-    echo -e "${C_CYAN} === 19/21. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
+    echo -e "${C_CYAN} === 18/27. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
     local target_home=$(getent passwd "$target_user" | cut -d: -f6)
     [ -z "$target_home" ] && target_home="/root"
@@ -8722,7 +8889,7 @@ mod_network_cascade_audit() {
         fi
 
         local na_choice=""
-        if ! smart_menu " 23/23. Аудит системы 2 и каскадные пары (v3.1)" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 "na_choice" \
+        if ! smart_menu " 26/27. Аудит системы 2 и каскадные пары (v3.1)" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 "na_choice" \
         "1" " Срез состояния системы" \
         "2" " Тест связи между серверами" \
         "3" " Мониторинг трафика Live" \
@@ -9544,7 +9711,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.29 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.33 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

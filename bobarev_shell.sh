@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.28 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.29 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6382,7 +6382,7 @@ UNIT
  systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service || exit 1
  if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
   journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
-  echo 'Ошибка применения. Резервные копии и автооткат отключены.'; exit 1
+  echo 'Ошибка применения. Бэкапы и автоматический откат отключены.'; exit 1
  fi
  rm -rf "$p"
  echo 'Применено. Проверьте интернет и публичный IP с реального LAN-клиента.'
@@ -6391,98 +6391,200 @@ UNIT
 mod_router_sbc() {
  local choice=''
  while true; do
-  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 3 choice \
-   1 'Статус' 2 'Настроить' 0 'Назад' || return 0
+  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 3 choice 1 'Статус' 2 'Настроить' 0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
-   1)
-    if [[ -f /etc/bobarev-router-v2/config ]]; then
-     echo '=== Активная конфигурация ==='
-     cat /etc/bobarev-router-v2/config
-     echo '=== Правила маршрутизации ==='
-     ip -4 rule show
-     echo '=== Правила forwarding ==='
-     iptables -w 5 -nvL BR2_FWD --line-numbers 2>/dev/null || true
-     echo '=== Службы ==='
-     systemctl --no-pager -l status bobarev-router-v2.service bobarev-router-dhcp.service || true
-    else
-     echo 'Маршрутизатор не настроен. Выберите «Настроить».'
-    fi
-    pause_enter ;;
+   1) if [[ -f /etc/bobarev-router-v2/config ]]; then
+       cat /etc/bobarev-router-v2/config
+       ip -4 rule show
+       iptables -w 5 -nvL BR2_FWD --line-numbers 2>/dev/null || true
+       systemctl --no-pager -l status bobarev-router-v2.service bobarev-router-dhcp.service || true
+      else echo 'Маршрутизатор не настроен. Выберите «Настроить».'; fi
+      pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
   esac
  done
 }
-mod_router_sbc_setup() {
- local selected='' custom='' out='' gw='' dns='1.1.1.1,8.8.8.8' dhcp=true node='' dev='' state='' addr='' first='' last='' mode='' answer='' p='' rows='[]' i=0
- local -a options=() lans=() addrs=() starts=() ends=() exits=()
- for dev in /sys/class/net/*; do
-  dev=${dev##*/}; [[ "$dev" == lo ]] && continue
-  state=$(cat "/sys/class/net/$dev/operstate" 2>/dev/null || true)
-  options+=("$dev" "состояние: $state" OFF)
- done
- options+=(CUSTOM 'Указать LAN-интерфейсы вручную' OFF)
- selected=$(whiptail --checklist --separate-output 'Выберите LAN-интерфейсы пробелом [*]. Неотмеченные интерфейсы не назначаются LAN. Выход выбирается отдельно.' 22 "${WT_WIDTH:-85}" 10 "${options[@]}" 3>&1 1>&2 2>&3) || return 0
- while IFS= read -r dev; do
-  [[ -z "$dev" ]] && continue
-  if [[ "$dev" == CUSTOM ]]; then
-   br26_input 'Имена дополнительных LAN-интерфейсов через пробел. Они могут ещё отсутствовать.' '' custom || return 0
-   local -a manual=(); read -ra manual <<< "$custom"; lans+=("${manual[@]}")
-  else lans+=("$dev"); fi
- done <<< "$selected"
- ((${#lans[@]}>=1 && ${#lans[@]}<=16)) || { echo 'Нужно выбрать от 1 до 16 LAN-интерфейсов'; return 1; }
- for dev in "${lans[@]}"; do
-  [[ "$dev" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$dev" != lo ]] || { echo 'Неверное имя интерфейса'; return 1; }
-  br26_input "LAN $dev: IPv4-адрес маршрутизатора (маска /24). Адрес обязателен." '' addr || return 0
-  br26_input "LAN $dev: начало DHCP-пула / тестовый адрес клиента" "${addr%.*}.50" first || return 0
-  br26_input "LAN $dev: конец DHCP-пула" "${addr%.*}.200" last || return 0
-  addrs+=("$addr"); starts+=("$first"); ends+=("$last")
- done
- smart_menu 'Режим локального маршрутизатора' 'Выдавать адреса клиентам по DHCP?' 15 "${WT_WIDTH:-85}" 3 answer yes 'Да' no 'Нет (статические адреса клиентов)' || return 0
- [[ "$answer" == no ]] && dhcp=false
- br26_input 'DNS IPv4 через запятую' "$dns" dns || return 0; dns=${dns// /}
- smart_menu 'Режим локального маршрутизатора' 'Как направлять трафик выбранных LAN?' 17 "${WT_WIDTH:-85}" 3 mode \
-  WAN 'Чистый IP через WAN' EXISTING 'Через существующий интерфейс' CUSTOM 'Указать интерфейс вручную' || return 0
- exits=()
- if [[ "$mode" == WAN ]]; then
-  # Discover default-route interfaces in main, excluding typical tunnel devices.
-  local -a wan_candidates=()
-  mapfile -t wan_candidates < <(ip -4 route show table main default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u)
-  for dev in "${wan_candidates[@]}"; do
-   [[ "$dev" == lo || "$dev" == tailscale* || "$dev" == wg* || "$dev" == tun* || "$dev" == tap* || "$dev" == warp* ]] && continue
-   [[ " ${lans[*]} " == *" $dev "* ]] && continue
-   exits+=("$dev" 'WAN: default-маршрут основной таблицы')
-  done
-  if ((${#exits[@]}==0)); then
-   echo 'WAN по основной таблице не найден. Выберите CUSTOM и укажите выход со шлюзом.'
-   return 1
-  fi
-  smart_menu 'Режим локального маршрутизатора' 'Выберите WAN. Шлюз будет предложен на следующем шаге.' 17 "${WT_WIDTH:-85}" 6 out "${exits[@]}" || return 0
- elif [[ "$mode" == EXISTING ]]; then
-  for dev in /sys/class/net/*; do
-   dev=${dev##*/}; [[ "$dev" == lo ]] && continue
-   [[ " ${lans[*]} " == *" $dev "* ]] && continue
-   state=$(cat "/sys/class/net/$dev/operstate" 2>/dev/null || true)
-   exits+=("$dev" "состояние: $state")
-  done
-  ((${#exits[@]})) || { echo 'Нет доступных выходных интерфейсов'; return 1; }
-  smart_menu 'Режим локального маршрутизатора' 'Выберите существующий выходной интерфейс.' 20 "${WT_WIDTH:-85}" 8 out "${exits[@]}" || return 0
- else
-  br26_input 'Имя выходного интерфейса (может ещё отсутствовать)' '' out || return 0
- fi
- [[ "$out" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$out" != lo ]] || { echo 'Неверное имя выходного интерфейса'; return 1; }
- [[ " ${lans[*]} " != *" $out "* ]] || { echo 'Выход не может быть выбранным LAN'; return 1; }
+br29_scan() {
+ python3 - "$@" <<'BR29_SCAN'
+import sys,json,subprocess,ipaddress,re,pathlib
 
+def get(args):
+ try:return json.loads(subprocess.check_output(args,stderr=subprocess.DEVNULL,text=True))
+ except (subprocess.SubprocessError,ValueError,OSError):return []
+
+def suggest(links,routes,selected,preferred=None):
+ blocked=[]
+ for r in routes:
+  dst=r.get('dst','default')
+  if dst=='default' or r.get('type')=='throw':continue
+  try:n=ipaddress.ip_network(dst,strict=False)
+  except ValueError:continue
+  if n.version!=4:continue
+  # Host/local entries for selected LAN are allowed when reusing its connected network.
+  if r.get('dev') in selected:continue
+  blocked.append(n)
+ for l in links:
+  if l['ifname'] in selected:continue
+  for a in l.get('addr_info',[]):
+   if a.get('family')=='inet':blocked.append(ipaddress.ip_network(a['local']+'/'+str(a['prefixlen']),strict=False))
+ used=[];result=[]
+ for index,name in enumerate(selected):
+  existing=[]
+  for l in links:
+   if l['ifname']==name:
+    existing=[a['local'] for a in l.get('addr_info',[]) if a.get('family')=='inet' and a.get('prefixlen')==24]
+  choices=[]
+  if preferred and name in preferred:choices.append(preferred[name])
+  choices+=existing
+  choices += [f'192.168.{i}.1' for i in range(50,255)]
+  choices += [f'10.77.{i}.1' for i in range(256)]
+  chosen=None
+  for addr in choices:
+   try:x=ipaddress.IPv4Interface(addr+'/24')
+   except ValueError:continue
+   if not x.ip.is_private or x.ip in (x.network.network_address,x.network.broadcast_address):continue
+   if any(x.network.overlaps(n) for n in blocked+used):continue
+   chosen=x;break
+  if chosen is None:raise ValueError('Нет свободной предложенной подсети; требуется ручной выбор')
+  used.append(chosen.network);host=int(str(chosen.ip).split('.')[-1]);prefix=str(chosen.network.network_address).rsplit('.',1)[0]
+  if not 50<=host<=200:lo,hi=50,200
+  elif 254-host>=host-1:lo,hi=host+1,254
+  else:lo,hi=1,host-1
+  result.append([name,str(chosen.ip),f'{prefix}.{lo}',f'{prefix}.{hi}'])
+ return result
+
+def main():
+ links=get(['ip','-j','-4','addr','show']); mainroutes=get(['ip','-j','-4','route','show','table','main']); routes=get(['ip','-j','-4','route','show','table','all'])
+ wans=list(dict.fromkeys(r['dev'] for r in mainroutes if r.get('dst')=='default' and r.get('dev') and not re.match(r'^(tailscale|wg|tun|tap|warp)',r['dev'])))
+ dns=[]
+ try:
+  text=pathlib.Path('/etc/bobarev-router-v2/dhcp.conf').read_text()
+  dns=re.findall(r'^server=([0-9.]+)$',text,re.M)
+ except OSError:pass
+ # Stored subnet preferences are parsed as data, not executed.
+ preferred={};saved=[]
+ try:
+  text=pathlib.Path('/etc/bobarev-router-v2/config').read_text()
+  ls=re.search(r'^LANS=\(([^\n]*)\)',text,re.M);ads=re.search(r'^ADDRS=\(([^\n]*)\)',text,re.M)
+  if ls and ads:
+   names=re.findall(r'[A-Za-z0-9_.-]+',ls[1]);addresses=re.findall(r'\d+\.\d+\.\d+\.\d+',ads[1]);preferred=dict(zip(names,addresses));saved=names
+  else:
+   l=re.search(r'^LAN=([A-Za-z0-9_.-]+)',text,re.M);a=re.search(r'^ADDR=([0-9.]+)',text,re.M)
+   if l and a:preferred[l[1]]=a[1];saved=[l[1]]
+ except OSError:pass
+ inventory=[]
+ for l in links:
+  n=l['ifname'];state=l.get('operstate','UNKNOWN').lower();addrs=[a['local']+'/'+str(a['prefixlen']) for a in l.get('addr_info',[]) if a.get('family')=='inet']
+  path=pathlib.Path('/sys/class/net',n)
+  kind='physical' if (path/'device').exists() else 'bridge' if (path/'bridge').exists() else 'virtual'
+  tunnel=bool(re.match(r'^(tailscale|wg|tun|tap|warp)',n))
+  role='WAN: найден основной выход' if n in wans else 'VPN: виртуальный туннель' if tunnel else 'порт/мост для клиентской сети' if kind in ('physical','bridge') else 'виртуальный интерфейс'
+  status='есть линк' if state=='up' else 'нет Ethernet-статуса (для VPN нормально)' if state=='unknown' else state
+  inventory.append({'name':n,'kind':kind,'tunnel':tunnel,'wan':n in wans,'saved':n in saved,'description':role+'; '+status+'; IPv4 '+(','.join(addrs) or 'нет')})
+ data={'links':links,'routes':routes,'interfaces':inventory,'wans':wans,'preferred':preferred,'dns':','.join(dict.fromkeys(dns)) or '1.1.1.1,8.8.8.8','dhcp': bool(re.search(r'^dhcp-range=', pathlib.Path('/etc/bobarev-router-v2/dhcp.conf').read_text(), re.M)) if pathlib.Path('/etc/bobarev-router-v2/dhcp.conf').exists() else True}
+ if sys.argv[1:2]==['suggest']:
+  incoming=json.loads(sys.argv[2]);print(json.dumps(suggest(incoming['links'],incoming['routes'],sys.argv[3:],incoming.get('preferred')),ensure_ascii=False))
+ else:print(json.dumps(data,ensure_ascii=False))
+if __name__=='__main__':main()
+BR29_SCAN
+}
+
+mod_router_sbc_setup() {
+ local selected='' custom='' out='' gw='' dns='' dhcp=true node='' dev='' state='' addr='' first='' last='' mode='' answer='' p='' rows='[]' i=0 scan='' suggestions='' row='' role='' flag='' preferred='' wanted='' detected=''
+ local -a options=() lans=() addrs=() starts=() ends=() exits=() fields=()
+ scan=$(br29_scan) || return 1
+ dns=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["dns"])' "$scan") || return 1
+ smart_menu 'Режим локального маршрутизатора' 'Шаг 1. КУДА отправлять интернет-трафик клиентов? После этого выберем порт, КУДА подключены сами клиенты.' 18 "${WT_WIDTH:-85}" 3 mode WAN 'Прямо через WAN — чистый IP' EXISTING 'Через VPN / другой существующий интерфейс' CUSTOM 'Через интерфейс, который укажу вручную' || return 0
+ if [[ "$mode" == CUSTOM ]]; then
+  br26_input 'Имя выходного интерфейса. Если его ещё нет, применение будет отложено.' '' out || return 0
+ else
+  while IFS=$'\t' read -r dev role; do
+   [[ -n "$dev" ]] && exits+=("$dev" "$role")
+  done < <(python3 - "$scan" "$mode" <<'BR29_OUTPUTS'
+import json,sys
+d=json.loads(sys.argv[1])
+for x in d['interfaces']:
+ if x['name']=='lo':continue
+ if sys.argv[2]=='WAN' and not x['wan']:continue
+ print(x['name']+'\t'+x['description'])
+BR29_OUTPUTS
+ )
+  ((${#exits[@]})) || { echo 'WAN не обнаружен. Выберите CUSTOM и укажите интерфейс и шлюз вручную.'; return 1; }
+  smart_menu 'Режим локального маршрутизатора' 'Выход в интернет. WAN определён по основному маршруту системы. Для VPN состояние unknown само по себе не является ошибкой.' 21 "${WT_WIDTH:-85}" 8 out "${exits[@]}" || return 0
+ fi
+ [[ "$out" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$out" != lo ]] || { echo 'Неверное имя выхода'; return 1; }
  if [[ "$out" == tailscale0 ]]; then
-  br26_input 'IP/имя Tailscale exit node; пусто — сохранить текущий выбор' '' node || return 0
+  detected=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((p.get("HostName","")+" "+next((ip for ip in p.get("TailscaleIPs",[]) if ":" not in ip),"") for p in d.get("Peer",{}).values() if p.get("ExitNode")),"не выбран"))' 2>/dev/null) || detected='не определён'
+  br26_input "Exit node сейчас: $detected. Пустое поле — оставить текущий. Для смены укажите IP или имя." '' node || return 0
   [[ "$node" != -* && "$node" != *[[:space:]]* ]] || return 1
  else
   gw=$(ip -4 route show table main default dev "$out" 2>/dev/null | awk '/via/ && !found {print $3;found=1}') || true
-  br26_input 'IPv4 шлюз выхода. Пусто — интерфейсный маршрут (обычно для VPN).' "$gw" gw || return 0
-  if [[ "$mode" == WAN && -z "$gw" ]]; then
-   echo 'Для режима WAN укажите IPv4 шлюз.'; return 1
-  fi
+  br26_input "Шлюз выхода $out. Найденный адрес уже подставлен. Для VPN без шлюза оставьте пустым." "$gw" gw || return 0
+  [[ "$mode" != WAN || -n "$gw" ]] || { echo 'Для WAN нужен IPv4 шлюз'; return 1; }
  fi
+ while IFS=$'\t' read -r dev role flag; do
+  [[ -n "$dev" ]] && options+=("$dev" "$role" "$flag")
+ done < <(python3 - "$scan" "$out" <<'BR29_LANS'
+import json,sys
+d=json.loads(sys.argv[1]);out=sys.argv[2]
+xs=[x for x in d['interfaces'] if x['name'] not in ('lo',out) and not x['wan'] and not x['tunnel'] and x['kind'] in ('physical','bridge')]
+for x in xs:
+ on=x['saved'] or (len(xs)==1)
+ print(x['name']+'\t'+x['description']+'\t'+('ON' if on else 'OFF'))
+BR29_LANS
+ )
+ options+=(CUSTOM 'Ручной LAN (расширенный вариант)' OFF)
+ selected=$(whiptail --checklist --separate-output "Шаг 2. ОТКУДА приходит трафик? Выберите порт к клиентам/коммутатору/второму роутеру (обычно LAN на корпусе). Выход $out исключён. Пробел = [*]. Надпись на корпусе по имени Linux достоверно не определяется; сверяйте адреса/линк. VPN и найденный WAN скрыты." 24 "${WT_WIDTH:-85}" 8 "${options[@]}" 3>&1 1>&2 2>&3) || return 0
+ while IFS= read -r dev; do
+  [[ -n "$dev" ]] || continue
+  if [[ "$dev" == CUSTOM ]]; then
+   br26_input 'LAN-интерфейсы через пробел. Ручной выбор: проверьте, что это не ваш выход в интернет/SSH.' '' custom || return 0
+   local -a manual=(); read -ra manual <<< "$custom";lans+=("${manual[@]}")
+  else lans+=("$dev");fi
+ done <<< "$selected"
+ ((${#lans[@]}>=1 && ${#lans[@]}<=16)) || { echo 'Выберите хотя бы один LAN (не более 16)'; return 1; }
+ for dev in "${lans[@]}"; do
+  [[ "$dev" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$dev" != lo && "$dev" != "$out" ]] || { echo 'LAN и выход должны быть разными'; return 1; }
+ done
+ # Warn for manual reassignment of known WAN/VPN rather than silently treating it as LAN.
+ wanted=$(python3 - "$scan" "${lans[@]}" <<'BR29_WARN'
+import json,sys
+names=set(sys.argv[2:]);d=json.loads(sys.argv[1])
+print(', '.join(x['name'] for x in d['interfaces'] if x['name'] in names and (x['wan'] or x['tunnel'])))
+BR29_WARN
+ )
+ if [[ -n "$wanted" ]]; then
+  nm_yes "ВНИМАНИЕ: $wanted определён как WAN/VPN. Назначение LAN меняет его адрес и может оборвать управление. Продолжить расширенную настройку?" || return 0
+ fi
+ suggestions=$(br29_scan suggest "$scan" "${lans[@]}") || return 1
+ for i in "${!lans[@]}"; do
+  dev=${lans[i]}; mapfile -t fields < <(python3 -c 'import json,sys;print("\n".join(json.loads(sys.argv[1])[int(sys.argv[2])][1:]))' "$suggestions" "$i")
+  br26_input "LAN $dev → выход $out. Это локальный адрес маршрутизатора, НЕ публичный IP. Предложение по найденным сетям: ${fields[0]}/24. Enter — принять." "${fields[0]}" addr || return 0
+  if [[ "$addr" == "${fields[0]}" ]]; then first=${fields[1]};last=${fields[2]}
+  else
+   row=$(python3 - "$addr" <<'BR29_POOL'
+import sys,ipaddress
+x=ipaddress.IPv4Interface(sys.argv[1]+'/24');h=int(str(x.ip).split('.')[-1]);p=str(x.network.network_address).rsplit('.',1)[0]
+if not 50<=h<=200:a,b=50,200
+elif 254-h>=h-1:a,b=h+1,254
+else:a,b=1,h-1
+print(f'{p}.{a} {p}.{b}')
+BR29_POOL
+ ) || return 1
+   read -r first last <<< "$row"
+  fi
+  br26_input "LAN $dev: начало адресов, выдаваемых клиентам (DHCP)." "$first" first || return 0
+  br26_input "LAN $dev: конец адресов, выдаваемых клиентам (DHCP)." "$last" last || return 0
+  addrs+=("$addr");starts+=("$first");ends+=("$last")
+ done
+ local -a dhcp_options=()
+ if [[ $(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["dhcp"])' "$scan") == False ]]; then
+  dhcp_options=(no 'Нет — сохранить ручную адресацию' yes 'Да — включить DHCP')
+ else dhcp_options=(yes 'Да — DHCP (обычный вариант)' no 'Нет — адреса клиентов задам вручную'); fi
+ smart_menu 'Режим локального маршрутизатора' 'Выдавать клиентам адреса автоматически? Прежний режим предложен первым.' 16 "${WT_WIDTH:-85}" 2 answer "${dhcp_options[@]}" || return 0
+ [[ "$answer" == no ]] && dhcp=false
+ br26_input 'DNS для клиентов: ранее настроенные адреса или стандартное предложение. Enter — принять.' "$dns" dns || return 0;dns=${dns// /}
  rows=$(python3 - "${lans[*]}" "${addrs[*]}" "${starts[*]}" "${ends[*]}" <<'BR26_ROWS'
 import sys,json
 print(json.dumps(list(zip(*(s.split() for s in sys.argv[1:])))))
@@ -6512,9 +6614,15 @@ for link in json.loads(subprocess.check_output(['ip','-j','-4','addr','show'])):
  for a in link.get('addr_info',[]):
   n=ipaddress.ip_network(a['local']+'/'+str(a['prefixlen']),strict=False)
   if any(n.overlaps(x) for x in nets):raise SystemExit('LAN пересекается с '+link['ifname'])
+for route in json.loads(subprocess.check_output(['ip','-j','-4','route','show','table','all'])):
+ if route.get('dev') in seen or route.get('type')=='throw' or route.get('dst','default')=='default':continue
+ try:n=ipaddress.ip_network(route['dst'],strict=False)
+ except (ValueError,KeyError):continue
+ if any(n.overlaps(x) for x in nets):raise SystemExit('LAN пересекается с видимым маршрутом '+str(n))
+
 BR26_VALIDATE
  [[ $? == 0 ]] || return 1
- nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN, резервных копий и автоотката. Отсутствующие интерфейсы НЕ создаются: применение отложится. WAN/SSH не перенастраиваются. Смена exit node влияет на выход хоста." || return 0
+ nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN, бэкапов и автоотката. Отсутствующие интерфейсы НЕ создаются: применение отложится. Автоподбор проверяет только видимые ОС сети, не скрытые подсети за другими роутерами. WAN/SSH не перенастраиваются. Смена exit node влияет на выход хоста." || return 0
  install -d -m 700 /etc/bobarev-router-v2/pending
  p=/etc/bobarev-router-v2/pending
  {
@@ -6646,7 +6754,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.28
+# BOBAREV SHELL 3.14.29
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9436,7 +9544,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.28 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.29 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

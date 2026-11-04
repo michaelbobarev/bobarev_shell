@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.23 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.24 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6385,68 +6385,38 @@ PY
    pause_enter
    return 0
   fi
-  while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
-   echo 'Tailscale exit node пока не выбран или не активен.'
+  while ! ip -4 route show table 52 default 2>/dev/null | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null; do
    local ts_choice='' ts_node=''
-   smart_menu 'Tailscale exit node' 'Выберите exit node или вернитесь к выбору другого выхода.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список exit nodes' 2 'Выбрать exit node по IP/имени' 0 'Отмена' || return 0
+   smart_menu 'Tailscale exit node' 'Выберите узел. При ошибке выбор не сбрасывается.' 16 "$WT_WIDTH" 5 ts_choice 1 'Список узлов' 2 'Выбрать IP/имя' 0 'Отмена' || return 0
    case "$ts_choice" in
     0) return 0 ;;
-    1)
-     tailscale exit-node list || true
-     echo
-     echo 'Скопируйте IP нужного узла и выберите пункт 2.'
-     pause_enter
-     continue
-     ;;
+    1) tailscale exit-node list || true; pause_enter; continue ;;
     2)
-     MODULE_CANCELED=false
      prompt_default 'IP или имя exit node' '' ts_node
-     [[ "$MODULE_CANCELED" == false ]] || continue
-     [[ -n "$ts_node" ]] || { echo 'IP/имя не введены — попробуйте ещё раз.'; pause_enter; continue; }
-     echo "Применяю exit node: $ts_node ..."
-     if tailscale set --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
-      echo 'Жду появления default-маршрута (до 90 секунд)...'
-      local i route_ok=false
-      for i in $(seq 1 90); do
-       ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && { route_ok=true; break; }
-       sleep 1
-      done
-      if [[ "$route_ok" == true ]]; then
-       if ts_exit_node_works; then
-        echo -e "${C_GREEN}Exit node применён, активен и проверен: $ts_node${C_RESET}"
-        break
-       else
-        echo -e "${C_YELLOW}Маршрут появился, но интернет через exit node не проходит.${C_RESET}"
-        echo 'Exit node НЕ сбрасываю — проверь узел вручную и повтори пункт 2.'
-        pause_enter
-        continue
-       fi
-      else
-       echo -e "${C_YELLOW}За 90 секунд default в table 52 не появился.${C_RESET}"
-       echo 'Exit node НЕ сбрасываю. Проверь вручную:'
-       echo '  tailscale status | head -n 3'
-       echo '  tailscale debug prefs | grep -i exitnode'
-       echo 'Если tailscaled в NoState: sudo systemctl restart tailscaled'
-       echo 'Затем снова выбери пункт 2 с тем же IP.'
-       pause_enter
-       continue
-      fi
-     else
-      echo -e "${C_RED}Не удалось применить exit node.${C_RESET}"
-      pause_enter
-      continue
-     fi
-     ;;
+     [[ "$MODULE_CANCELED" == false && -n "$ts_node" ]] || return 0
+     tailscale set --exit-node="$ts_node" --exit-node-allow-lan-access=true || return 1
+     if ! ts_wait_exit_node; then
+      echo 'Маршрут не появился. Выбор узла сохранён; конфигурация LAN не изменена.'
+      return 1
+     fi ;;
    esac
   done
-  ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' || { echo 'Exit node не активен — применение отменено.'; pause_enter; return 0; }
+  ts_exit_node_works || { echo 'IPv4-проверка NanoPi не прошла; LAN не изменён.'; return 1; }
+
  fi
  echo "Будет: LAN $lan_if $lan_ip/24 -> $out_if. DHCP .50-.200, DNS $dns_servers."
  echo 'Существующий dnsmasq будет остановлен и заменён отдельной DHCP-службой. Старые конфиги сохраняются.'
- echo 'SSH/WAN/Tailscale не перенастраиваются. IPv6 клиентов через LAN не блокируется (IPv6-интернет зависит от провайдера).'
+ echo 'SSH/WAN/Tailscale не перенастраиваются. IPv6 клиентов через LAN блокируется (без IPv6 VPN/NAT).'
  nm_yes 'Применить маршрутизатор?' || return 0
- apt-get install -y dnsmasq-base iptables iproute2 dnsutils || return 1
+ apt-get install -y dnsmasq-base iptables iproute2 || return 1
  br_snapshot || return 1
+ local occupied
+ occupied=$(ip -4 rule show | awk '$1=="5100:" {print}')
+ if [[ -n "$occupied" && "$occupied" != *"iif $lan_if lookup 199"* ]]; then
+  echo 'Приоритет 5100 занят чужим правилом; применение отменено.'
+  return 1
+ fi
+
  if systemctl is-active --quiet dnsmasq.service; then
   touch /etc/bobarev-router-dnsmasq-was-active
   systemctl stop dnsmasq.service || return 1
@@ -6454,95 +6424,88 @@ PY
  install -d -m 700 /etc/bobarev-router-v2
  printf 'LAN=%q\nOUT=%q\nWAN=%q\nADDR=%q\n' "$lan_if" "$out_if" "$wan_if" "$lan_ip" > /etc/bobarev-router-v2/config
  local prefix=${lan_ip%.*}
- local dns_dnat_target=""
- dns_dnat_target=$(iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$lan_if\"" | grep -- "--dport 53" | grep -oP 'to-destination:\K[0-9.]+' | head -n1 || true)
- local dns_dnat_ok=false
- if [[ -n "$dns_dnat_target" ]]; then
-  if dig +time=3 +tries=1 "@$dns_dnat_target" cloudflare.com +short >/dev/null 2>&1; then
-   dns_dnat_ok=true
-  fi
- fi
- local dnsmasq_dns_port=0
- local dhcp_dns="$dns_servers"
- if [[ "$dns_dnat_ok" == true ]]; then
-  echo "Существующий DNS ${dns_dnat_target} отвечает — DNAT сохраняется."
+ if [[ -s /etc/bobarev-router-v2/dhcp.conf ]]; then
+  sed -i '/^[[:space:]]*filter-AAAA[[:space:]]*$/d' /etc/bobarev-router-v2/dhcp.conf
+  echo 'Существующая DHCP/DNS-конфигурация сохранена (filter-AAAA удалён).'
  else
-  if [[ -n "$dns_dnat_target" ]]; then
-   echo "DNS ${dns_dnat_target} не отвечает — удаляю DNAT, включаю DNS на NanoPi."
-   iptables -w -t nat -S PREROUTING 2>/dev/null | grep -F -- "-i \"$lan_if\"" | grep -- "--dport 53" | grep -F "DNAT" | sed "s/^-A PREROUTING /-D PREROUTING /" | while read -r stale_rule; do
-    iptables -w -t nat $stale_rule 2>/dev/null || true
-   done || true
-  fi
-  dnsmasq_dns_port=53
-  dhcp_dns="$lan_ip"
+  cat > /etc/bobarev-router-v2/dhcp.conf <<EOF
+port=53
+interface=$lan_if
+bind-dynamic
+dhcp-range=$prefix.50,$prefix.200,255.255.255.0,12h
+dhcp-option=3,$lan_ip
+dhcp-option=6,$lan_ip
+dhcp-leasefile=/var/lib/misc/bobarev-router.leases
+no-resolv
+server=8.8.8.8
+server=1.1.1.1
+EOF
  fi
- {
-  printf 'port=%s\n' "$dnsmasq_dns_port"
-  printf 'interface=%s\n' "$lan_if"
-  printf 'bind-dynamic\n'
-  printf 'dhcp-range=%s.50,%s.200,255.255.255.0,12h\n' "$prefix" "$prefix"
-  printf 'dhcp-option=3,%s\n' "$lan_ip"
-  printf 'dhcp-option=6,%s\n' "$dhcp_dns"
-  printf 'dhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
-  if [[ "$dnsmasq_dns_port" == "53" ]]; then
-   printf 'no-resolv\nserver=8.8.8.8\nserver=1.1.1.1\n'
-  fi
- } > /etc/bobarev-router-v2/dhcp.conf
  dnsmasq --test --conf-file=/etc/bobarev-router-v2/dhcp.conf || return 1
  cat > /usr/local/sbin/bobarev-router-v2 <<'BR'
 #!/bin/bash
 set -euo pipefail
-exec &>>/var/log/bobarev-router.log
-set -x
 source /etc/bobarev-router-v2/config
 NET=${ADDR%.*}.0/24
 clean() {
  for spec in 'filter FORWARD BR2_FWD' 'nat POSTROUTING BR2_NAT' 'mangle FORWARD BR2_MSS'; do
   read -r table parent chain <<< "$spec"
-  while iptables -w -t "$table" -D "$parent" -j "$chain" 2>/dev/null; do :; done
-  iptables -w -t "$table" -F "$chain" 2>/dev/null || true
-  iptables -w -t "$table" -X "$chain" 2>/dev/null || true
+  while iptables -w 5 -t "$table" -D "$parent" -j "$chain" 2>/dev/null; do :; done
+  iptables -w 5 -t "$table" -F "$chain" 2>/dev/null || true
+  iptables -w 5 -t "$table" -X "$chain" 2>/dev/null || true
  done
- while ip6tables -w -D FORWARD -i "$LAN" -j DROP 2>/dev/null; do :; done
- ip rule del pref 11991 iif "$LAN" lookup 199 2>/dev/null || true
- ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
- ip rule del pref 11989 to "$NET" lookup 199 2>/dev/null || true
- ip route flush table 199 2>/dev/null || true
+ while ip6tables -w 5 -D FORWARD -i "$LAN" -j DROP 2>/dev/null; do :; done
+ for pref in 5100 11990 11991; do
+  table=199; [[ "$pref" == 11990 ]] && table=52
+  while ip -4 rule del pref "$pref" iif "$LAN" lookup "$table" 2>/dev/null; do :; done
+ done
+ while ip -4 rule del pref 11989 to "$NET" lookup 199 2>/dev/null; do :; done
+ ip -4 route flush table 199 2>/dev/null || true
 }
-if [[ ${1:-} == stop ]]; then clean; exit; fi
+if [[ ${1:-} == stop ]]; then clean; exit 0; fi
+[[ "$LAN" != "$OUT" ]]
 ip link show "$LAN" >/dev/null
 ip link show "$OUT" >/dev/null
-sysctl -w net.ipv4.ip_forward=1
+# Fail before removing the working rules when the selected route is absent.
+if [[ "$OUT" == tailscale0 ]]; then
+ ip -4 route show table 52 default | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null || { echo 'Нет default tailscale0'; exit 1; }
+fi
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+for dev in all "$LAN" "$OUT"; do sysctl -w "net.ipv4.conf.$dev.rp_filter=0" >/dev/null; done
 ip link set "$LAN" up
 ip address replace "$ADDR/24" dev "$LAN"
 clean
-if [[ "$OUT" != tailscale0 ]]; then
- if [[ "$OUT" == "$LAN" ]]; then exit 1; fi
- GW=$(ip -4 route show table main default dev "$OUT" | awk '/via/{print $3;exit}')
- if [[ -n "$GW" ]]; then ip route replace table 199 default via "$GW" dev "$OUT" onlink
- else ip route replace table 199 default dev "$OUT"; fi
- ip rule add pref 11991 iif "$LAN" lookup 199
+ip -4 route replace table 199 "$NET" dev "$LAN" scope link
+if [[ "$OUT" == tailscale0 ]]; then
+ ip -4 route replace table 199 default dev tailscale0
 else
- ip -4 route show table 52 | grep -q '^default dev tailscale0' || { echo 'Нет exit node'; exit 1; }
+ GW=$(ip -4 route show table main default dev "$OUT" | awk '/via/ && !found {print $3; found=1}')
+ if [[ -n "$GW" ]]; then
+  ip -4 route replace table 199 default via "$GW" dev "$OUT" onlink
+ else
+  ip -4 route replace table 199 default dev "$OUT"
+ fi
 fi
-iptables -w -N BR2_FWD
-iptables -w -A BR2_FWD -i "$LAN" -o "$OUT" -s "$NET" -j ACCEPT
-iptables -w -A BR2_FWD -i "$LAN" -j DROP
-iptables -w -A BR2_FWD -o "$LAN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -w -I FORWARD 1 -j BR2_FWD
-iptables -w -t nat -N BR2_NAT
-iptables -w -t nat -A BR2_NAT -s "$NET" -o "$OUT" -j MASQUERADE
-iptables -w -t nat -I POSTROUTING 1 -j BR2_NAT
-iptables -w -t mangle -N BR2_MSS
-iptables -w -t mangle -A BR2_MSS -i "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-if [[ "$OUT" == "tailscale0" ]]; then
- iptables -w -t mangle -A BR2_MSS -i "$LAN" -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
- iptables -w -t mangle -A BR2_MSS -i tailscale0 -o "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
-fi
-iptables -w -t mangle -I FORWARD 1 -j BR2_MSS
-if [[ "$OUT" != "${WAN:-$OUT}" ]]; then
- ip6tables -w -I FORWARD 1 -i "$LAN" -j DROP
-fi
+# Prevent a missing selected route falling through into another VPN.
+ip -4 route add table 199 unreachable default metric 32760
+iptables -w 5 -N BR2_FWD
+iptables -w 5 -A BR2_FWD -i "$LAN" -o "$OUT" -s "$NET" -j ACCEPT
+iptables -w 5 -A BR2_FWD -i "$LAN" -j DROP
+iptables -w 5 -A BR2_FWD -o "$LAN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -w 5 -I FORWARD 1 -j BR2_FWD
+iptables -w 5 -t nat -N BR2_NAT
+iptables -w 5 -t nat -A BR2_NAT -s "$NET" -o "$OUT" -j MASQUERADE
+iptables -w 5 -t nat -I POSTROUTING 1 -j BR2_NAT
+iptables -w 5 -t mangle -N BR2_MSS
+iptables -w 5 -t mangle -A BR2_MSS -i "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+iptables -w 5 -t mangle -I FORWARD 1 -j BR2_MSS
+ip6tables -w 5 -I FORWARD 1 -i "$LAN" -j DROP
+# LAN only, ahead of Tailscale 5210..5270; host routing unchanged.
+ip -4 rule add pref 5100 iif "$LAN" lookup 199
+path=$(ip -4 route get 1.1.1.1 from "${ADDR%.*}.109" iif "$LAN")
+printf '%s\n' "$path"
+[[ " $path " == *" dev $OUT "* ]] || { echo 'ОШИБКА проверки пути LAN'; exit 1; }
+echo 'Путь LAN проверен; доступ с реального клиента проверяется отдельно.'
 BR
  chmod 700 /usr/local/sbin/bobarev-router-v2
  cat > /etc/systemd/system/bobarev-router-v2.service <<'UNIT'
@@ -6572,124 +6535,13 @@ UNIT
  # DHCP allowed only on the chosen LAN; do not reset existing firewall.
  if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q '^Status: active'; then
   ufw allow in on "$lan_if" to any port 67 proto udp comment 'Bobarev router v2 DHCP' || return 1
-  ufw allow in on "$lan_if" to any port 53 proto udp comment 'Bobarev router v2 LAN DNS' || true
-  ufw allow in on "$lan_if" to any port 53 proto tcp comment 'Bobarev router v2 LAN DNS' || true
+  ufw allow in on "$lan_if" to any port 53 proto udp || return 1
+  ufw allow in on "$lan_if" to any port 53 proto tcp || return 1
  fi
- if [[ "$out_if" == "tailscale0" ]]; then
-  mkdir -p /etc/systemd/system/bobarev-router-v2.service.d
-  cat > /etc/systemd/system/bobarev-router-v2.service.d/override.conf <<EOF
-[Unit]
-After=network-online.target tailscaled.service
-Wants=network-online.target tailscaled.service
-
-[Service]
-ExecStartPre=/bin/sleep 5
-EOF
-  if ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
-   ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
-   ip rule add pref 11990 iif "$lan_if" lookup 52
-  else
-   ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
-  fi
-  cat > /usr/local/sbin/bobarev-router-watchdog <<'WD'
-#!/bin/bash
-set -u
-source /etc/bobarev-router-v2/config
-NET="${ADDR%.*}.0/24"
-if [[ "${OUT:-}" == "tailscale0" ]]; then
-  if ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
-    if ! ip -4 rule show | grep -q '11990.*iif.*'"${LAN:-}"'.*lookup 52'; then
-      logger -t bobarev-router "watchdog: exit node активен — включаю правило 11990 (LAN -> tailscale0)"
-      ip rule add pref 11990 iif "${LAN:-}" lookup 52 2>/dev/null || true
-    fi
-  else
-    if ip -4 rule show | grep -q '11990.*iif.*'"${LAN:-}"'.*lookup 52'; then
-      logger -t bobarev-router "watchdog: exit node недоступен — убираю правило 11990, LAN уходит через WAN (чистый IP)"
-      ip rule del pref 11990 iif "${LAN:-}" lookup 52 2>/dev/null || true
-    fi
-  fi
-  if ! ip -4 rule show | grep -q '11989.*lookup 199'; then
-    ip rule add pref 11989 to "$NET" lookup 199 2>/dev/null || true
-  fi
-fi
-if ! iptables -w -C FORWARD -j BR2_FWD 2>/dev/null; then
-  logger -t bobarev-router "watchdog: BR2_FWD отсутствует — перезапуск bobarev-router-v2"
-  systemctl restart bobarev-router-v2.service 2>/dev/null || true
-fi
-if ! iptables -w -t nat -C POSTROUTING -j BR2_NAT 2>/dev/null; then
-  logger -t bobarev-router "watchdog: BR2_NAT отсутствует — перезапуск bobarev-router-v2"
-  systemctl restart bobarev-router-v2.service 2>/dev/null || true
-fi
-WD
-  chmod 700 /usr/local/sbin/bobarev-router-watchdog
-  cat > /etc/systemd/system/bobarev-router-watchdog.service <<'WDS'
-[Unit]
-Description=Bobarev router rules watchdog
-After=network-online.target tailscaled.service ufw.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/bobarev-router-watchdog
-WDS
-  cat > /etc/systemd/system/bobarev-router-watchdog.timer <<'WDT'
-[Unit]
-Description=Bobarev router rules watchdog timer
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
-AccuracySec=15s
-
-[Install]
-WantedBy=timers.target
-WDT
-  systemctl daemon-reload
-  systemctl enable --now bobarev-router-watchdog.timer
-  cat > /usr/local/sbin/bobarev-tailscale-bootfix <<'TB'
-#!/bin/bash
-for i in $(seq 1 12); do
-  st="$(tailscale status 2>/dev/null | head -n 1)"
-  if [[ -n "$st" && "$st" != *"unexpected state: NoState"* && "$st" != *"Tailscale is starting"* ]]; then
-    exit 0
-  fi
-  sleep 10
-done
-logger -t bobarev-tailscale-bootfix "tailscaled завис в NoState — перезапуск"
-systemctl restart tailscaled
-sleep 20
-st="$(tailscale status 2>/dev/null | head -n 1)"
-if [[ -z "$st" || "$st" == *"unexpected state: NoState"* || "$st" == *"Tailscale is starting"* ]]; then
-  sleep 20
-  systemctl restart tailscaled
-fi
-TB
-  chmod 700 /usr/local/sbin/bobarev-tailscale-bootfix
-  cat > /etc/systemd/system/bobarev-tailscale-bootfix.service <<'TBS'
-[Unit]
-Description=Bobarev Tailscale boot fix (NoState recovery)
-After=tailscaled.service network-online.target
-Wants=tailscaled.service network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/bobarev-tailscale-bootfix
-TBS
-  cat > /etc/systemd/system/bobarev-tailscale-bootfix.timer <<'TBT'
-[Unit]
-Description=Bobarev Tailscale boot fix timer
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-AccuracySec=30s
-
-[Install]
-WantedBy=timers.target
-TBT
-  systemctl daemon-reload
-  systemctl enable --now bobarev-tailscale-bootfix.timer
- fi
+ # Retire generated legacy writers; never restart tailscaled automatically.
+ systemctl disable --now bobarev-router-watchdog.timer bobarev-tailscale-bootfix.timer 2>/dev/null || true
+ systemctl stop bobarev-router-watchdog.service bobarev-tailscale-bootfix.service 2>/dev/null || true
+ rm -f /etc/systemd/system/bobarev-router-v2.service.d/override.conf
 
  if command -v ufw >/dev/null && ufw status | grep -q 'Status: active'; then
   ufw route allow in on "$lan_if" out on "$out_if" comment 'Bobarev LAN router' || true
@@ -6704,25 +6556,12 @@ TBT
   systemctl status bobarev-router-v2.service --no-pager -l || true
   systemctl status bobarev-router-dhcp.service --no-pager -l || true
   journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
-  echo '--- Лог роутера (последние 40 строк) ---'
-  tail -n 40 /var/log/bobarev-router.log 2>/dev/null || true
   echo 'Резервная копия сохранена.'
   return 1
  fi
  echo 'Настройки применены.'
  if [[ "$out_if" == "tailscale0" ]]; then
-  echo 'LAN-клиенты направлены через Tailscale exit node (правило 11990).'
-  local test_ip="${lan_ip%.*}.109"
-  local vpath
-  vpath=$(ip -4 route get 1.1.1.1 from "$test_ip" iif "$lan_if" 2>/dev/null | head -n1)
-  echo "Проверка пути для клиента $test_ip: $vpath"
-  if echo "$vpath" | grep -q 'tailscale0'; then
-   echo -e "${C_GREEN}Клиенты LAN будут ходить через exit node (tailscale0).${C_RESET}"
-  elif ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
-   echo -e "${C_YELLOW}Route в table 52 есть, но правило 11990 не применилось — клиент уйдёт через WAN (чистый IP).${C_RESET}"
-  else
-   echo -e "${C_YELLOW}Exit node недоступен — клиенты автоматически уходят через WAN (чистый IP), интернет сохраняется.${C_RESET}"
-  fi
+  echo 'LAN-клиенты направлены через Tailscale exit node (правило 5100 -> table 199).'
  else
   echo "LAN-клиенты направлены через WAN: $out_if"
  fi
@@ -6731,13 +6570,7 @@ TBT
 }
 
 br_snapshot() {
- local d
- d=$(ls -1dt /root/bobarev-network-backup-$(date +%Y%m%d)-* 2>/dev/null | head -n1 || true)
- if [[ -n "$d" ]]; then
-  echo "Резервная копия за сегодня уже есть: $d (переиспользуется)"
-  return 0
- fi
- d="/root/bobarev-network-backup-$(date +%Y%m%d-%H%M%S)-$$"
+ local d="/root/bobarev-network-backup-$(date +%Y%m%d-%H%M%S)-$$"
  mkdir -m 700 "$d" || return 1
  cp -a /etc/ufw "$d/" 2>/dev/null || true
  cp -a /etc/dnsmasq.conf /etc/dnsmasq.d /etc/bobarev-router-v2 "$d/" 2>/dev/null || true
@@ -6763,8 +6596,8 @@ ts_is_online() {
 
 ts_wait_exit_node() {
  local i
- for i in $(seq 1 20); do
-  ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && return 0
+ for i in $(seq 1 90); do
+  ip -4 route show table 52 default 2>/dev/null | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null && return 0
   sleep 1
  done
  return 1
@@ -6785,7 +6618,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.23
+# BOBAREV SHELL 3.14.24
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9575,7 +9408,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.23 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.24 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

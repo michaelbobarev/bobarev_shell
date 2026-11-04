@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.29 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.30 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6754,7 +6754,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.29
+# BOBAREV SHELL 3.14.30
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9510,6 +9510,263 @@ echo 'Проверку с mesh-адреса выполните на сервер
 NM_EXIT_SCRIPT
 }
 
+install_network_parameter_engine() {
+ install -d -m 700 /usr/local/lib/bobarev-network-parameters
+ cat > /usr/local/lib/bobarev-network-parameters/engine.py <<'BSP_ENGINE'
+#!/usr/bin/env python3
+import argparse,json,pathlib,re,subprocess,sys,os,shutil
+META={'net.core.bpf_jit_harden': {'description': 'Усиление защиты BPF JIT: 0/1/2'}, 'net.core.default_qdisc': {'description': 'Тип очереди по умолчанию для новых устройств; существующая очередь этим не заменяется'}, 'net.core.netdev_budget': {'description': 'Бюджет обработки пакетов за цикл'}, 'net.core.netdev_budget_usecs': {'description': 'Бюджет времени обработки за цикл, мкс'}, 'net.core.netdev_max_backlog': {'description': 'Очередь входящих пакетов ядра'}, 'net.core.optmem_max': {'description': 'Дополнительная память сокета, байт'}, 'net.core.rmem_default': {'description': 'Приёмный буфер сокета по умолчанию, байт'}, 'net.core.rmem_max': {'description': 'Максимум приёмного буфера сокета, байт'}, 'net.core.somaxconn': {'description': 'Предел очереди ожидающих соединений'}, 'net.core.wmem_default': {'description': 'Передающий буфер сокета по умолчанию, байт'}, 'net.core.wmem_max': {'description': 'Максимум передающего буфера сокета, байт'}, 'net.ipv4.conf.all.accept_redirects': {'description': 'Принимать ICMP redirects: 0/1; параметр безопасности хоста'}, 'net.ipv4.conf.all.accept_source_route': {'description': 'Принимать source routing: 0/1; меняет безопасность хоста'}, 'net.ipv4.conf.all.rp_filter': {'description': 'Обратная проверка источника: 0 выкл / 1 строгая / 2 свободная; может влиять на VPN'}, 'net.ipv4.conf.all.send_redirects': {'description': 'Отправлять ICMP redirects: 0/1'}, 'net.ipv4.conf.default.accept_redirects': {'description': 'Принимать ICMP redirects: 0/1; параметр безопасности хоста'}, 'net.ipv4.conf.default.accept_source_route': {'description': 'Принимать source routing: 0/1; меняет безопасность хоста'}, 'net.ipv4.conf.default.rp_filter': {'description': 'Обратная проверка источника: 0 выкл / 1 строгая / 2 свободная; может влиять на VPN'}, 'net.ipv4.conf.default.send_redirects': {'description': 'Отправлять ICMP redirects: 0/1'}, 'net.ipv4.icmp_echo_ignore_all': {'description': 'Игнорировать все ICMP echo (ping); обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.icmp_ignore_bogus_error_responses': {'description': 'Игнорировать некорректные ICMP errors; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.ip_forward': {'description': 'IPv4 forwarding хоста: 0 выкл / 1 вкл; влияет на маршрутизатор'}, 'net.ipv4.tcp_adv_win_scale': {'description': 'Старый параметр масштабирования рекламируемого окна; на новых ядрах может отсутствовать'}, 'net.ipv4.tcp_autocorking': {'description': 'Автоматическое объединение TCP-записей; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_base_mss': {'description': 'Базовый MSS для механизма TCP MTU probing, байт'}, 'net.ipv4.tcp_congestion_control': {'description': 'Алгоритм контроля перегрузки TCP; только доступный ядру'}, 'net.ipv4.tcp_dsack': {'description': 'TCP DSACK; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_early_retrans': {'description': 'Режим ранней TCP-ретрансляции: 0..4'}, 'net.ipv4.tcp_fastopen': {'description': 'TCP Fast Open: битовая маска 0..7 (поддержка приложения тоже нужна)'}, 'net.ipv4.tcp_fin_timeout': {'description': 'Таймер orphan FIN-WAIT-2, секунды'}, 'net.ipv4.tcp_keepalive_intvl': {'description': 'Интервал keepalive-проб, секунды'}, 'net.ipv4.tcp_keepalive_probes': {'description': 'Число keepalive-проб'}, 'net.ipv4.tcp_keepalive_time': {'description': 'Простой до keepalive для сокетов с keepalive, секунды'}, 'net.ipv4.tcp_max_syn_backlog': {'description': 'Очередь незавершённых TCP рукопожатий'}, 'net.ipv4.tcp_mem': {'description': 'Общая TCP память: три порога в СТРАНИЦАХ, не байтах'}, 'net.ipv4.tcp_mtu_probing': {'description': 'Обнаружение проблем MTU: 0 выкл / 1 при проблеме / 2 всегда'}, 'net.ipv4.tcp_no_metrics_save': {'description': 'Не сохранять TCP-метрики; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_notsent_lowat': {'description': 'Порог ещё не отправленных TCP-данных, байт'}, 'net.ipv4.tcp_reordering': {'description': 'Порог переупорядочения TCP, пакеты'}, 'net.ipv4.tcp_rfc1337': {'description': 'Защита TIME-WAIT RFC1337; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_rmem': {'description': 'TCP receive: минимум, начальное, максимум; три числа в байтах'}, 'net.ipv4.tcp_sack': {'description': 'TCP SACK; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_slow_start_after_idle': {'description': 'Slow start после простоя; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_syncookies': {'description': 'SYN cookies: 0 выкл / 1 при перегрузке / 2 всегда; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_thin_linear_timeouts': {'description': 'Линейные таймауты thin TCP; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_timestamps': {'description': 'TCP timestamps: 0/1/2; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_window_scaling': {'description': 'Масштабирование TCP окна; обычно 0/1 (если указан режим — используйте режим)'}, 'net.ipv4.tcp_wmem': {'description': 'TCP send: минимум, начальное, максимум; три числа в байтах'}, 'net.ipv4.udp_mem': {'description': 'Общая UDP память: три порога в СТРАНИЦАХ, не байтах'}, 'net.ipv4.udp_rmem_min': {'description': 'Минимальный приёмный буфер UDP, байт'}, 'net.ipv4.udp_wmem_min': {'description': 'Минимальный передающий буфер UDP, байт'}, 'net.ipv6.conf.all.accept_redirects': {'description': 'Принимать ICMP redirects: 0/1; параметр безопасности хоста'}, 'net.ipv6.conf.all.accept_source_route': {'description': 'Принимать source routing: 0/1; меняет безопасность хоста'}, 'net.ipv6.conf.all.forwarding': {'description': 'IPv6 forwarding хоста: 0/1; не настраивает IPv6 маршруты/NAT'}, 'net.ipv6.conf.default.accept_redirects': {'description': 'Принимать ICMP redirects: 0/1; параметр безопасности хоста'}, 'net.ipv6.conf.default.accept_source_route': {'description': 'Принимать source routing: 0/1; меняет безопасность хоста'}, 'net.netfilter.nf_conntrack_max': {'description': 'Предел отслеживаемых соединений; больше требует больше памяти'}, 'net.netfilter.nf_conntrack_tcp_timeout_close_wait': {'description': 'Таймер conntrack для close_wait, секунды'}, 'net.netfilter.nf_conntrack_tcp_timeout_established': {'description': 'Таймер conntrack для established, секунды'}, 'net.netfilter.nf_conntrack_tcp_timeout_fin_wait': {'description': 'Таймер conntrack для fin_wait, секунды'}, 'net.netfilter.nf_conntrack_tcp_timeout_time_wait': {'description': 'Таймер conntrack для time_wait, секунды'}}
+BASE=pathlib.Path('/etc/bobarev-network-parameters')
+
+def run(args):
+ return subprocess.run(args,text=True,capture_output=True)
+def current(key):
+ p=run(['sysctl','-n',key]);return p.stdout.strip() if p.returncode==0 else None
+def interfaces():
+ p=run(['ip','-j','link','show'])
+ if p.returncode:raise ValueError(p.stderr.strip())
+ return {x['ifname']:x for x in json.loads(p.stdout)}
+def validate(d,live=True):
+ if not isinstance(d,dict) or set(d)-{'mtu','mss','sysctl','txqlen'}:raise ValueError('Неверный формат профиля')
+ links=interfaces() if live else {}
+ for section in ('mtu','mss','sysctl','txqlen'):
+  if not isinstance(d.get(section,{}),dict):raise ValueError('Неверный раздел '+section)
+ for dev,value in d.get('mtu',{}).items():
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',dev) or dev=='lo':raise ValueError('Неверный интерфейс')
+  if live and dev not in links:raise ValueError('Интерфейс отсутствует: '+dev)
+  if type(value)!=int or not 1280<=value<=9000:raise ValueError('MTU: 1280..9000; меньшие значения этой версией не поддерживаются')
+  if live:
+   lo=links[dev].get('min_mtu',1280);hi=links[dev].get('max_mtu',9000)
+   if value<lo or value>hi:raise ValueError('MTU вне диапазона устройства '+dev)
+ for dev,value in d.get('txqlen',{}).items():
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',dev) or dev=='lo':raise ValueError('Неверный интерфейс очереди')
+  if live and dev not in links:raise ValueError('Интерфейс очереди отсутствует: '+dev)
+  if type(value)!=int or not 0<=value<=100000:raise ValueError('txqueuelen: 0..100000')
+ for dev,v in d.get('mss',{}).items():
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',dev) or dev=='lo':raise ValueError('Неверный интерфейс MSS')
+  if live and dev not in links:raise ValueError('Интерфейс MSS отсутствует: '+dev)
+  if not isinstance(v,dict) or set(v)-{'mode','value'} or v.get('mode') not in ('clamp','cap'):raise ValueError('Неверный режим MSS')
+  if v['mode']=='cap':
+   n=v.get('value');mtu=d.get('mtu',{}).get(dev,links.get(dev,{}).get('mtu',1500))
+   if type(n)!=int or not 536<=n<=mtu-40:raise ValueError('MSS IPv4: 536..MTU-40. При вложенных туннелях может требоваться меньше')
+ for key,v in d.get('sysctl',{}).items():
+  if key not in META or not isinstance(v,str) or '\n' in v or '\r' in v:raise ValueError('Неподдерживаемый sysctl '+key)
+  if live and current(key) is None:raise ValueError('Параметр не поддержан ядром: '+key)
+  leaf=key.rsplit('.',1)[-1]
+  if leaf in ('tcp_congestion_control','default_qdisc'):
+   if not re.fullmatch(r'[A-Za-z0-9_-]{1,32}',v):raise ValueError('Неверное текстовое значение')
+   if live and leaf=='tcp_congestion_control' and v not in (current('net.ipv4.tcp_available_congestion_control') or '').split():raise ValueError('Алгоритм не доступен ядру')
+   if leaf=='default_qdisc' and v not in ('fq','fq_codel','pfifo_fast','sfq'):raise ValueError('Поддержаны fq/fq_codel/pfifo_fast/sfq')
+   continue
+  nums=v.split();triple=leaf in ('tcp_mem','udp_mem','tcp_rmem','tcp_wmem')
+  if len(nums)!=(3 if triple else 1) or any(not re.fullmatch(r'-?\d+',n) for n in nums):raise ValueError('Неверное числовое значение '+key)
+  ns=list(map(int,nums));lo=-31 if leaf=='tcp_adv_win_scale' else 0;hi=2147483647
+  if leaf=='tcp_adv_win_scale':hi=31
+  if leaf in ('rp_filter','tcp_mtu_probing','tcp_syncookies','tcp_timestamps','bpf_jit_harden'):hi=2
+  if leaf=='tcp_early_retrans':hi=4
+  if leaf=='tcp_fastopen':hi=7
+  if leaf in ('ip_forward','forwarding','accept_redirects','send_redirects','accept_source_route','tcp_autocorking','tcp_dsack','tcp_no_metrics_save','tcp_rfc1337','tcp_sack','tcp_slow_start_after_idle','tcp_thin_linear_timeouts','tcp_window_scaling','icmp_echo_ignore_all','icmp_ignore_bogus_error_responses'):hi=1
+  if any(n<lo or n>hi for n in ns) or (triple and ns!=sorted(ns)):raise ValueError('Значения вне допустимого диапазона '+key)
+ for direction in ('r','w'):
+  mx='net.core.'+direction+'mem_max';de='net.core.'+direction+'mem_default'
+  if mx in d.get('sysctl',{}) or de in d.get('sysctl',{}):
+   vals=d.get('sysctl',{});maximum=vals.get(mx,current(mx) if live else None);default=vals.get(de,current(de) if live else None)
+   if maximum is not None and default is not None and int(default)>int(maximum):raise ValueError('Буфер default превышает max')
+ return d
+
+def plan(d):
+ commands=[]
+ for k,v in sorted(d.get('sysctl',{}).items()):commands.append(['sysctl','-w',k+'='+v])
+ for dev,v in d.get('mtu',{}).items():commands.append(['ip','link','set','dev',dev,'mtu',str(v)])
+ for dev,v in d.get('txqlen',{}).items():commands.append(['ip','link','set','dev',dev,'txqueuelen',str(v)])
+ # Our single IPv4 chain runs in POSTROUTING, after normal FORWARD/OUTPUT rules.
+ if d.get('mss'):
+  commands += [['iptables','-w','5','-t','mangle','-N','BSP_MSS']]
+  for dev,v in d['mss'].items():
+   c=['iptables','-w','5','-t','mangle','-A','BSP_MSS','-o',dev,'-p','tcp','--tcp-flags','SYN,RST','SYN']
+   if v['mode']=='clamp':c+=['-j','TCPMSS','--clamp-mss-to-pmtu']
+   else:c+=['-m','tcpmss','--mss',str(v['value']+1)+':65535','-j','TCPMSS','--set-mss',str(v['value'])]
+   commands.append(c)
+  commands.append(['iptables','-w','5','-t','mangle','-A','POSTROUTING','-j','BSP_MSS'])
+ return commands
+
+def clear_mss():
+ while run(['iptables','-w','5','-t','mangle','-D','POSTROUTING','-j','BSP_MSS']).returncode==0:pass
+ for op in ('-F','-X'):run(['iptables','-w','5','-t','mangle',op,'BSP_MSS'])
+def apply(d):
+ validate(d)
+ # Remove only this module's chain. Other modules' rules are not deleted.
+ if shutil.which('iptables'):
+  if run(['iptables','-w','5','-t','mangle','-S','BSP_MSS']).returncode==0:clear_mss()
+ elif d.get('mss'):raise ValueError('Для MSS требуется iptables')
+ for args in plan(d):
+  p=run(args)
+  if p.returncode:raise RuntimeError('Команда не выполнена: '+repr(args)+'\n'+p.stderr+'\nВозможны частичные изменения; автоотката нет.')
+  if p.stdout:print(p.stdout.strip())
+ print('Профиль применён. Проверка доступа с реального клиента обязательна.')
+
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument('action',choices=['list','interfaces','validate','plan','apply','set','remove','summary']);ap.add_argument('args',nargs='*');a=ap.parse_args()
+ if a.action=='list':
+  for k,v in META.items():
+   now=current(k)
+   if now is not None:print(k+'\t'+now+'\t'+v['description'])
+  return
+ if a.action=='interfaces':
+  for name,x in interfaces().items():
+   if name!='lo':print(name+'\tMTU '+str(x.get('mtu'))+'; '+x.get('operstate','UNKNOWN'))
+  return
+ if not a.args:raise ValueError('Нужен файл профиля')
+ f=pathlib.Path(a.args[0]);d=json.loads(f.read_text()) if f.exists() else {'mtu':{},'mss':{},'sysctl':{}}
+ if a.action=='set':
+  section,key,value=a.args[1:];assert section in ('mtu','mss','sysctl','txqlen')
+  if section in ('mtu','txqlen'):value=int(value)
+  if section=='mss':value={'mode':'clamp'} if value=='clamp' else {'mode':'cap','value':int(value)}
+  d.setdefault(section,{})[key]=value;validate(d);f.write_text(json.dumps(d,ensure_ascii=False,indent=2));return
+ if a.action=='remove':
+  section,key=a.args[1:];d.setdefault(section,{}).pop(key,None);f.write_text(json.dumps(d,ensure_ascii=False,indent=2));return
+ validate(d)
+ if a.action=='validate':print('Проверка профиля пройдена')
+ elif a.action=='summary':print(json.dumps(d,ensure_ascii=False,indent=2))
+ elif a.action=='plan':
+  print('Перед командами удаляются только прежняя цепочка BSP_MSS и ссылки POSTROUTING на неё, если существуют. Остальные MSS-правила сохраняются.')
+  print(json.dumps(plan(d),ensure_ascii=False,indent=2))
+ elif a.action=='apply':
+  if os.geteuid()!=0:raise ValueError('Нужен root')
+  apply(d)
+if __name__=='__main__':
+ try:main()
+ except (ValueError,RuntimeError,OSError,KeyError,AssertionError) as e:print('ОШИБКА: '+str(e),file=sys.stderr);sys.exit(1)
+BSP_ENGINE
+ chmod 700 /usr/local/lib/bobarev-network-parameters/engine.py
+}
+bsp_input() {
+ local result
+ result=$(whiptail --inputbox "$1" 16 "${WT_WIDTH:-85}" "$2" 3>&1 1>&2 2>&3) || return 1
+ printf -v "$3" '%s' "$result"
+}
+mod_network_parameter_wizard() (
+ local engine=/usr/local/lib/bobarev-network-parameters/engine.py draft mode selected dev value key now description group choice answer persist current_mtu
+ local -a options=()
+ install_network_parameter_engine || return 1
+ draft=$(mktemp /tmp/bobarev-netparams.XXXXXX) || return 1
+ trap 'rm -f "$draft"' EXIT
+ chmod 600 "$draft"
+ if [[ -f /etc/bobarev-network-parameters/profile.json ]]; then
+  cat /etc/bobarev-network-parameters/profile.json > "$draft"
+ else printf '{"mtu":{},"mss":{},"txqlen":{},"sysctl":{}}\n' > "$draft"; fi
+ smart_menu 'Сетевые параметры пакетов и ядра' 'Дополнительные параметры. Меняется только явно выбранное. MTU/очереди относятся к интерфейсам, sysctl — ко всему хосту. В профиль загружены прежние сохранённые действия, если он существует.' 20 "${WT_WIDTH:-85}" 3 mode \
+  KEEP 'Ничего не менять' GUIDED 'Пошагово: интерфейсы, MTU, MSS, очереди, TCP' EXPERT 'Расширенно: выбрать параметры ядра из списка' || return 0
+ [[ "$mode" != KEEP ]] || return 0
+ if [[ "$mode" == GUIDED ]]; then
+  while IFS=$'\t' read -r dev description; do
+   [[ -n "$dev" ]] && options+=("$dev" "$description" OFF)
+  done < <(python3 "$engine" interfaces)
+  ((${#options[@]})) || { echo 'Нет доступных интерфейсов'; return 1; }
+  selected=$(whiptail --checklist --separate-output 'К каким интерфейсам относятся MTU/MSS/очереди? Пробел — отметить. Можно ничего не отметить и перейти к TCP. Изменение WAN/VPN может оборвать SSH.' 22 "${WT_WIDTH:-85}" 8 "${options[@]}" 3>&1 1>&2 2>&3) || return 0
+  while IFS= read -r dev; do
+   [[ -n "$dev" ]] || continue
+   current_mtu=$(cat "/sys/class/net/$dev/mtu")
+   smart_menu 'Сетевые параметры пакетов и ядра' "MTU $dev сейчас $current_mtu байт. Это размер IP-пакета интерфейса, не скорость. Больше не всегда лучше. Туннели имеют накладные расходы. Проверяйте реальный путь." 20 "${WT_WIDTH:-85}" 3 choice \
+    KEEP 'Не добавлять изменений MTU' EDIT 'Задать MTU вручную (1280..9000)' REMOVE 'Убрать MTU этого интерфейса из профиля' || return 0
+   case "$choice" in
+    EDIT) bsp_input "MTU $dev, байт. Текущее значение подставлено. Автоподбора MTU пути здесь нет." "$current_mtu" value || return 0
+          python3 "$engine" set "$draft" mtu "$dev" "$value" || { pause_enter; return 1; } ;;
+    REMOVE) python3 "$engine" remove "$draft" mtu "$dev" || return 1 ;;
+   esac
+   smart_menu 'Сетевые параметры пакетов и ядра' "MSS для исходящих IPv4 TCP SYN через $dev. Ограничивает TCP payload, не UDP. Действует на хост и транзит. Другие правила могут дополнительно уменьшить MSS. Для IPv6 этот профиль MSS не действует." 21 "${WT_WIDTH:-85}" 4 choice \
+    KEEP 'Не добавлять изменений MSS' CLAMP 'Ограничивать по MTU пути (clamp)' CAP 'Задать верхнюю границу MSS, байт' REMOVE 'Удалить своё MSS-правило из профиля' || return 0
+   case "$choice" in
+    CLAMP) python3 "$engine" set "$draft" mss "$dev" clamp || return 1 ;;
+    CAP) value=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));dev=sys.argv[2];print(d.get("mss",{}).get(dev,{}).get("value",d.get("mtu",{}).get(dev,int(sys.argv[3]))-40))' "$draft" "$dev" "$current_mtu") || return 1
+         bsp_input "MSS IPv4 $dev: верхняя граница, а не гарантированное значение. 536..MTU-40. Подставлен прежний предел или MTU-40, не результат проверки пути. Для вложенных туннелей может требоваться меньше." "$value" value || return 0
+         python3 "$engine" set "$draft" mss "$dev" "$value" || { pause_enter; return 1; } ;;
+    REMOVE) python3 "$engine" remove "$draft" mss "$dev" || return 1 ;;
+   esac
+   now=$(cat "/sys/class/net/$dev/tx_queue_len")
+   smart_menu 'Сетевые параметры пакетов и ядра' "Очередь передачи $dev (txqueuelen): сейчас $now пакетов. Это не размер TCP-буфера. Увеличение может увеличивать задержку, эффект зависит от qdisc/устройства." 20 "${WT_WIDTH:-85}" 3 choice \
+    KEEP 'Не добавлять изменений очереди' EDIT 'Указать число пакетов' REMOVE 'Убрать очередь из профиля' || return 0
+   case "$choice" in
+    EDIT) bsp_input "txqueuelen $dev: 0..100000 пакетов" "$now" value || return 0
+          python3 "$engine" set "$draft" txqlen "$dev" "$value" || return 1 ;;
+    REMOVE) python3 "$engine" remove "$draft" txqlen "$dev" || return 1 ;;
+   esac
+  done <<< "$selected"
+ fi
+ options=()
+ while IFS=$'\t' read -r key now description; do
+  [[ -n "$key" ]] || continue
+  # Guided view omits security/routing switches; expert view shows the entire supported catalog.
+  if [[ "$mode" == GUIDED && "$key" != net.core.* && "$key" != net.ipv4.tcp_* && "$key" != net.ipv4.udp_* && "$key" != net.netfilter.* ]]; then continue; fi
+  [[ "$mode" == GUIDED && "$key" == net.core.bpf_jit_harden ]] && continue
+  options+=("$key" "$now — $description" OFF)
+ done < <(python3 "$engine" list)
+ selected=$(whiptail --checklist --separate-output 'Параметры ядра ВСЕГО хоста. Выберите только нужные. Отображаются только поддержанные текущим ядром ключи. TCP/буферы могут влиять на все приложения; forwarding/rp_filter — на VPN и маршрутизацию. Больше не означает быстрее.' 25 "${WT_WIDTH:-85}" 10 "${options[@]}" 3>&1 1>&2 2>&3) || return 0
+ while IFS= read -r key; do
+  [[ -n "$key" ]] || continue
+  now=$(sysctl -n "$key") || return 1
+  description=$(python3 "$engine" list | awk -F '\t' -v k="$key" '$1==k {print $3}')
+  smart_menu 'Сетевые параметры пакетов и ядра' "$key\n$description\nТекущее значение: $now\nИзменение относится ко всему хосту." 21 "${WT_WIDTH:-85}" 3 choice \
+   KEEP 'Не добавлять изменения' EDIT 'Задать значение (текущее подставлено)' REMOVE 'Убрать этот ключ из сохранённого профиля' || return 0
+  case "$choice" in
+   EDIT) bsp_input "$key\n$description\nТекущее значение: $now. Для трёх значений используйте пробелы. Формат/диапазон проверяются; оптимальное значение автоматически не определяется." "$now" value || return 0
+         python3 "$engine" set "$draft" sysctl "$key" "$value" || { pause_enter; return 1; } ;;
+   REMOVE) python3 "$engine" remove "$draft" sysctl "$key" || return 1 ;;
+  esac
+ done <<< "$selected"
+ python3 "$engine" validate "$draft" || return 1
+ echo '=== ИТОГОВЫЙ ПРОФИЛЬ (включая прежние сохранённые действия) ==='
+ python3 "$engine" summary "$draft" || return 1
+ echo '=== Команды, которые будут выполнены ==='
+ python3 "$engine" plan "$draft" || return 1
+ pause_enter
+ smart_menu 'Сетевые параметры пакетов и ядра' 'Когда применять? Однократно не меняет ранее сохранённый профиль/автозапуск. Сохранение создаёт профиль действий, не резервную копию старых значений.' 18 "${WT_WIDTH:-85}" 3 persist \
+  ONCE 'Только сейчас' SAVE 'Сейчас и при загрузке' CANCEL 'Отмена' || return 0
+ [[ "$persist" != CANCEL ]] || return 0
+ nm_yes 'Применить показанные изменения? Возможен обрыв SSH/интернета. Ядро может отвергнуть отдельное значение; возможны частичные изменения. Автоотката нет. Другие службы/старые мастера могут позже переопределить параметры. Сначала проверьте доступ к консоли.' || return 0
+ python3 "$engine" apply "$draft" || { pause_enter; return 1; }
+ if [[ "$persist" == SAVE ]]; then
+  install -d -m 700 /etc/bobarev-network-parameters
+  install -m 600 "$draft" /etc/bobarev-network-parameters/profile.json
+  cat > /etc/systemd/system/bobarev-network-parameters.service <<'BSP_UNIT'
+[Unit]
+Description=Explicit network parameter profile
+After=network-online.target tailscaled.service ufw.service bobarev-router-v2.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/bobarev-network-parameters/engine.py apply /etc/bobarev-network-parameters/profile.json
+[Install]
+WantedBy=multi-user.target
+BSP_UNIT
+  systemctl daemon-reload || return 1
+  systemctl enable bobarev-network-parameters.service || return 1
+  echo 'Профиль включён на загрузку. Интерфейсы должны существовать к моменту применения; повторного ожидания/самолечения нет.'
+ fi
+ echo 'Уберите действие из профиля, если больше не нужно повторять его. Это НЕ возвращает предыдущее значение: его нужно задать явно.'
+ pause_enter
+)
+mod_network_parameters() {
+ local pick=''
+ while true; do
+  smart_menu 'Сетевые параметры пакетов и ядра' 'Общий расширенный мастер. Ничего не меняется до итогового подтверждения. Старые сетевые модули не переписаны целиком; профиль применяется отдельно после их настройки.' 20 "${WT_WIDTH:-85}" 5 pick \
+   1 'Текущие интерфейсы и сохранённый профиль' 2 'Настроить пошагово / вручную' 3 'Применить сохранённый профиль' 4 'Отключить применение при загрузке' 0 'Назад' || return 0
+  case "$pick" in
+   0) return 0 ;;
+   1) ip -br link show
+      if [[ -f /etc/bobarev-network-parameters/profile.json ]]; then cat /etc/bobarev-network-parameters/profile.json; else echo 'Профиль не сохранён'; fi
+      systemctl --no-pager status bobarev-network-parameters.service 2>/dev/null || true; pause_enter ;;
+   2) mod_network_parameter_wizard || true ;;
+   3) [[ -f /etc/bobarev-network-parameters/profile.json ]] || { echo 'Сначала настройте и сохраните профиль'; pause_enter; continue; }
+      nm_yes 'Повторить сохранённые действия? Возможен обрыв доступа; автоотката нет.' || continue
+      install_network_parameter_engine || return 1
+      python3 /usr/local/lib/bobarev-network-parameters/engine.py apply /etc/bobarev-network-parameters/profile.json || true; pause_enter ;;
+   4) nm_yes 'Отключить только автоприменение? Текущие значения НЕ откатываются, профиль остаётся.' || continue
+      systemctl disable bobarev-network-parameters.service 2>/dev/null || true; pause_enter ;;
+  esac
+ done
+}
+
 # ------------------------------------------------------------------------------
 # ОБРАБОТКА CLI-АРГУМЕНТОВ БЫСТРОГО ЗАПУСКА
 # ------------------------------------------------------------------------------
@@ -9544,7 +9801,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.29 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.30 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -9630,6 +9887,7 @@ while true; do
     "25" "Аудит системы 1" \
     "26" "Аудит системы 2 и каскадные пары" \
     "27" "Сброс сетевых надстроек (выборочно)" \
+    "28" "Сетевые параметры пакетов и ядра" \
     "A" " Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" " Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -9669,6 +9927,14 @@ while true; do
         25) mod_server_audit; pause_enter ;;
         26) mod_network_cascade_audit ;;
         27) mod_network_reset ;;
+        28) mod_network_parameters ;;
         A) run_full_auto_setup; pause_enter ;;
+    esac
+    case "$choice" in
+        8|10|17|19|20|21|22|23|24)
+            if whiptail --defaultno --yesno 'Открыть дополнительный мастер MTU, MSS, очередей и параметров TCP/ядра? Нет — оставить результат настройки без дополнительных изменений.' 13 "$WT_WIDTH"; then
+                mod_network_parameter_wizard || true
+            fi
+            ;;
     esac
 done

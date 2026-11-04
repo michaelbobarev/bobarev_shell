@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.26 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.27 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6315,11 +6315,6 @@ br26_apply() {
   fi
   ts_wait_exit_node || { echo 'Нет default tailscale0; LAN пока не изменён'; exit 1; }
  fi
- br_snapshot || exit 1
- local backup="/root/bobarev-router-backup-$(date +%Y%m%d-%H%M%S)-$$"
- mkdir -m 700 "$backup" || exit 1
- cp -a /etc/bobarev-router-v2 /usr/local/sbin/bobarev-router-v2 /etc/systemd/system/bobarev-router-v2.service* /etc/systemd/system/bobarev-router-dhcp.service "$backup/" 2>/dev/null || true
- echo "Резервная копия: $backup"
  apt-get install -y dnsmasq-base iptables iproute2 || exit 1
  dnsmasq --test --conf-file="$p/dhcp.conf" || exit 1
  systemctl disable --now bobarev-router-watchdog.timer bobarev-tailscale-bootfix.timer 2>/dev/null || true
@@ -6387,7 +6382,7 @@ UNIT
  systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service || exit 1
  if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
   journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
-  echo "Ошибка применения. Копия: $backup. Автоотката нет."; exit 1
+  echo 'Ошибка применения. Резервная копия не создавалась; автоматического отката нет.'; exit 1
  fi
  rm -rf "$p"
  echo 'Применено. Проверьте интернет и публичный IP с реального LAN-клиента.'
@@ -6408,12 +6403,11 @@ mod_router_sbc() {
       pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
    3) if [[ -f /etc/bobarev-router-v2/pending/config ]]; then
-       nm_yes 'Применить отложенную конфигурацию? Текущие настройки будут заменены после резервного копирования.' && br26_apply || true
+       nm_yes 'Применить отложенную конфигурацию? Текущие настройки будут заменены БЕЗ резервного копирования и автоматического отката.' && br26_apply || true
       else systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true; fi
       pause_enter ;;
    4) systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service || true; pause_enter ;;
-   5) nm_yes 'Удалить настройки этого модуля? WAN, SSH и другие VPN не удаляются.' || continue
-      br_snapshot || return 1
+   5) nm_yes 'Удалить настройки этого модуля БЕЗ резервной копии? WAN, SSH и другие VPN не удаляются.' || continue
       systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service 2>/dev/null || true
       rm -rf /etc/bobarev-router-v2
       echo 'Конфигурация модуля удалена; адреса LAN и разрешения UFW автоматически не удалялись.'; pause_enter ;;
@@ -6494,7 +6488,7 @@ for link in json.loads(subprocess.check_output(['ip','-j','-4','addr','show'])):
   if any(n.overlaps(x) for x in nets):raise SystemExit('LAN пересекается с '+link['ifname'])
 BR26_VALIDATE
  [[ $? == 0 ]] || return 1
- nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN и автоотката. Отсутствующие интерфейсы НЕ создаются: применение отложится. WAN/SSH не перенастраиваются. Смена exit node влияет на выход хоста." || return 0
+ nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN, резервных копий и автоотката. Отсутствующие интерфейсы НЕ создаются: применение отложится. WAN/SSH не перенастраиваются. Смена exit node влияет на выход хоста." || return 0
  install -d -m 700 /etc/bobarev-router-v2/pending
  p=/etc/bobarev-router-v2/pending
  {
@@ -6626,7 +6620,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.26
+# BOBAREV SHELL 3.14.27
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9416,7 +9410,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.26 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.27 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

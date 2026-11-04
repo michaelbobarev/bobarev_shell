@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.20 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.21 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6403,46 +6403,31 @@ PY
      prompt_default 'IP или имя exit node' '' ts_node
      [[ "$MODULE_CANCELED" == false ]] || continue
      [[ -n "$ts_node" ]] || { echo 'IP/имя не введены — попробуйте ещё раз.'; pause_enter; continue; }
-     # Самолечение: если tailscaled завис в NoState — перезапустить и дождаться подключения
-     local ts_state
-     ts_state="$(tailscale status 2>/dev/null | head -n 1)"
-     if [[ -z "$ts_state" || "$ts_state" == *"unexpected state: NoState"* || "$ts_state" == *"Tailscale is starting"* ]]; then
-      echo 'Tailscale завис (NoState) — перезапускаю tailscaled...'
-      systemctl restart tailscaled
-      local w
-      for w in $(seq 1 12); do
-       sleep 5
-       ts_state="$(tailscale status 2>/dev/null | head -n 1)"
-       [[ -n "$ts_state" && "$ts_state" != *"unexpected state: NoState"* && "$ts_state" != *"Tailscale is starting"* ]] && break
-      done
-     fi
      echo "Применяю exit node: $ts_node ..."
      if tailscale set --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
-      local route_ok=false
-      if ts_wait_exit_node; then
-       route_ok=true
-      else
-       echo 'Узел подключается — жду ещё 45 секунд...'
-       local i
-       for i in $(seq 1 45); do
-        ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && { route_ok=true; break; }
-        sleep 1
-       done
-      fi
+      echo 'Жду появления default-маршрута (до 90 секунд)...'
+      local i route_ok=false
+      for i in $(seq 1 90); do
+       ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0' && { route_ok=true; break; }
+       sleep 1
+      done
       if [[ "$route_ok" == true ]]; then
        if ts_exit_node_works; then
         echo -e "${C_GREEN}Exit node применён, активен и проверен: $ts_node${C_RESET}"
         break
        else
         echo -e "${C_YELLOW}Маршрут появился, но интернет через exit node не проходит.${C_RESET}"
-        tailscale set --exit-node="" || true
+        echo 'Exit node НЕ сбрасываю — проверь узел вручную и повтори пункт 2.'
         pause_enter
         continue
        fi
       else
-       echo -e "${C_YELLOW}За 60 секунд default в table 52 так и не появился.${C_RESET}"
-       echo 'Проверьте: узел online и на нём включён --advertise-exit-node.'
-       tailscale set --exit-node="" || true
+       echo -e "${C_YELLOW}За 90 секунд default в table 52 не появился.${C_RESET}"
+       echo 'Exit node НЕ сбрасываю. Проверь вручную:'
+       echo '  tailscale status | head -n 3'
+       echo '  tailscale debug prefs | grep -i exitnode'
+       echo 'Если tailscaled в NoState: sudo systemctl restart tailscaled'
+       echo 'Затем снова выбери пункт 2 с тем же IP.'
        pause_enter
        continue
       fi
@@ -6789,7 +6774,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.20
+# BOBAREV SHELL 3.14.21
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9579,7 +9564,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.20 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.21 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

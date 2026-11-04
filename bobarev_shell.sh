@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.19 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.20 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6403,6 +6403,19 @@ PY
      prompt_default 'IP или имя exit node' '' ts_node
      [[ "$MODULE_CANCELED" == false ]] || continue
      [[ -n "$ts_node" ]] || { echo 'IP/имя не введены — попробуйте ещё раз.'; pause_enter; continue; }
+     # Самолечение: если tailscaled завис в NoState — перезапустить и дождаться подключения
+     local ts_state
+     ts_state="$(tailscale status 2>/dev/null | head -n 1)"
+     if [[ -z "$ts_state" || "$ts_state" == *"unexpected state: NoState"* || "$ts_state" == *"Tailscale is starting"* ]]; then
+      echo 'Tailscale завис (NoState) — перезапускаю tailscaled...'
+      systemctl restart tailscaled
+      local w
+      for w in $(seq 1 12); do
+       sleep 5
+       ts_state="$(tailscale status 2>/dev/null | head -n 1)"
+       [[ -n "$ts_state" && "$ts_state" != *"unexpected state: NoState"* && "$ts_state" != *"Tailscale is starting"* ]] && break
+      done
+     fi
      echo "Применяю exit node: $ts_node ..."
      if tailscale set --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
       local route_ok=false
@@ -6650,7 +6663,6 @@ WDT
   systemctl enable --now bobarev-router-watchdog.timer
   cat > /usr/local/sbin/bobarev-tailscale-bootfix <<'TB'
 #!/bin/bash
-# Ждём до 2 минут: если tailscaled завис в NoState — перезапускаем его.
 for i in $(seq 1 12); do
   st="$(tailscale status 2>/dev/null | head -n 1)"
   if [[ -n "$st" && "$st" != *"unexpected state: NoState"* && "$st" != *"Tailscale is starting"* ]]; then
@@ -6777,7 +6789,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.19
+# BOBAREV SHELL 3.14.20
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9567,7 +9579,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.19 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.20 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

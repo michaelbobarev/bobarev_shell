@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.34 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.35 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -858,7 +858,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.34: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.35: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -901,7 +901,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.34: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.35: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -6704,7 +6704,7 @@ net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
 FIXED_SYSCTL
 profile_errors=0
-if ! sysctl -p "$PERF_SYSCTL"; then echo 'Часть sysctl не применена; проверьте ядро.' >&2; profile_errors=1; fi
+if ! sysctl -p "$PERF_SYSCTL"; then echo 'Часть sysctl не применена.' >&2; profile_errors=1; fi
 source /etc/bobarev-router-v2/config
 all_devs=("${LANS[@]}" "$OUT")
 while read -r dev; do [[ -n "$dev" ]] && all_devs+=("$dev"); done < <(ip -4 route show table main default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
@@ -6740,8 +6740,8 @@ def rows(values):
  result=[];nets=[];seen=set()
  for value in values:
   dev,addr=value.split('=',1);x=ipaddress.IPv4Interface(addr+'/24')
-  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',dev) or dev=='lo' or dev in seen:raise ValueError('Неверное имя LAN')
-  if x.ip in (x.network.network_address,x.network.broadcast_address) or any(x.network.overlaps(n) for n in nets):raise ValueError('Неверная/пересекающаяся сеть LAN')
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',dev) or dev=='lo' or dev in seen:raise ValueError('Неверный LAN')
+  if x.ip in (x.network.network_address,x.network.broadcast_address) or any(x.network.overlaps(n) for n in nets):raise ValueError('Неверная/пересекающаяся сеть')
   result.append((dev,str(x.ip)));nets.append(x.network);seen.add(dev)
  if not result:raise ValueError('Нет LAN')
  return result
@@ -6779,33 +6779,28 @@ def check(data):
    p=run(['nmcli','-g','GENERAL.NM-MANAGED','device','show',dev])
    if p.returncode or p.stdout.strip().lower() not in ('no','нет'):raise ValueError('LAN управляется NetworkManager либо статус неизвестен: '+dev)
  for dev,addr in data:
-  target=ROOT/filename(dev)
-  if target.exists() and MARK not in target.read_text():raise ValueError('Файл занят чужой конфигурацией: '+str(target))
+  f=ROOT/filename(dev)
+  if f.exists() and MARK not in f.read_text():raise ValueError('Файл занят чужой конфигурацией: '+str(f))
   old=current_file(dev)
-  if old and old.name<filename(dev) and old!=target:raise ValueError('Более ранний .network перекрывает LAN: '+str(old))
+  if old and old.name<filename(dev) and old!=f:raise ValueError('Более ранний .network перекрывает LAN: '+str(old))
 
 def apply(data):
- check(data);ROOT.mkdir(parents=True,exist_ok=True)
- changed=[]
+ check(data);ROOT.mkdir(parents=True,exist_ok=True);changed=[]
  for dev,addr in data:
   f=ROOT/filename(dev);text=content(dev,addr)
-  if not f.exists() or f.read_text()!=text:
-   f.write_text(text);f.chmod(0o644);changed.append(dev)
- if not changed:
-  print('LAN .network уже актуальны; reload networkd не выполняется.')
-  return
- help=run(['networkctl','--help']).stdout;args=['networkctl','reload']
- if '--no-reconfigure' in help:args.append('--no-reconfigure')
- else:print('Внимание: networkctl без --no-reconfigure; reload может затронуть другие одновременно изменённые сетевые файлы.')
+  if not f.exists() or f.read_text()!=text:f.write_text(text);f.chmod(0o644);changed.append(dev)
+ if not changed:print('LAN .network уже актуальны; reload networkd не выполняется.');return
+ args=['networkctl','reload']
+ if '--no-reconfigure' in run(['networkctl','--help']).stdout:args.append('--no-reconfigure')
+ else:print('Внимание: reload старого networkctl может затронуть другие изменённые сетевые файлы.')
  p=run(args)
  if p.returncode:raise RuntimeError(p.stderr.strip())
  for dev in changed:
   p=run(['networkctl','reconfigure',dev])
   if p.returncode:raise RuntimeError(p.stderr.strip())
-  actual=current_file(dev)
-  if actual is None or actual.name!=filename(dev):raise RuntimeError('Не подтверждён .network для '+dev+'; проверьте networkctl status. Автоотката нет.')
+  f=current_file(dev)
+  if f is None or f.name!=filename(dev):raise RuntimeError('Не подтверждён LAN-файл '+dev+'; автоотката нет.')
   print('LAN networkd: '+dev+'; '+str(ROOT/filename(dev)))
-
 def main():
  p=argparse.ArgumentParser();p.add_argument('action',choices=['check','apply']);p.add_argument('pairs',nargs='+');a=p.parse_args();data=rows(a.pairs)
  if a.action=='check':check(data);print('Проверка networkd пройдена')
@@ -6817,58 +6812,77 @@ BR33_NETWORKD
  cat > "$p/routes.py" <<'BR34_ROUTES'
 #!/usr/bin/env python3
 import argparse,ipaddress,json,pathlib,re,subprocess,sys
-PREF=5090
 ROOT=pathlib.Path('/etc/systemd/network')
 MARK='# BOBAREV_ROUTER_NETWORKD_33'
+PREF=5090
 def run(args):return subprocess.run(args,text=True,capture_output=True)
 def ipjson(args):
  p=run(['ip','-j','-4']+args)
- if p.returncode:raise RuntimeError('ip: '+p.stderr.strip())
+ if p.returncode:raise RuntimeError(p.stderr.strip())
  return json.loads(p.stdout)
+def prefix(rule,field):
+ raw=rule.get(field,'all');length=rule.get(field+'len')
+ try:
+  if raw in ('all','default',None,''):
+   return ipaddress.IPv4Network('0.0.0.0/0') if length is None or int(length)==0 else None
+  raw=str(raw)
+  if '/' in raw:
+   value=ipaddress.IPv4Network(raw,strict=False)
+   if length is not None and value.prefixlen!=int(length):return None
+   return value
+  return ipaddress.IPv4Network(raw+'/'+str(32 if length is None else int(length)),strict=False)
+ except (ValueError,TypeError):return None
+
+def table(rule):
+ value=rule.get('table');return 'main' if value in ('main',254,'254') else str(value)
+def priority(rule):
+ try:return int(rule.get('priority',-1))
+ except (ValueError,TypeError):return -1
+def plain(rule,allowed):
+ return not(set(rule)-allowed) and not rule.get('flags') and rule.get('action','to_tbl') in ('to_tbl','lookup')
+def matches(rule,net):
+ allowed={'priority','src','srclen','dst','dstlen','table','protocol','flags','action','family'}
+ return (priority(rule)==PREF and prefix(rule,'src')==ipaddress.IPv4Network('0.0.0.0/0')
+ and prefix(rule,'dst')==ipaddress.IPv4Network(net,strict=False) and table(rule)=='main' and plain(rule,allowed))
+def outgoing_matches(rule,lan,index):
+ allowed={'priority','src','srclen','table','iif','iifname','protocol','flags','action','family'}
+ iface=rule.get('iif',rule.get('iifname'))
+ if 'iif' in rule and 'iifname' in rule and rule['iif']!=rule['iifname']:return False
+ return (priority(rule)==5100+index and iface==lan and table(rule)==str(199+index)
+ and prefix(rule,'src')==ipaddress.IPv4Network('0.0.0.0/0') and plain(rule,allowed))
 def parse(pairs):
- data=[];seen=set();nets=[]
- for text in pairs:
-  lan,addr=text.split('=',1)
-  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',lan) or lan=='lo' or lan in seen:raise ValueError('Неверный LAN')
-  x=ipaddress.IPv4Interface(addr+'/24')
-  if x.ip in (x.network.network_address,x.network.broadcast_address) or any(x.network.overlaps(n) for n in nets):raise ValueError('Неверная/пересекающаяся LAN-сеть')
-  seen.add(lan);nets.append(x.network);data.append((lan,str(x.ip),str(x.network)))
- if not data:raise ValueError('Нет LAN')
- return data
+ result=[];seen=set();nets=[]
+ for item in pairs:
+  lan,addr=item.split('=',1);x=ipaddress.IPv4Interface(addr+'/24')
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',lan) or lan=='lo' or lan in seen:raise ValueError('Неверное имя LAN')
+  if x.ip in (x.network.network_address,x.network.broadcast_address) or any(x.network.overlaps(n) for n in nets):raise ValueError('Неверная/пересекающаяся сеть LAN')
+  result.append((lan,str(x.ip),str(x.network)));seen.add(lan);nets.append(x.network)
+ if not result:raise ValueError('Нет LAN')
+ return result
 def owned_nets():
  result=set()
  for f in ROOT.glob('05-bobarev-lan-*.network'):
   text=f.read_text()
   if MARK not in text:continue
-  for addr in re.findall(r'^Address=([0-9.]+/24)\s*$',text,re.M):
-   result.add(str(ipaddress.ip_interface(addr).network))
+  for addr in re.findall(r'^Address=([0-9.]+/24)\s*$',text,re.M):result.add(str(ipaddress.ip_interface(addr).network))
  return result
 
-def matches(rule,net):
- allowed={'priority','src','dst','table','protocol','flags','action','family'}
- return (rule.get('priority')==PREF and rule.get('src','all') in ('all','0.0.0.0/0') and rule.get('dst')==net
-         and rule.get('table') in ('main',254) and not (set(rule)-allowed)
-         and rule.get('action','to_tbl') in ('to_tbl','lookup') and not rule.get('flags'))
 def check(data):
- rules=ipjson(['rule','show']);allowed={x[2] for x in data}|owned_nets()
+ rules=ipjson(['rule','show']);allowed={row[2] for row in data}|owned_nets()
  for r in rules:
-  if r.get('priority')==PREF and not any(matches(r,n) for n in allowed):
-   raise ValueError('Приоритет 5090 занят другим правилом: '+json.dumps(r,ensure_ascii=False)+'. Ничего не удаляется.')
+  if priority(r)==5090 and not any(matches(r,n) for n in allowed):raise ValueError('Приоритет 5090 занят другим правилом: '+json.dumps(r,ensure_ascii=False)+'. Ничего не удаляется.')
  for i,(lan,addr,net) in enumerate(data):
   for r in rules:
-   if r.get('priority')!=5100+i:continue
-   permitted={'priority','src','table','iif','protocol','flags','action','family'}
-   if not (r.get('iif')==lan and str(r.get('table'))==str(199+i) and r.get('src','all') in ('all','0.0.0.0/0') and not(set(r)-permitted)):
-    raise ValueError('Занят приоритет '+str(5100+i)+': '+json.dumps(r,ensure_ascii=False))
+   if priority(r)==5100+i and not outgoing_matches(r,lan,i):raise ValueError('Занят приоритет '+str(5100+i)+': '+json.dumps(r,ensure_ascii=False))
  return rules
 
 def ensure(data):
  rules=check(data)
  for lan,addr,net in data:
   if not any(matches(r,net) for r in rules):
-   p=run(['ip','-4','rule','add','pref',str(PREF),'to',net,'lookup','main'])
+   p=run(['ip','-4','rule','add','pref','5090','to',net,'lookup','main'])
    if p.returncode:raise RuntimeError(p.stderr.strip())
-   rules.append({'priority':PREF,'src':'all','dst':net,'table':'main'})
+   rules.append({'priority':5090,'src':'all','dst':net,'table':'main'})
   print('Возврат LAN: '+net+' -> main, приоритет 5090')
 def verify(data,out):
  for lan,addr,net in data:
@@ -6877,12 +6891,12 @@ def verify(data,out):
   for mark in (None,'0x40000'):
    args=['route','get',client,'from','1.1.1.1','iif',out]
    if mark:args+=['mark',mark]
-   result=ipjson(args)
-   if not result or result[0].get('dev')!=lan:raise RuntimeError('Неверный обратный маршрут: '+json.dumps(result))
-   print('Проверка возврата '+client+(' mark='+mark if mark else '')+' -> '+lan+': OK')
-  result=ipjson(['route','get','1.1.1.1','from',client,'iif',lan])
-  if not result or result[0].get('dev')!=out:raise RuntimeError('Неверный исходящий маршрут: '+json.dumps(result))
-  print('Проверка выхода '+lan+' -> '+out+': OK')
+   r=ipjson(args)
+   if not r or r[0].get('dev')!=lan:raise RuntimeError('Неверный обратный маршрут: '+json.dumps(r))
+   print('Возврат '+client+(' mark='+mark if mark else '')+' -> '+lan+': OK')
+  r=ipjson(['route','get','1.1.1.1','from',client,'iif',lan])
+  if not r or r[0].get('dev')!=out:raise RuntimeError('Неверный исходящий маршрут: '+json.dumps(r))
+  print('Выход '+lan+' -> '+out+': OK')
 def main():
  p=argparse.ArgumentParser();p.add_argument('action',choices=['check','ensure','verify']);p.add_argument('--out');p.add_argument('pairs',nargs='+');a=p.parse_args();data=parse(a.pairs)
  if a.action=='check':check(data);print('Приоритеты правил проверены')
@@ -6957,7 +6971,6 @@ if ! /usr/local/sbin/bobarev-router-performance; then
  echo 'ВНИМАНИЕ: профиль производительности применён частично; основная маршрутизация настроена.' >&2
 fi
 python3 /usr/local/sbin/bobarev-router-routes.py verify "${networkd_pairs[@]}" --out "$OUT"
-
 BR26_RUNTIME
  chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime" "$p/performance" "$p/networkd.py" "$p/routes.py"
  br26_apply
@@ -7012,7 +7025,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.34
+# BOBAREV SHELL 3.14.35
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9802,7 +9815,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.34 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.35 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

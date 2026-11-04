@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.17 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.18 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6385,7 +6385,6 @@ PY
    pause_enter
    return 0
   fi
-  tailscale set --exit-node-allow-lan-access=true --stateful-filtering=false 2>/dev/null || true
   while ! ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; do
    echo 'Tailscale exit node пока не выбран или не активен.'
    local ts_choice='' ts_node=''
@@ -6404,7 +6403,8 @@ PY
      prompt_default 'IP или имя exit node' '' ts_node
      [[ "$MODULE_CANCELED" == false ]] || continue
      [[ -n "$ts_node" ]] || { echo 'IP/имя не введены — попробуйте ещё раз.'; pause_enter; continue; }
-     if tailscale set --advertise-exit-node=false --exit-node="$ts_node" --exit-node-allow-lan-access=true --stateful-filtering=false; then
+     echo "Применяю exit node: $ts_node ..."
+     if tailscale set --exit-node="$ts_node" --exit-node-allow-lan-access=true; then
       local route_ok=false
       if ts_wait_exit_node; then
        route_ok=true
@@ -6733,7 +6733,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.17
+# BOBAREV SHELL 3.14.18
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9523,7 +9523,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.17 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.18 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,8 +3,26 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.25 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.26 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
+
+# Menu headers use the exact selected main-menu label.
+BOBAREV_SECTION_TITLE=''
+whiptail() {
+ local -a forwarded=()
+ while (($#)); do
+  if [[ "$1" == --title && -n "${BOBAREV_SECTION_TITLE:-}" ]]; then shift; (($#)) && shift; continue; fi
+  forwarded+=("$1"); shift
+ done
+ if [[ -n "${BOBAREV_SECTION_TITLE:-}" ]]; then
+  command whiptail --title "$BOBAREV_SECTION_TITLE" "${forwarded[@]}"
+ else
+  command whiptail "${forwarded[@]}"
+ fi
+}
+export BOBAREV_SECTION_TITLE
+export -f whiptail
+declare -A BOBAREV_MENU_TITLES=()
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -4122,6 +4140,14 @@ smart_menu() {
     local var_name="$6"
     shift 6
     local options=("$@")
+    if [[ "$title" == *'ГЛАВНОЕ МЕНЮ'* ]]; then
+        local n key label
+        for ((n=0;n<${#options[@]};n+=2)); do
+            key=${options[n]}; label=${options[n+1]}
+            label="${label#"${label%%[![:space:]]*}"}"
+            BOBAREV_MENU_TITLES["$key"]="$label"
+        done
+    fi
 
     local wt_choice
     if wt_choice=$(whiptail --title "$title" --menu "$msg" "$height" "$width" "$menu_h" "${options[@]}" 3>&1 1>&2 2>&3); then
@@ -6262,262 +6288,73 @@ mod_server_audit() {
 }
 
 # 18. Универсальный режим локального маршрутизатора (с поддержкой SBC-клиента WireGuard/WARP)
-mod_router_sbc() {
- local choice='' state='' state2=''
- while true; do
-  state='не установлен'
-  state2='не запущен'
-  if [[ -f /etc/bobarev-router-v2/config ]]; then
-   state='установлен'
-   state2="$(systemctl is-active bobarev-router-v2.service 2>/dev/null || echo unknown)/$(systemctl is-active bobarev-router-dhcp.service 2>/dev/null || echo unknown)"
-  fi
-  smart_menu 'Режим локального маршрутизатора' \
-   "Состояние: $state. Службы: $state2.\nМастер настроит LAN, выход, DHCP и NAT пошагово. Базовая сеть, SSH и авторизация VPN не сбрасываются." \
-   20 "$WT_WIDTH" 7 choice \
-   1 'Статус и диагностика' \
-   2 'Мастер настройки' \
-   3 'Запустить / перезапустить' \
-   4 'Остановить' \
-   5 'Удалить настройки маршрутизатора' \
-   0 'Назад' || return 0
-  case "$choice" in
-   0) return 0 ;;
-   1)
-    echo '=== Конфигурация ==='
-    [[ -f /etc/bobarev-router-v2/config ]] && cat /etc/bobarev-router-v2/config || echo 'Не установлено.'
-    echo '=== Службы ==='
-    systemctl status bobarev-router-v2.service --no-pager -l || true
-    systemctl status bobarev-router-dhcp.service --no-pager -l || true
-    echo '=== DHCP-сокет ==='
-    ss -lunp | grep ':67' || true
-    echo '=== Маршрутизация ==='
-    ip -4 rule || true
-    if [[ -f /etc/bobarev-router-v2/config ]]; then
-     source /etc/bobarev-router-v2/config
-     if [[ "${OUT:-}" == "tailscale0" ]]; then
-      ip -4 route show table 52 default || true
-      ip -4 route show table 199 || true
-     else
-      ip -4 route show table 199 2>/dev/null || true
-     fi
-    fi
-    echo '=== NAT ==='
-    iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
-    pause_enter ;;
-   2) mod_router_sbc_setup; return 0 ;;
-   3)
-    [[ -f /etc/bobarev-router-v2/config ]] || { echo 'Сначала выполните мастер настройки.'; pause_enter; continue; }
-    systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true
-    systemctl status bobarev-router-v2.service --no-pager -l || true
-    systemctl status bobarev-router-dhcp.service --no-pager -l || true
-    pause_enter ;;
-   4)
-    systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service || true
-    echo 'Маршрутизатор и DHCP остановлены.'
-    pause_enter ;;
-   5)
-    [[ -f /etc/bobarev-router-v2/config ]] || { echo 'Маршрутизатор не установлен.'; pause_enter; continue; }
-    nm_yes 'Удалить настройки LAN-маршрутизатора? Конфигурация будет сохранена в /root.' || continue
-    br_snapshot || true
-    systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || true
-    local d="/root/bobarev-router-removed-$(date +%Y%m%d-%H%M%S)"
-    mkdir -m 700 "$d"
-    cp -a /etc/bobarev-router-v2 "$d/" 2>/dev/null || true
-    cp -a /etc/systemd/system/bobarev-router-v2.service.d "$d/" 2>/dev/null || true
-    rm -rf /etc/bobarev-router-v2 /etc/systemd/system/bobarev-router-v2.service.d
-    systemctl daemon-reload
-    echo "Настройки удалены. Резервная копия: $d"
-    pause_enter ;;
-  esac
- done
+br26_input() {
+ local _v
+ _v=$(whiptail --inputbox "$1" 12 "${WT_WIDTH:-85}" "$2" 3>&1 1>&2 2>&3) || return 1
+ printf -v "$3" '%s' "$_v"
 }
-
-mod_router_sbc_setup() {
- local lan_if='' out_if='' lan_ip='192.168.199.1' wan_if='' iface='' choice='' ts_node='' gateway=''
- local dhcp_start='' dhcp_end='' dns_servers='1.1.1.1,8.8.8.8' occupied='' backup=''
- local -a items=() exits=()
- MODULE_CANCELED=false
- wan_if=$(get_wan_if)
- command -v whiptail >/dev/null || { echo 'Нужен whiptail. Установите: apt install whiptail'; return 1; }
- for iface in /sys/class/net/*; do
-  iface=${iface##*/}
-  [[ "$iface" == lo || "$iface" == "$wan_if" ]] && continue
-  [[ -e /sys/class/net/$iface/device ]] && items+=("$iface" 'LAN к Google Wifi')
+br26_apply() {
+ local p=/etc/bobarev-router-v2/pending dev i lan table pref occupied
+ [[ -f "$p/config" ]] || { echo 'Нет отложенной конфигурации'; return 1; }
+ # Use a subshell so staged configuration cannot overwrite wizard variables.
+ (
+ source "$p/config"
+ for dev in "${LANS[@]}" "$OUT"; do
+  ip link show dev "$dev" >/dev/null 2>&1 || { echo "Конфигурация сохранена. Интерфейс $dev отсутствует; применение отложено."; exit 1; }
  done
- ((${#items[@]})) || { echo 'Нет свободного физического LAN-интерфейса'; return 1; }
- smart_menu 'Локальный маршрутизатор: LAN' 'Выберите порт NanoPi, подключённый к WAN-порту Google Wifi.' 18 "$WT_WIDTH" 6 lan_if "${items[@]}" || return 0
- prompt_default 'IPv4 адрес NanoPi на LAN (маска /24)' "$lan_ip" lan_ip
- [[ "$MODULE_CANCELED" == false ]] || return 0
- prompt_default 'Начало диапазона DHCP' "${lan_ip%.*}.50" dhcp_start
- [[ "$MODULE_CANCELED" == false ]] || return 0
- prompt_default 'Конец диапазона DHCP' "${lan_ip%.*}.200" dhcp_end
- [[ "$MODULE_CANCELED" == false ]] || return 0
- prompt_default 'DNS IPv4 через запятую (для клиентов Google Wifi)' "$dns_servers" dns_servers
- [[ "$MODULE_CANCELED" == false ]] || return 0
- dns_servers=${dns_servers// /}
- for iface in /sys/class/net/*; do
-  iface=${iface##*/}
-  [[ "$iface" == lo || "$iface" == "$lan_if" ]] && continue
-  exits+=("$iface" 'Выход в интернет')
+ for i in "${!LANS[@]}"; do
+  pref=$((5100+i));table=$((199+i));lan=${LANS[i]}
+  occupied=$(ip -4 rule show | awk -v p="$pref:" '$1==p {print}')
+  [[ -z "$occupied" || "$occupied" == *"iif $lan lookup $table"* ]] || { echo "Приоритет $pref занят"; exit 1; }
  done
- smart_menu 'Локальный маршрутизатор: выход' 'tailscale0 = через exit node; физический WAN = чистый IPv4. Другие VPN должны быть заранее подключены.' 20 "$WT_WIDTH" 8 out_if "${exits[@]}" || return 0
- if [[ "$out_if" == tailscale0 ]]; then
-  smart_menu 'Tailscale exit node' 'Использовать уже выбранный узел или выбрать другой?' 16 "$WT_WIDTH" 4 choice 1 'Оставить текущий узел' 2 'Выбрать по IP / имени' 3 'Показать список узлов' 0 'Отмена' || return 0
-  while [[ "$choice" == 3 ]]; do
-   tailscale exit-node list || true; pause_enter
-   smart_menu 'Tailscale exit node' 'Выберите действие' 16 "$WT_WIDTH" 4 choice 1 'Оставить текущий' 2 'Указать IP / имя' 3 'Список узлов' 0 'Отмена' || return 0
-  done
-  [[ "$choice" != 0 ]] || return 0
-  if [[ "$choice" == 2 ]]; then
-   prompt_default 'Tailscale IP или имя exit node' '' ts_node
-   [[ "$MODULE_CANCELED" == false && -n "$ts_node" ]] || return 0
-   [[ "$ts_node" != -* && "$ts_node" != *[[:space:]]* ]] || return 1
-  fi
- else
-  gateway=$(ip -4 route show table main default dev "$out_if" | awk '/via/ && !found {print $3; found=1}')
-  prompt_default 'IPv4 шлюз выхода (для туннеля без шлюза оставьте пустым)' "$gateway" gateway
-  [[ "$MODULE_CANCELED" == false ]] || return 0
- fi
- python3 - "$lan_if" "$out_if" "$lan_ip" "$dhcp_start" "$dhcp_end" "$dns_servers" "$gateway" <<'BR_VALIDATE'
-import ipaddress,json,subprocess,sys
-lan,out,addr,start,end,dns,gw=sys.argv[1:]
-x=ipaddress.IPv4Interface(addr+'/24')
-if not x.ip.is_private or x.ip in (x.network.network_address,x.network.broadcast_address):raise SystemExit('Неверный LAN IPv4')
-a,b=map(ipaddress.IPv4Address,(start,end))
-if not (a in x.network and b in x.network and int(a)<=int(b)):raise SystemExit('Неверный диапазон DHCP')
-if a==x.network.network_address or b==x.network.broadcast_address or int(a)<=int(x.ip)<=int(b):raise SystemExit('DHCP включает адрес шлюза/сети/broadcast')
-for d in dns.split(','):ipaddress.IPv4Address(d.strip())
-if gw:ipaddress.IPv4Address(gw)
-for link in json.loads(subprocess.check_output(['ip','-j','-4','addr','show'])):
- if link['ifname']==lan:continue
- for entry in link.get('addr_info',[]):
-  n=ipaddress.ip_network(entry['local']+'/'+str(entry['prefixlen']),strict=False)
-  if x.network.overlaps(n):raise SystemExit('LAN пересекается с сетью '+link['ifname'])
-BR_VALIDATE
- [[ $? == 0 ]] || { pause_enter; return 1; }
- occupied=$(ip -4 rule show | awk '$1=="5100:" {print}')
- [[ -z "$occupied" || "$occupied" == *"iif $lan_if lookup 199"* ]] || { echo 'Приоритет 5100 занят чужим правилом'; return 1; }
- if [[ -f /etc/bobarev-router-v2/config ]]; then
-  local old_lan
-  old_lan=$(bash -c 'source /etc/bobarev-router-v2/config; printf "%s" "$LAN"')
-  if [[ "$old_lan" != "$lan_if" ]]; then
-   echo 'Сначала остановите и удалите прежний режим в меню, затем выберите новый LAN-порт.'
-   return 1
-  fi
- fi
- nm_yes "Применить? LAN=$lan_if, IP=$lan_ip/24, DHCP=$dhcp_start–$dhcp_end, DNS=$dns_servers, выход=$out_if, шлюз=${gateway:-нет}. IPv6 клиентов блокируется. В режиме VPN нет автоматического выхода через WAN. При выборе нового exit node изменится и выход самой NanoPi. Существующие соединения могут оборваться." || return 0
- apt-get install -y dnsmasq-base iptables iproute2 || return 1
- br_snapshot || return 1
- backup="/root/bobarev-router-apply-$(date +%Y%m%d-%H%M%S)-$$"
- mkdir -m 700 "$backup" || return 1
- cp -a /etc/bobarev-router-v2 /usr/local/sbin/bobarev-router-v2 /etc/systemd/system/bobarev-router-v2.service* /etc/systemd/system/bobarev-router-dhcp.service "$backup/" 2>/dev/null || true
- echo "Дополнительная копия: $backup"
- if [[ "$out_if" == tailscale0 ]]; then
-  if [[ -n "$ts_node" ]]; then
-   tailscale set --exit-node="$ts_node" --exit-node-allow-lan-access=true --accept-routes=false || return 1
+ if [[ "$OUT" == tailscale0 ]]; then
+  if [[ -n "$EXIT_NODE" ]]; then
+   tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true --accept-routes=false || exit 1
   else
-   tailscale set --exit-node-allow-lan-access=true --accept-routes=false || return 1
+   tailscale set --exit-node-allow-lan-access=true || exit 1
   fi
-  ts_wait_exit_node || { echo 'Нет default tailscale0. LAN не изменён, выбор узла сохранён.'; return 1; }
+  ts_wait_exit_node || { echo 'Нет default tailscale0; LAN пока не изменён'; exit 1; }
  fi
+ br_snapshot || exit 1
+ local backup="/root/bobarev-router-backup-$(date +%Y%m%d-%H%M%S)-$$"
+ mkdir -m 700 "$backup" || exit 1
+ cp -a /etc/bobarev-router-v2 /usr/local/sbin/bobarev-router-v2 /etc/systemd/system/bobarev-router-v2.service* /etc/systemd/system/bobarev-router-dhcp.service "$backup/" 2>/dev/null || true
+ echo "Резервная копия: $backup"
+ apt-get install -y dnsmasq-base iptables iproute2 || exit 1
+ dnsmasq --test --conf-file="$p/dhcp.conf" || exit 1
  systemctl disable --now bobarev-router-watchdog.timer bobarev-tailscale-bootfix.timer 2>/dev/null || true
  systemctl stop bobarev-router-watchdog.service bobarev-tailscale-bootfix.service 2>/dev/null || true
  systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service 2>/dev/null || true
  if systemctl is-active --quiet dnsmasq.service; then
   touch /etc/bobarev-router-dnsmasq-was-active
-  systemctl stop dnsmasq.service || return 1
+  systemctl stop dnsmasq.service || exit 1
  fi
- install -d -m 700 /etc/bobarev-router-v2
- printf 'LAN=%q\nOUT=%q\nWAN=%q\nADDR=%q\nGATEWAY=%q\nDHCP_START=%q\n' "$lan_if" "$out_if" "$wan_if" "$lan_ip" "$gateway" "$dhcp_start" > /etc/bobarev-router-v2/config
- cat > /etc/bobarev-router-v2/dhcp.conf <<EOF
-port=53
-interface=$lan_if
-bind-dynamic
-dhcp-range=$dhcp_start,$dhcp_end,255.255.255.0,12h
-dhcp-option=3,$lan_ip
-dhcp-option=6,$dns_servers
-dhcp-leasefile=/var/lib/misc/bobarev-router.leases
-no-resolv
-EOF
- local dns
- IFS=',' read -ra items <<< "$dns_servers"
- for dns in "${items[@]}"; do printf 'server=%s\n' "$dns" >> /etc/bobarev-router-v2/dhcp.conf; done
- dnsmasq --test --conf-file=/etc/bobarev-router-v2/dhcp.conf || return 1
- # Retire only the exact old LAN DNS redirects to this box; leave unrelated rules untouched.
- local old_addr="$lan_ip"
- [[ -f "$backup/bobarev-router-v2/config" ]] && old_addr=$(bash -c 'source "$1"; printf "%s" "$ADDR"' _ "$backup/bobarev-router-v2/config")
- local proto target
- for proto in udp tcp; do
-  for target in "$old_addr" "$lan_ip"; do
-   while iptables -w 5 -t nat -D PREROUTING -i "$lan_if" -p "$proto" --dport 53 -j DNAT --to-destination "$target:53" 2>/dev/null; do :; done
-  done
- done
- cat > /usr/local/sbin/bobarev-router-v2 <<'BR'
-#!/bin/bash
-set -euo pipefail
+ # Migrate the exact legacy rules owned by this module.
+ if [[ -f /etc/bobarev-router-v2/config ]]; then
+  bash <<'BR26_LEGACY'
 source /etc/bobarev-router-v2/config
-NET=${ADDR%.*}.0/24
-clean() {
- for spec in 'filter FORWARD BR2_FWD' 'nat POSTROUTING BR2_NAT' 'mangle FORWARD BR2_MSS'; do
-  read -r table parent chain <<< "$spec"
-  while iptables -w 5 -t "$table" -D "$parent" -j "$chain" 2>/dev/null; do :; done
-  iptables -w 5 -t "$table" -F "$chain" 2>/dev/null || true
-  iptables -w 5 -t "$table" -X "$chain" 2>/dev/null || true
- done
+for lan in "${LANS[@]:-${LAN:-}}"; do
+ [[ -n "$lan" ]] || continue
  for spec in '5100 199' '11990 52' '11991 199'; do
   read -r pref table <<< "$spec"
-  while ip -4 rule del pref "$pref" iif "$LAN" lookup "$table" 2>/dev/null; do :; done
+  while ip -4 rule del pref "$pref" iif "$lan" lookup "$table" 2>/dev/null; do :; done
  done
- while ip -4 rule del pref 11989 to "$NET" lookup 199 2>/dev/null; do :; done
- ip -4 route flush table 199 2>/dev/null || true
- while ip6tables -w 5 -D FORWARD -i "$LAN" -j DROP 2>/dev/null; do :; done
-}
-if [[ ${1:-} == stop ]]; then clean; exit 0; fi
-[[ "$LAN" != "$OUT" ]]
-ip link show "$LAN" >/dev/null
-ip link show "$OUT" >/dev/null
-if [[ "$OUT" == tailscale0 ]]; then
- ready=false
- for ((i=0;i<90;i++)); do
-  if ip -4 route show table 52 default | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null; then ready=true; break; fi
-  sleep 1
+ if [[ -n "${ADDR:-}" ]]; then
+  while ip -4 rule del pref 11989 to "${ADDR%.*}.0/24" lookup 199 2>/dev/null; do :; done
+  for proto in udp tcp; do
+   while iptables -w 5 -t nat -D PREROUTING -i "$lan" -p "$proto" --dport 53 -j DNAT --to-destination "$ADDR:53" 2>/dev/null; do :; done
+  done
+ fi
  done
- [[ "$ready" == true ]] || { echo 'Нет default tailscale0. Выбор exit node не сброшен.'; exit 1; }
-fi
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-for dev in all "$LAN" "$OUT"; do sysctl -w "net.ipv4.conf.$dev.rp_filter=0" >/dev/null; done
-ip link set "$LAN" up
-ip address replace "$ADDR/24" dev "$LAN"
-clean
-ip -4 route replace table 199 "$NET" dev "$LAN" scope link
-if [[ -n "${GATEWAY:-}" ]]; then
- ip -4 route replace table 199 default via "$GATEWAY" dev "$OUT" onlink
-else
- ip -4 route replace table 199 default dev "$OUT"
-fi
-ip -4 route add table 199 unreachable default metric 32760
-iptables -w 5 -N BR2_FWD
-iptables -w 5 -A BR2_FWD -i "$LAN" -o "$OUT" -s "$NET" -j ACCEPT
-iptables -w 5 -A BR2_FWD -i "$LAN" -j DROP
-iptables -w 5 -A BR2_FWD -o "$LAN" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -w 5 -I FORWARD 1 -j BR2_FWD
-iptables -w 5 -t nat -N BR2_NAT
-iptables -w 5 -t nat -A BR2_NAT -s "$NET" -o "$OUT" -j MASQUERADE
-iptables -w 5 -t nat -I POSTROUTING 1 -j BR2_NAT
-iptables -w 5 -t mangle -N BR2_MSS
-iptables -w 5 -t mangle -A BR2_MSS -o "$OUT" -i "$LAN" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-iptables -w 5 -t mangle -I FORWARD 1 -j BR2_MSS
-ip6tables -w 5 -I FORWARD 1 -i "$LAN" -j DROP
-ip -4 rule add pref 5100 iif "$LAN" lookup 199
-path=$(ip -4 route get 1.1.1.1 from "$DHCP_START" iif "$LAN")
-printf '%s\n' "$path"
-[[ " $path " == *" dev $OUT "* ]] || { echo 'Проверка маршрута LAN не прошла'; exit 1; }
-BR
- chmod 700 /usr/local/sbin/bobarev-router-v2
+BR26_LEGACY
+ fi
+ install -m 600 "$p/config" /etc/bobarev-router-v2/config
+ install -m 600 "$p/dhcp.conf" /etc/bobarev-router-v2/dhcp.conf
+ install -m 700 "$p/runtime" /usr/local/sbin/bobarev-router-v2
  rm -f /etc/systemd/system/bobarev-router-v2.service.d/override.conf
  cat > /etc/systemd/system/bobarev-router-v2.service <<'UNIT'
 [Unit]
-Description=Bobarev simple LAN router
+Description=Local IPv4 router
 After=network-online.target tailscaled.service ufw.service
 Wants=network-online.target
 [Service]
@@ -6525,13 +6362,12 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/bobarev-router-v2 start
 ExecStop=/usr/local/sbin/bobarev-router-v2 stop
-TimeoutStartSec=120
 [Install]
 WantedBy=multi-user.target
 UNIT
  cat > /etc/systemd/system/bobarev-router-dhcp.service <<'UNIT'
 [Unit]
-Description=Bobarev LAN DHCP and DNS
+Description=Local DHCP and DNS
 Requires=bobarev-router-v2.service
 After=bobarev-router-v2.service
 [Service]
@@ -6541,20 +6377,204 @@ Restart=on-failure
 WantedBy=multi-user.target
 UNIT
  if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -E '^Status: active' >/dev/null; then
-  ufw allow in on "$lan_if" to any port 67 proto udp || return 1
-  ufw allow in on "$lan_if" to any port 53 proto udp || return 1
-  ufw allow in on "$lan_if" to any port 53 proto tcp || return 1
+  for lan in "${LANS[@]}"; do
+   [[ "$DHCP" == true ]] && ufw allow in on "$lan" to any port 67 proto udp
+   ufw allow in on "$lan" to any port 53 proto udp || exit 1
+   ufw allow in on "$lan" to any port 53 proto tcp || exit 1
+  done
  fi
- systemctl daemon-reload || return 1
- systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service || return 1
+ systemctl daemon-reload || exit 1
+ systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service || exit 1
  if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
-  echo "Ошибка. Резервная копия: $backup. Автоматический откат не выполнялся."
-  journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 50 --no-pager || true
-  return 1
+  journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
+  echo "Ошибка применения. Копия: $backup. Автоотката нет."; exit 1
  fi
- echo 'Настройки применены. Проверьте доступ с клиента Google Wifi, а не только curl на NanoPi.'
- echo 'Google Wifi: WAN = DHCP; его LAN должна быть другой подсетью. После изменения сети обновите WAN-аренду Google Wifi.'
- pause_enter
+ rm -rf "$p"
+ echo 'Применено. Проверьте интернет и публичный IP с реального LAN-клиента.'
+ )
+}
+mod_router_sbc() {
+ local choice=''
+ while true; do
+  smart_menu 'Режим локального маршрутизатора' 'Универсальная настройка IPv4: LAN → выбранный выход. Заготовки отсутствующих интерфейсов сохраняются без применения.' 20 "${WT_WIDTH:-85}" 7 choice \
+   1 'Статус' 2 'Настроить' 3 'Применить сохранённое / перезапустить' 4 'Остановить' 5 'Удалить конфигурацию' 0 'Назад' || return 0
+  case "$choice" in
+   0) return 0 ;;
+   1) cat /etc/bobarev-router-v2/config 2>/dev/null || true
+      [[ -f /etc/bobarev-router-v2/pending/config ]] && echo 'Есть отложенная конфигурация'
+      ip -4 rule show; ip -4 route show table 199 2>/dev/null || true
+      iptables -w 5 -nvL BR2_FWD --line-numbers 2>/dev/null || true
+      systemctl --no-pager status bobarev-router-v2.service bobarev-router-dhcp.service || true
+      pause_enter ;;
+   2) mod_router_sbc_setup || true; pause_enter ;;
+   3) if [[ -f /etc/bobarev-router-v2/pending/config ]]; then
+       nm_yes 'Применить отложенную конфигурацию? Текущие настройки будут заменены после резервного копирования.' && br26_apply || true
+      else systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true; fi
+      pause_enter ;;
+   4) systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service || true; pause_enter ;;
+   5) nm_yes 'Удалить настройки этого модуля? WAN, SSH и другие VPN не удаляются.' || continue
+      br_snapshot || return 1
+      systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service 2>/dev/null || true
+      rm -rf /etc/bobarev-router-v2
+      echo 'Конфигурация модуля удалена; адреса LAN и разрешения UFW автоматически не удалялись.'; pause_enter ;;
+  esac
+ done
+}
+mod_router_sbc_setup() {
+ local selected='' custom='' out='' gw='' dns='1.1.1.1,8.8.8.8' dhcp=true node='' dev='' state='' addr='' first='' last='' mode='' answer='' p='' rows='[]' i=0
+ local -a options=() lans=() addrs=() starts=() ends=() exits=()
+ for dev in /sys/class/net/*; do
+  dev=${dev##*/}; [[ "$dev" == lo ]] && continue
+  state=$(cat "/sys/class/net/$dev/operstate" 2>/dev/null || true)
+  options+=("$dev" "состояние: $state" OFF)
+ done
+ options+=(CUSTOM 'Указать LAN-интерфейсы вручную' OFF)
+ selected=$(whiptail --checklist --separate-output 'Выберите LAN-интерфейсы пробелом [*]. Неотмеченные интерфейсы не назначаются LAN. Выход выбирается отдельно.' 22 "${WT_WIDTH:-85}" 10 "${options[@]}" 3>&1 1>&2 2>&3) || return 0
+ while IFS= read -r dev; do
+  [[ -z "$dev" ]] && continue
+  if [[ "$dev" == CUSTOM ]]; then
+   br26_input 'Имена дополнительных LAN-интерфейсов через пробел. Они могут ещё отсутствовать.' '' custom || return 0
+   local -a manual=(); read -ra manual <<< "$custom"; lans+=("${manual[@]}")
+  else lans+=("$dev"); fi
+ done <<< "$selected"
+ ((${#lans[@]}>=1 && ${#lans[@]}<=16)) || { echo 'Нужно выбрать от 1 до 16 LAN-интерфейсов'; return 1; }
+ for dev in "${lans[@]}"; do
+  [[ "$dev" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$dev" != lo ]] || { echo 'Неверное имя интерфейса'; return 1; }
+  br26_input "LAN $dev: IPv4-адрес маршрутизатора (маска /24). Адрес обязателен." '' addr || return 0
+  br26_input "LAN $dev: начало DHCP-пула / тестовый адрес клиента" "${addr%.*}.50" first || return 0
+  br26_input "LAN $dev: конец DHCP-пула" "${addr%.*}.200" last || return 0
+  addrs+=("$addr"); starts+=("$first"); ends+=("$last")
+ done
+ smart_menu 'Режим локального маршрутизатора' 'Выдавать адреса клиентам по DHCP?' 15 "${WT_WIDTH:-85}" 3 answer yes 'Да' no 'Нет (статические адреса клиентов)' || return 0
+ [[ "$answer" == no ]] && dhcp=false
+ br26_input 'DNS IPv4 через запятую' "$dns" dns || return 0; dns=${dns// /}
+ for dev in /sys/class/net/*; do
+  dev=${dev##*/}; [[ "$dev" == lo ]] && continue
+  [[ " ${lans[*]} " == *" $dev "* ]] && continue
+  exits+=("$dev" 'Выходной интерфейс')
+ done
+ exits+=(CUSTOM 'Указать выход вручную, в том числе отсутствующий')
+ smart_menu 'Режим локального маршрутизатора' 'Выберите один выход для выбранных LAN. Остальные выходы будут запрещены для этих LAN.' 20 "${WT_WIDTH:-85}" 8 out "${exits[@]}" || return 0
+ if [[ "$out" == CUSTOM ]]; then br26_input 'Имя выходного интерфейса' '' out || return 0; fi
+ if [[ "$out" == tailscale0 ]]; then
+  br26_input 'IP/имя Tailscale exit node; пусто — сохранить текущий выбор' '' node || return 0
+  [[ "$node" != -* && "$node" != *[[:space:]]* ]] || return 1
+ else
+  gw=$(ip -4 route show table main default dev "$out" 2>/dev/null | awk '/via/ && !found {print $3;found=1}') || true
+  br26_input 'IPv4 шлюз выхода. Пусто — интерфейсный маршрут (обычно для VPN).' "$gw" gw || return 0
+ fi
+ rows=$(python3 - "${lans[*]}" "${addrs[*]}" "${starts[*]}" "${ends[*]}" <<'BR26_ROWS'
+import sys,json
+print(json.dumps(list(zip(*(s.split() for s in sys.argv[1:])))))
+BR26_ROWS
+ ) || return 1
+ python3 - "$out" "$gw" "$dns" "$dhcp" "$rows" <<'BR26_VALIDATE'
+import ipaddress,json,subprocess,sys,re
+out,gw,dns,enable,config=sys.argv[1:]
+d=json.loads(config);nets=[]
+valid=lambda n:bool(re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',n)) and n!='lo'
+if not valid(out):raise SystemExit('Неверное имя выхода')
+if not 1<=len(d)<=16:raise SystemExit('Выберите от 1 до 16 LAN')
+for n in dns.split(','):ipaddress.IPv4Address(n.strip())
+if gw:ipaddress.IPv4Address(gw)
+seen=set()
+for row in d:
+ lan,addr,start,end=row
+ if not valid(lan) or lan==out or lan in seen:raise SystemExit('LAN и выход должны быть разными, без повторов')
+ seen.add(lan);x=ipaddress.IPv4Interface(addr+'/24');a,b=map(ipaddress.IPv4Address,(start,end))
+ if x.ip in (x.network.network_address,x.network.broadcast_address):raise SystemExit('Адрес LAN совпадает с сетью/broadcast')
+ if not (a in x.network and b in x.network and int(a)<=int(b)):raise SystemExit('Неверный диапазон DHCP')
+ if a==x.network.network_address or b==x.network.broadcast_address or int(a)<=int(x.ip)<=int(b):raise SystemExit('Пул включает адрес LAN/сети/broadcast')
+ if any(x.network.overlaps(n) for n in nets):raise SystemExit('Сети LAN пересекаются')
+ nets.append(x.network)
+for link in json.loads(subprocess.check_output(['ip','-j','-4','addr','show'])):
+ if link['ifname'] in seen:continue
+ for a in link.get('addr_info',[]):
+  n=ipaddress.ip_network(a['local']+'/'+str(a['prefixlen']),strict=False)
+  if any(n.overlaps(x) for x in nets):raise SystemExit('LAN пересекается с '+link['ifname'])
+BR26_VALIDATE
+ [[ $? == 0 ]] || return 1
+ nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN и автоотката. Отсутствующие интерфейсы НЕ создаются: применение отложится. WAN/SSH не перенастраиваются. Смена exit node влияет на выход хоста." || return 0
+ install -d -m 700 /etc/bobarev-router-v2/pending
+ p=/etc/bobarev-router-v2/pending
+ {
+  printf 'LANS=('; printf ' %q' "${lans[@]}"; printf ' )\n'
+  printf 'ADDRS=('; printf ' %q' "${addrs[@]}"; printf ' )\n'
+  printf 'STARTS=('; printf ' %q' "${starts[@]}"; printf ' )\n'
+  printf 'ENDS=('; printf ' %q' "${ends[@]}"; printf ' )\n'
+  printf 'OUT=%q\nGATEWAY=%q\nDHCP=%q\nEXIT_NODE=%q\n' "$out" "$gw" "$dhcp" "$node"
+ } > "$p/config"
+ {
+  printf 'port=53\nbind-dynamic\nno-resolv\ndhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
+  for i in "${!lans[@]}"; do
+   printf 'interface=%s\n' "${lans[i]}"
+   if [[ "$dhcp" == true ]]; then
+    printf 'dhcp-range=set:lan%s,%s,%s,255.255.255.0,12h\n' "$i" "${starts[i]}" "${ends[i]}"
+    printf 'dhcp-option=tag:lan%s,3,%s\n' "$i" "${addrs[i]}"
+    printf 'dhcp-option=tag:lan%s,6,%s\n' "$i" "$dns"
+   fi
+  done
+  local -a resolvers=(); IFS=',' read -ra resolvers <<< "$dns"
+  for dev in "${resolvers[@]}"; do printf 'server=%s\n' "$dev"; done
+ } > "$p/dhcp.conf"
+ cat > "$p/runtime" <<'BR26_RUNTIME'
+#!/bin/bash
+set -euo pipefail
+source /etc/bobarev-router-v2/config
+clean() {
+ for spec in 'filter FORWARD BR2_FWD' 'nat POSTROUTING BR2_NAT' 'mangle FORWARD BR2_MSS'; do
+  read -r table parent chain <<< "$spec"
+  while iptables -w 5 -t "$table" -D "$parent" -j "$chain" 2>/dev/null; do :; done
+  iptables -w 5 -t "$table" -F "$chain" 2>/dev/null || true
+  iptables -w 5 -t "$table" -X "$chain" 2>/dev/null || true
+ done
+ for i in "${!LANS[@]}"; do
+  lan=${LANS[i]}; table=$((199+i)); pref=$((5100+i))
+  while ip -4 rule del pref "$pref" iif "$lan" lookup "$table" 2>/dev/null; do :; done
+  ip -4 route flush table "$table" 2>/dev/null || true
+  while ip6tables -w 5 -D FORWARD -i "$lan" -j DROP 2>/dev/null; do :; done
+ done
+}
+if [[ ${1:-} == stop ]]; then clean; exit 0; fi
+# Missing custom interfaces are not created implicitly.
+for dev in "${LANS[@]}" "$OUT"; do ip link show dev "$dev" >/dev/null || { echo "Отсутствует интерфейс $dev. Сначала создайте его."; exit 1; }; done
+if [[ "$OUT" == tailscale0 ]]; then
+ ip -4 route show table 52 default | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null || { echo 'Exit node не активен'; exit 1; }
+fi
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+for dev in all "${LANS[@]}" "$OUT"; do sysctl -w "net.ipv4.conf.$dev.rp_filter=0" >/dev/null; done
+clean
+iptables -w 5 -N BR2_FWD
+iptables -w 5 -t nat -N BR2_NAT
+iptables -w 5 -t mangle -N BR2_MSS
+for i in "${!LANS[@]}"; do
+ lan=${LANS[i]}; addr=${ADDRS[i]}; net=${addr%.*}.0/24; table=$((199+i))
+ ip link set dev "$lan" up
+ ip address replace "$addr/24" dev "$lan"
+ ip -4 route replace table "$table" "$net" dev "$lan" scope link
+ if [[ -n "$GATEWAY" ]]; then
+  ip -4 route replace table "$table" default via "$GATEWAY" dev "$OUT" onlink
+ else
+  ip -4 route replace table "$table" default dev "$OUT"
+ fi
+ ip -4 route add table "$table" unreachable default metric 32760
+ iptables -w 5 -A BR2_FWD -i "$lan" -o "$OUT" -s "$net" -j ACCEPT
+ iptables -w 5 -A BR2_FWD -i "$lan" -j DROP
+ iptables -w 5 -A BR2_FWD -o "$lan" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+ iptables -w 5 -t nat -A BR2_NAT -s "$net" -o "$OUT" -j MASQUERADE
+ iptables -w 5 -t mangle -A BR2_MSS -i "$lan" -o "$OUT" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+ ip6tables -w 5 -I FORWARD 1 -i "$lan" -j DROP
+ done
+iptables -w 5 -I FORWARD 1 -j BR2_FWD
+iptables -w 5 -t nat -I POSTROUTING 1 -j BR2_NAT
+iptables -w 5 -t mangle -I FORWARD 1 -j BR2_MSS
+for i in "${!LANS[@]}"; do
+ ip -4 rule add pref "$((5100+i))" iif "${LANS[i]}" lookup "$((199+i))"
+ ip -4 route get 1.1.1.1 from "${STARTS[i]}" iif "${LANS[i]}"
+done
+BR26_RUNTIME
+ chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime"
+ br26_apply
 }
 
 br_snapshot() {
@@ -6606,7 +6626,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.25
+# BOBAREV SHELL 3.14.26
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9396,7 +9416,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.25 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.26 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -9418,6 +9438,7 @@ fi
 # ===  ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
 # ==============================================================================
 while true; do
+    BOBAREV_SECTION_TITLE=''
     ts_main_status="Отсутствует"
     if command -v tailscale &>/dev/null; then
         if is_derp_active; then
@@ -9491,6 +9512,7 @@ while true; do
     MODULE_CANCELED=false
     clear
 
+    BOBAREV_SECTION_TITLE=${BOBAREV_MENU_TITLES[$choice]:-}
     case "$choice" in
         1) mod_timezone; pause_enter ;;
         2) mod_hostname; pause_enter ;;

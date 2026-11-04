@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.27 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.28 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6382,7 +6382,7 @@ UNIT
  systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service || exit 1
  if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
   journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
-  echo 'Ошибка применения. Резервная копия не создавалась; автоматического отката нет.'; exit 1
+  echo 'Ошибка применения. Резервные копии и автооткат отключены.'; exit 1
  fi
  rm -rf "$p"
  echo 'Применено. Проверьте интернет и публичный IP с реального LAN-клиента.'
@@ -6391,26 +6391,25 @@ UNIT
 mod_router_sbc() {
  local choice=''
  while true; do
-  smart_menu 'Режим локального маршрутизатора' 'Универсальная настройка IPv4: LAN → выбранный выход. Заготовки отсутствующих интерфейсов сохраняются без применения.' 20 "${WT_WIDTH:-85}" 7 choice \
-   1 'Статус' 2 'Настроить' 3 'Применить сохранённое / перезапустить' 4 'Остановить' 5 'Удалить конфигурацию' 0 'Назад' || return 0
+  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 3 choice \
+   1 'Статус' 2 'Настроить' 0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
-   1) cat /etc/bobarev-router-v2/config 2>/dev/null || true
-      [[ -f /etc/bobarev-router-v2/pending/config ]] && echo 'Есть отложенная конфигурация'
-      ip -4 rule show; ip -4 route show table 199 2>/dev/null || true
-      iptables -w 5 -nvL BR2_FWD --line-numbers 2>/dev/null || true
-      systemctl --no-pager status bobarev-router-v2.service bobarev-router-dhcp.service || true
-      pause_enter ;;
+   1)
+    if [[ -f /etc/bobarev-router-v2/config ]]; then
+     echo '=== Активная конфигурация ==='
+     cat /etc/bobarev-router-v2/config
+     echo '=== Правила маршрутизации ==='
+     ip -4 rule show
+     echo '=== Правила forwarding ==='
+     iptables -w 5 -nvL BR2_FWD --line-numbers 2>/dev/null || true
+     echo '=== Службы ==='
+     systemctl --no-pager -l status bobarev-router-v2.service bobarev-router-dhcp.service || true
+    else
+     echo 'Маршрутизатор не настроен. Выберите «Настроить».'
+    fi
+    pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
-   3) if [[ -f /etc/bobarev-router-v2/pending/config ]]; then
-       nm_yes 'Применить отложенную конфигурацию? Текущие настройки будут заменены БЕЗ резервного копирования и автоматического отката.' && br26_apply || true
-      else systemctl restart bobarev-router-v2.service bobarev-router-dhcp.service || true; fi
-      pause_enter ;;
-   4) systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service || true; pause_enter ;;
-   5) nm_yes 'Удалить настройки этого модуля БЕЗ резервной копии? WAN, SSH и другие VPN не удаляются.' || continue
-      systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service 2>/dev/null || true
-      rm -rf /etc/bobarev-router-v2
-      echo 'Конфигурация модуля удалена; адреса LAN и разрешения UFW автоматически не удалялись.'; pause_enter ;;
   esac
  done
 }
@@ -6442,20 +6441,47 @@ mod_router_sbc_setup() {
  smart_menu 'Режим локального маршрутизатора' 'Выдавать адреса клиентам по DHCP?' 15 "${WT_WIDTH:-85}" 3 answer yes 'Да' no 'Нет (статические адреса клиентов)' || return 0
  [[ "$answer" == no ]] && dhcp=false
  br26_input 'DNS IPv4 через запятую' "$dns" dns || return 0; dns=${dns// /}
- for dev in /sys/class/net/*; do
-  dev=${dev##*/}; [[ "$dev" == lo ]] && continue
-  [[ " ${lans[*]} " == *" $dev "* ]] && continue
-  exits+=("$dev" 'Выходной интерфейс')
- done
- exits+=(CUSTOM 'Указать выход вручную, в том числе отсутствующий')
- smart_menu 'Режим локального маршрутизатора' 'Выберите один выход для выбранных LAN. Остальные выходы будут запрещены для этих LAN.' 20 "${WT_WIDTH:-85}" 8 out "${exits[@]}" || return 0
- if [[ "$out" == CUSTOM ]]; then br26_input 'Имя выходного интерфейса' '' out || return 0; fi
+ smart_menu 'Режим локального маршрутизатора' 'Как направлять трафик выбранных LAN?' 17 "${WT_WIDTH:-85}" 3 mode \
+  WAN 'Чистый IP через WAN' EXISTING 'Через существующий интерфейс' CUSTOM 'Указать интерфейс вручную' || return 0
+ exits=()
+ if [[ "$mode" == WAN ]]; then
+  # Discover default-route interfaces in main, excluding typical tunnel devices.
+  local -a wan_candidates=()
+  mapfile -t wan_candidates < <(ip -4 route show table main default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u)
+  for dev in "${wan_candidates[@]}"; do
+   [[ "$dev" == lo || "$dev" == tailscale* || "$dev" == wg* || "$dev" == tun* || "$dev" == tap* || "$dev" == warp* ]] && continue
+   [[ " ${lans[*]} " == *" $dev "* ]] && continue
+   exits+=("$dev" 'WAN: default-маршрут основной таблицы')
+  done
+  if ((${#exits[@]}==0)); then
+   echo 'WAN по основной таблице не найден. Выберите CUSTOM и укажите выход со шлюзом.'
+   return 1
+  fi
+  smart_menu 'Режим локального маршрутизатора' 'Выберите WAN. Шлюз будет предложен на следующем шаге.' 17 "${WT_WIDTH:-85}" 6 out "${exits[@]}" || return 0
+ elif [[ "$mode" == EXISTING ]]; then
+  for dev in /sys/class/net/*; do
+   dev=${dev##*/}; [[ "$dev" == lo ]] && continue
+   [[ " ${lans[*]} " == *" $dev "* ]] && continue
+   state=$(cat "/sys/class/net/$dev/operstate" 2>/dev/null || true)
+   exits+=("$dev" "состояние: $state")
+  done
+  ((${#exits[@]})) || { echo 'Нет доступных выходных интерфейсов'; return 1; }
+  smart_menu 'Режим локального маршрутизатора' 'Выберите существующий выходной интерфейс.' 20 "${WT_WIDTH:-85}" 8 out "${exits[@]}" || return 0
+ else
+  br26_input 'Имя выходного интерфейса (может ещё отсутствовать)' '' out || return 0
+ fi
+ [[ "$out" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$out" != lo ]] || { echo 'Неверное имя выходного интерфейса'; return 1; }
+ [[ " ${lans[*]} " != *" $out "* ]] || { echo 'Выход не может быть выбранным LAN'; return 1; }
+
  if [[ "$out" == tailscale0 ]]; then
   br26_input 'IP/имя Tailscale exit node; пусто — сохранить текущий выбор' '' node || return 0
   [[ "$node" != -* && "$node" != *[[:space:]]* ]] || return 1
  else
   gw=$(ip -4 route show table main default dev "$out" 2>/dev/null | awk '/via/ && !found {print $3;found=1}') || true
   br26_input 'IPv4 шлюз выхода. Пусто — интерфейсный маршрут (обычно для VPN).' "$gw" gw || return 0
+  if [[ "$mode" == WAN && -z "$gw" ]]; then
+   echo 'Для режима WAN укажите IPv4 шлюз.'; return 1
+  fi
  fi
  rows=$(python3 - "${lans[*]}" "${addrs[*]}" "${starts[*]}" "${ends[*]}" <<'BR26_ROWS'
 import sys,json
@@ -6620,7 +6646,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.27
+# BOBAREV SHELL 3.14.28
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9410,7 +9436,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.27 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.28 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

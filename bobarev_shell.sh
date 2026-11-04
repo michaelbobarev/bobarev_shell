@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.22 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.23 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6487,9 +6487,6 @@ PY
   if [[ "$dnsmasq_dns_port" == "53" ]]; then
    printf 'no-resolv\nserver=8.8.8.8\nserver=1.1.1.1\n'
   fi
-  if [[ "${OUT:-}" == "tailscale0" ]]; then
-   printf 'filter-AAAA\n'
-  fi
  } > /etc/bobarev-router-v2/dhcp.conf
  dnsmasq --test --conf-file=/etc/bobarev-router-v2/dhcp.conf || return 1
  cat > /usr/local/sbin/bobarev-router-v2 <<'BR'
@@ -6527,15 +6524,6 @@ if [[ "$OUT" != tailscale0 ]]; then
  ip rule add pref 11991 iif "$LAN" lookup 199
 else
  ip -4 route show table 52 | grep -q '^default dev tailscale0' || { echo 'Нет exit node'; exit 1; }
-fi
-if [[ "$OUT" == "tailscale0" ]]; then
- sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
- sysctl -w "net.ipv4.conf.$LAN.rp_filter=0" >/dev/null 2>&1 || true
- sysctl -w "net.ipv4.conf.$OUT.rp_filter=0" >/dev/null 2>&1 || true
- ip rule del pref 11989 to "$NET" lookup 199 2>/dev/null || true
- ip rule add pref 11989 to "$NET" lookup 199
- ip rule del pref 11990 iif "$LAN" lookup 52 2>/dev/null || true
- ip rule add pref 11990 iif "$LAN" lookup 52
 fi
 iptables -w -N BR2_FWD
 iptables -w -A BR2_FWD -i "$LAN" -o "$OUT" -s "$NET" -j ACCEPT
@@ -6596,20 +6584,29 @@ Wants=network-online.target tailscaled.service
 
 [Service]
 ExecStartPre=/bin/sleep 5
-ExecStartPost=-/sbin/ip rule del pref 11990 iif $lan_if lookup 52
-ExecStartPost=/sbin/ip rule add pref 11990 iif $lan_if lookup 52
 EOF
-  ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
-  ip rule add pref 11990 iif "$lan_if" lookup 52
+  if ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
+   ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
+   ip rule add pref 11990 iif "$lan_if" lookup 52
+  else
+   ip rule del pref 11990 iif "$lan_if" lookup 52 2>/dev/null || true
+  fi
   cat > /usr/local/sbin/bobarev-router-watchdog <<'WD'
 #!/bin/bash
 set -u
 source /etc/bobarev-router-v2/config
 NET="${ADDR%.*}.0/24"
 if [[ "${OUT:-}" == "tailscale0" ]]; then
-  if ! ip -4 rule show | grep -q '11990.*iif.*'"${LAN:-}"'.*lookup 52'; then
-    logger -t bobarev-router "watchdog: восстанавливаю ip rule 11990 -> table 52"
-    ip rule add pref 11990 iif "${LAN:-}" lookup 52 2>/dev/null || true
+  if ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
+    if ! ip -4 rule show | grep -q '11990.*iif.*'"${LAN:-}"'.*lookup 52'; then
+      logger -t bobarev-router "watchdog: exit node активен — включаю правило 11990 (LAN -> tailscale0)"
+      ip rule add pref 11990 iif "${LAN:-}" lookup 52 2>/dev/null || true
+    fi
+  else
+    if ip -4 rule show | grep -q '11990.*iif.*'"${LAN:-}"'.*lookup 52'; then
+      logger -t bobarev-router "watchdog: exit node недоступен — убираю правило 11990, LAN уходит через WAN (чистый IP)"
+      ip rule del pref 11990 iif "${LAN:-}" lookup 52 2>/dev/null || true
+    fi
   fi
   if ! ip -4 rule show | grep -q '11989.*lookup 199'; then
     ip rule add pref 11989 to "$NET" lookup 199 2>/dev/null || true
@@ -6715,6 +6712,17 @@ TBT
  echo 'Настройки применены.'
  if [[ "$out_if" == "tailscale0" ]]; then
   echo 'LAN-клиенты направлены через Tailscale exit node (правило 11990).'
+  local test_ip="${lan_ip%.*}.109"
+  local vpath
+  vpath=$(ip -4 route get 1.1.1.1 from "$test_ip" iif "$lan_if" 2>/dev/null | head -n1)
+  echo "Проверка пути для клиента $test_ip: $vpath"
+  if echo "$vpath" | grep -q 'tailscale0'; then
+   echo -e "${C_GREEN}Клиенты LAN будут ходить через exit node (tailscale0).${C_RESET}"
+  elif ip -4 route show table 52 2>/dev/null | grep -q '^default dev tailscale0'; then
+   echo -e "${C_YELLOW}Route в table 52 есть, но правило 11990 не применилось — клиент уйдёт через WAN (чистый IP).${C_RESET}"
+  else
+   echo -e "${C_YELLOW}Exit node недоступен — клиенты автоматически уходят через WAN (чистый IP), интернет сохраняется.${C_RESET}"
+  fi
  else
   echo "LAN-клиенты направлены через WAN: $out_if"
  fi
@@ -6777,7 +6785,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.22
+# BOBAREV SHELL 3.14.23
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9567,7 +9575,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.22 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.23 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

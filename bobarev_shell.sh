@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.33 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.34 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -858,7 +858,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.33: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.34: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -901,7 +901,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.33: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.34: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -6332,8 +6332,10 @@ br26_apply() {
   occupied=$(ip -4 rule show | awk -v p="$pref:" '$1==p {print}')
   [[ -z "$occupied" || "$occupied" == *"iif $lan lookup $table"* ]] || { echo "Приоритет $pref занят"; exit 1; }
  done
+ echo '[1/6] Проверка интерфейсов, правил и networkd'
  local -a networkd_pairs=()
  for i in "${!LANS[@]}"; do networkd_pairs+=("${LANS[i]}=${ADDRS[i]}"); done
+ python3 "$p/routes.py" check "${networkd_pairs[@]}" || exit 1
  python3 "$p/networkd.py" check "${networkd_pairs[@]}" || exit 1
  if [[ "$OUT" == tailscale0 ]]; then
   if [[ -n "$EXIT_NODE" ]]; then
@@ -6343,10 +6345,12 @@ br26_apply() {
   fi
   ts_wait_exit_node || { echo 'Нет default tailscale0; LAN пока не изменён'; exit 1; }
  fi
+ echo '[2/6] Проверка пакетов и DHCP-конфигурации'
  apt-get install -y dnsmasq-base iptables iproute2 || exit 1
  dnsmasq --test --conf-file="$p/dhcp.conf" || exit 1
  systemctl disable --now bobarev-router-watchdog.timer bobarev-tailscale-bootfix.timer 2>/dev/null || true
  systemctl stop bobarev-router-watchdog.service bobarev-tailscale-bootfix.service 2>/dev/null || true
+ echo '[3/6] Применение LAN-конфигурации'
  systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service 2>/dev/null || true
  if systemctl is-active --quiet dnsmasq.service; then
   touch /etc/bobarev-router-dnsmasq-was-active
@@ -6376,7 +6380,11 @@ BR26_LEGACY
  install -m 700 "$p/runtime" /usr/local/sbin/bobarev-router-v2
  install -m 700 "$p/performance" /usr/local/sbin/bobarev-router-performance
  install -m 700 "$p/networkd.py" /usr/local/sbin/bobarev-router-networkd.py
+ install -m 700 "$p/routes.py" /usr/local/sbin/bobarev-router-routes.py
  python3 /usr/local/sbin/bobarev-router-networkd.py apply "${networkd_pairs[@]}" || exit 1
+ python3 /usr/local/sbin/bobarev-router-routes.py ensure "${networkd_pairs[@]}" || exit 1
+ echo '[4/6] Установка служб и правил доступа'
+
  rm -f /etc/systemd/system/bobarev-router-v2.service.d/override.conf
  cat > /etc/systemd/system/bobarev-router-v2.service <<'UNIT'
 [Unit]
@@ -6409,14 +6417,17 @@ UNIT
    ufw allow in on "$lan" to any port 53 proto tcp || exit 1
   done
  fi
+ echo '[5/6] Запуск маршрутизатора и DHCP/DNS'
  systemctl daemon-reload || exit 1
  systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service || exit 1
  if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
   journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
   echo 'Ошибка применения. Бэкапы и автоматический откат отключены.'; exit 1
  fi
+ echo '[6/6] Проверка исходящего и обратного маршрутов'
+ python3 /usr/local/sbin/bobarev-router-routes.py verify "${networkd_pairs[@]}" --out "$OUT" || exit 1
  rm -rf "$p"
- echo 'Применено. Проверьте интернет и публичный IP с реального LAN-клиента.'
+ echo 'Применено. Маршруты в обе стороны проверены. Откройте сайт и проверьте IP с LAN-клиента.' 
  )
 }
 mod_router_sbc() {
@@ -6586,7 +6597,7 @@ print(', '.join(x['name'] for x in d['interfaces'] if x['name'] in names and (x[
 BR29_WARN
  )
  if [[ -n "$wanted" ]]; then
-  echo "Нельзя автоматически закрепить WAN/VPN как LAN в networkd: $wanted. Выберите другой клиентский порт."; return 1
+  echo "Автоматическое назначение WAN/VPN ролью LAN запрещено: $wanted"; return 1
  fi
  suggestions=$(br29_scan suggest "$scan" "${lans[@]}") || return 1
  for i in "${!lans[@]}"; do
@@ -6653,7 +6664,7 @@ for route in json.loads(subprocess.check_output(['ip','-j','-4','route','show','
 
 BR26_VALIDATE
  [[ $? == 0 ]] || return 1
- nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN, бэкапов и автоотката. Фиксировано: PMTU forwarding=1, очереди/RPS/XPS f, DHCP MTU=1280, общий MSS clamp. Профиль ядра влияет на весь хост. Отсутствующие интерфейсы НЕ создаются: применение отложится. Автоподбор проверяет только видимые ОС сети, не скрытые подсети за другими роутерами. LAN закрепляется в systemd-networkd: static /24, без link-local, сохраняется при потере кабеля. Применение: reload + reconfigure выбранных LAN; WAN намеренно не перезапускается. Возможен обрыв доступа через LAN. Смена exit node влияет на выход хоста." || return 0
+ nm_yes "Сохранить и применить? LAN: ${lans[*]}; адреса: ${addrs[*]}; выход: $out; шлюз: ${gw:-нет}; DHCP: $dhcp; DNS: $dns. IPv6 клиентов блокируется. Нет авто-WAN, бэкапов и автоотката. Закреплены PMTU=1, очереди/RPS/XPS f, DHCP MTU=1280, MSS clamp и возврат LAN по правилу 5090 -> main. Отсутствующие интерфейсы НЕ создаются: применение отложится. Автоподбор проверяет только видимые ОС сети, не скрытые подсети за другими роутерами. LAN закрепляется в networkd. Применение может кратковременно прервать LAN и SSH; на старых networkctl reload может затронуть WAN. Смена exit node влияет на выход хоста." || return 0
  install -d -m 700 /etc/bobarev-router-v2/pending
  p=/etc/bobarev-router-v2/pending
  {
@@ -6677,96 +6688,6 @@ BR26_VALIDATE
   local -a resolvers=(); IFS=',' read -ra resolvers <<< "$dns"
   for dev in "${resolvers[@]}"; do printf 'server=%s\n' "$dev"; done
  } > "$p/dhcp.conf"
- cat > "$p/networkd.py" <<'BR33_NETWORKD'
-#!/usr/bin/env python3
-import argparse,ipaddress,os,pathlib,re,subprocess,sys
-ROOT=pathlib.Path('/etc/systemd/network')
-MARK='# BOBAREV_ROUTER_NETWORKD_33'
-def run(args):
- return subprocess.run(args,text=True,capture_output=True,env=dict(os.environ,LC_ALL='C',SYSTEMD_COLORS='0'))
-def rows(values):
- result=[];networks=[];names=set()
- for v in values:
-  name,addr=v.split('=',1)
-  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',name) or name=='lo' or name in names:raise ValueError('Неверное/повторное имя LAN')
-  x=ipaddress.IPv4Interface(addr+'/24')
-  if x.ip in (x.network.network_address,x.network.broadcast_address):raise ValueError('Неверный адрес LAN')
-  if any(x.network.overlaps(n) for n in networks):raise ValueError('Сети LAN пересекаются')
-  networks.append(x.network);names.add(name);result.append((name,str(x.ip)))
- if not result:raise ValueError('Не выбраны LAN')
- return result
-def filename(dev):return '05-bobarev-lan-'+dev+'.network'
-def content(dev,addr):
- return f'''{MARK}
-[Match]
-Name={dev}
-
-[Link]
-RequiredForOnline=no
-
-[Network]
-Address={addr}/24
-DHCP=no
-IPv6AcceptRA=no
-LinkLocalAddressing=no
-ConfigureWithoutCarrier=yes
-IgnoreCarrierLoss=yes
-'''
-def current_file(dev):
- p=run(['networkctl','status',dev,'--no-pager'])
- m=re.search(r'^\s*Network File:\s*(.+)$',p.stdout,re.M)
- if not m:return None
- x=m[1].strip()
- return pathlib.Path(x) if x.startswith('/') else None
-
-def check(data):
- if run(['systemctl','is-active','--quiet','systemd-networkd.service']).returncode:
-  raise ValueError('systemd-networkd не активен. Мастер не включает новый сетевой менеджер автоматически; текущая настройка не заменена.')
- if run(['systemctl','is-active','--quiet','NetworkManager.service']).returncode==0:
-  for dev,addr in data:
-   p=run(['nmcli','-g','GENERAL.NM-MANAGED','device','show',dev])
-   if p.returncode or p.stdout.strip().lower() not in ('no','нет'):
-    raise ValueError('LAN '+dev+' управляется NetworkManager либо статус не определён. Сначала согласуйте управление LAN; автоматического перехвата нет.')
- for dev,addr in data:
-  target=ROOT/filename(dev)
-  if target.exists() and MARK not in target.read_text():raise ValueError('Целевой файл занят чужой конфигурацией: '+str(target))
-  old=current_file(dev)
-  if old and old.name<filename(dev) and old!=target:
-   raise ValueError('Более ранний .network может перекрыть LAN '+dev+': '+str(old)+'. Нужна ручная проверка; файл не удалён.')
- return data
-
-def apply(data):
- check(data)
- ROOT.mkdir(parents=True,exist_ok=True)
- keep={filename(dev) for dev,addr in data}
- for f in ROOT.glob('05-bobarev-lan-*.network'):
-  if f.name not in keep and MARK in f.read_text():f.unlink()
- for dev,addr in data:
-  f=ROOT/filename(dev);f.write_text(content(dev,addr));f.chmod(0o644)
- # Do not restart the complete network manager or deliberately reconfigure WAN.
- help=run(['networkctl','--help']).stdout
- args=['networkctl','reload']
- if '--no-reconfigure' in help:args.append('--no-reconfigure')
- p=run(args)
- if p.returncode:raise RuntimeError('networkctl reload: '+p.stderr)
- for dev,addr in data:
-  p=run(['networkctl','reconfigure',dev])
-  if p.returncode:raise RuntimeError('networkctl reconfigure '+dev+': '+p.stderr)
-  actual=current_file(dev)
-  if actual is None or actual.name!=filename(dev):
-   raise RuntimeError('Не подтверждён выбор созданного .network для '+dev+'. Проверьте networkctl status '+dev+'. Файлы сохранены; автоотката нет.')
-  print('LAN '+dev+': '+addr+'/24; файл '+str(ROOT/filename(dev)))
-
-def main():
- ap=argparse.ArgumentParser();ap.add_argument('action',choices=['check','apply','plan']);ap.add_argument('interfaces',nargs='+');a=ap.parse_args();data=rows(a.interfaces)
- if a.action=='plan':
-  for dev,addr in data:print(str(ROOT/filename(dev))+'\n'+content(dev,addr))
- elif a.action=='check':check(data);print('Проверка systemd-networkd пройдена')
- else:apply(data)
-if __name__=='__main__':
- try:main()
- except (ValueError,RuntimeError,OSError) as e:print('ОШИБКА networkd: '+str(e),file=sys.stderr);sys.exit(1)
-BR33_NETWORKD
  cat > "$p/performance" <<'BR32_PERFORMANCE'
 #!/bin/bash
 set -euo pipefail
@@ -6783,7 +6704,7 @@ net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
 FIXED_SYSCTL
 profile_errors=0
-if ! sysctl -p "$PERF_SYSCTL"; then echo 'Часть sysctl не применена; проверьте поддержку ядром.' >&2; profile_errors=1; fi
+if ! sysctl -p "$PERF_SYSCTL"; then echo 'Часть sysctl не применена; проверьте ядро.' >&2; profile_errors=1; fi
 source /etc/bobarev-router-v2/config
 all_devs=("${LANS[@]}" "$OUT")
 while read -r dev; do [[ -n "$dev" ]] && all_devs+=("$dev"); done < <(ip -4 route show table main default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
@@ -6792,28 +6713,194 @@ declare -A seen=()
 for dev in "${all_devs[@]}"; do
  [[ -n "$dev" && "$dev" != lo && -z "${seen[$dev]:-}" ]] || continue
  seen[$dev]=1
- [[ -d "/sys/class/net/$dev" ]] || { echo "Интерфейс $dev отсутствует; очереди пропущены."; continue; }
- if ! ip link set dev "$dev" txqueuelen 10000; then echo "Не удалось txqueuelen $dev" >&2; profile_errors=1; fi
+ [[ -d "/sys/class/net/$dev" ]] || continue
+ if ! ip link set dev "$dev" txqueuelen 10000; then profile_errors=1; fi
  for q in /sys/class/net/"$dev"/queues/rx-*; do
   [[ -d "$q" && -e "$q/rps_cpus" ]] || continue
-  if ! { printf 'f\n' > "$q/rps_cpus"; } 2>/dev/null; then echo "RPS не поддержан: $q" >&2; profile_errors=1; fi
+  if ! { printf 'f\n' > "$q/rps_cpus"; } 2>/dev/null; then echo "RPS недоступен: $q" >&2; profile_errors=1; fi
  done
  for q in /sys/class/net/"$dev"/queues/tx-*; do
   [[ -d "$q" && -e "$q/xps_cpus" ]] || continue
-  if ! { printf 'f\n' > "$q/xps_cpus"; } 2>/dev/null; then echo "XPS не поддержан: $q" >&2; profile_errors=1; fi
+  if ! { printf 'f\n' > "$q/xps_cpus"; } 2>/dev/null; then echo "XPS недоступен: $q" >&2; profile_errors=1; fi
  done
  done
 if ! iptables -w 5 -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
  iptables -w 5 -t mangle -I FORWARD 1 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 fi
-if ((profile_errors)); then echo 'Фиксированный профиль применён частично; автоотката нет.' >&2; exit 1; fi
-echo 'Фиксированные параметры применены. Скорость и задержку проверьте отдельно.'
+if ((profile_errors)); then echo 'Профиль применён частично; предупреждения выше. Автоотката нет.' >&2; exit 1; fi
+echo 'Фиксированные параметры применены; скорость проверьте отдельно.'
 BR32_PERFORMANCE
+ cat > "$p/networkd.py" <<'BR33_NETWORKD'
+#!/usr/bin/env python3
+import argparse,ipaddress,os,pathlib,re,subprocess,sys
+ROOT=pathlib.Path('/etc/systemd/network')
+MARK='# BOBAREV_ROUTER_NETWORKD_33'
+def run(args):return subprocess.run(args,text=True,capture_output=True,env=dict(os.environ,LC_ALL='C',SYSTEMD_COLORS='0'))
+def rows(values):
+ result=[];nets=[];seen=set()
+ for value in values:
+  dev,addr=value.split('=',1);x=ipaddress.IPv4Interface(addr+'/24')
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',dev) or dev=='lo' or dev in seen:raise ValueError('Неверное имя LAN')
+  if x.ip in (x.network.network_address,x.network.broadcast_address) or any(x.network.overlaps(n) for n in nets):raise ValueError('Неверная/пересекающаяся сеть LAN')
+  result.append((dev,str(x.ip)));nets.append(x.network);seen.add(dev)
+ if not result:raise ValueError('Нет LAN')
+ return result
+def filename(dev):return '05-bobarev-lan-'+dev+'.network'
+def content(dev,addr):
+ net=str(ipaddress.ip_interface(addr+'/24').network)
+ return f'''{MARK}
+[Match]
+Name={dev}
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address={addr}/24
+DHCP=no
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=yes
+
+[RoutingPolicyRule]
+To={net}
+Table=main
+Priority=5090
+'''
+def current_file(dev):
+ p=run(['networkctl','status',dev,'--no-pager']);m=re.search(r'^\s*Network File:\s*(.+)$',p.stdout,re.M)
+ return pathlib.Path(m[1].strip()) if m and m[1].strip().startswith('/') else None
+
+def check(data):
+ if run(['systemctl','is-active','--quiet','systemd-networkd.service']).returncode:raise ValueError('systemd-networkd не активен; текущая настройка не изменена.')
+ if run(['systemctl','is-active','--quiet','NetworkManager.service']).returncode==0:
+  for dev,addr in data:
+   p=run(['nmcli','-g','GENERAL.NM-MANAGED','device','show',dev])
+   if p.returncode or p.stdout.strip().lower() not in ('no','нет'):raise ValueError('LAN управляется NetworkManager либо статус неизвестен: '+dev)
+ for dev,addr in data:
+  target=ROOT/filename(dev)
+  if target.exists() and MARK not in target.read_text():raise ValueError('Файл занят чужой конфигурацией: '+str(target))
+  old=current_file(dev)
+  if old and old.name<filename(dev) and old!=target:raise ValueError('Более ранний .network перекрывает LAN: '+str(old))
+
+def apply(data):
+ check(data);ROOT.mkdir(parents=True,exist_ok=True)
+ changed=[]
+ for dev,addr in data:
+  f=ROOT/filename(dev);text=content(dev,addr)
+  if not f.exists() or f.read_text()!=text:
+   f.write_text(text);f.chmod(0o644);changed.append(dev)
+ if not changed:
+  print('LAN .network уже актуальны; reload networkd не выполняется.')
+  return
+ help=run(['networkctl','--help']).stdout;args=['networkctl','reload']
+ if '--no-reconfigure' in help:args.append('--no-reconfigure')
+ else:print('Внимание: networkctl без --no-reconfigure; reload может затронуть другие одновременно изменённые сетевые файлы.')
+ p=run(args)
+ if p.returncode:raise RuntimeError(p.stderr.strip())
+ for dev in changed:
+  p=run(['networkctl','reconfigure',dev])
+  if p.returncode:raise RuntimeError(p.stderr.strip())
+  actual=current_file(dev)
+  if actual is None or actual.name!=filename(dev):raise RuntimeError('Не подтверждён .network для '+dev+'; проверьте networkctl status. Автоотката нет.')
+  print('LAN networkd: '+dev+'; '+str(ROOT/filename(dev)))
+
+def main():
+ p=argparse.ArgumentParser();p.add_argument('action',choices=['check','apply']);p.add_argument('pairs',nargs='+');a=p.parse_args();data=rows(a.pairs)
+ if a.action=='check':check(data);print('Проверка networkd пройдена')
+ else:apply(data)
+if __name__=='__main__':
+ try:main()
+ except (ValueError,RuntimeError,OSError) as e:print('ОШИБКА networkd: '+str(e),file=sys.stderr);sys.exit(1)
+BR33_NETWORKD
+ cat > "$p/routes.py" <<'BR34_ROUTES'
+#!/usr/bin/env python3
+import argparse,ipaddress,json,pathlib,re,subprocess,sys
+PREF=5090
+ROOT=pathlib.Path('/etc/systemd/network')
+MARK='# BOBAREV_ROUTER_NETWORKD_33'
+def run(args):return subprocess.run(args,text=True,capture_output=True)
+def ipjson(args):
+ p=run(['ip','-j','-4']+args)
+ if p.returncode:raise RuntimeError('ip: '+p.stderr.strip())
+ return json.loads(p.stdout)
+def parse(pairs):
+ data=[];seen=set();nets=[]
+ for text in pairs:
+  lan,addr=text.split('=',1)
+  if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}',lan) or lan=='lo' or lan in seen:raise ValueError('Неверный LAN')
+  x=ipaddress.IPv4Interface(addr+'/24')
+  if x.ip in (x.network.network_address,x.network.broadcast_address) or any(x.network.overlaps(n) for n in nets):raise ValueError('Неверная/пересекающаяся LAN-сеть')
+  seen.add(lan);nets.append(x.network);data.append((lan,str(x.ip),str(x.network)))
+ if not data:raise ValueError('Нет LAN')
+ return data
+def owned_nets():
+ result=set()
+ for f in ROOT.glob('05-bobarev-lan-*.network'):
+  text=f.read_text()
+  if MARK not in text:continue
+  for addr in re.findall(r'^Address=([0-9.]+/24)\s*$',text,re.M):
+   result.add(str(ipaddress.ip_interface(addr).network))
+ return result
+
+def matches(rule,net):
+ allowed={'priority','src','dst','table','protocol','flags','action','family'}
+ return (rule.get('priority')==PREF and rule.get('src','all') in ('all','0.0.0.0/0') and rule.get('dst')==net
+         and rule.get('table') in ('main',254) and not (set(rule)-allowed)
+         and rule.get('action','to_tbl') in ('to_tbl','lookup') and not rule.get('flags'))
+def check(data):
+ rules=ipjson(['rule','show']);allowed={x[2] for x in data}|owned_nets()
+ for r in rules:
+  if r.get('priority')==PREF and not any(matches(r,n) for n in allowed):
+   raise ValueError('Приоритет 5090 занят другим правилом: '+json.dumps(r,ensure_ascii=False)+'. Ничего не удаляется.')
+ for i,(lan,addr,net) in enumerate(data):
+  for r in rules:
+   if r.get('priority')!=5100+i:continue
+   permitted={'priority','src','table','iif','protocol','flags','action','family'}
+   if not (r.get('iif')==lan and str(r.get('table'))==str(199+i) and r.get('src','all') in ('all','0.0.0.0/0') and not(set(r)-permitted)):
+    raise ValueError('Занят приоритет '+str(5100+i)+': '+json.dumps(r,ensure_ascii=False))
+ return rules
+
+def ensure(data):
+ rules=check(data)
+ for lan,addr,net in data:
+  if not any(matches(r,net) for r in rules):
+   p=run(['ip','-4','rule','add','pref',str(PREF),'to',net,'lookup','main'])
+   if p.returncode:raise RuntimeError(p.stderr.strip())
+   rules.append({'priority':PREF,'src':'all','dst':net,'table':'main'})
+  print('Возврат LAN: '+net+' -> main, приоритет 5090')
+def verify(data,out):
+ for lan,addr,net in data:
+  n=ipaddress.ip_network(net);client=str(n.network_address+50)
+  if client==addr:client=str(n.network_address+51)
+  for mark in (None,'0x40000'):
+   args=['route','get',client,'from','1.1.1.1','iif',out]
+   if mark:args+=['mark',mark]
+   result=ipjson(args)
+   if not result or result[0].get('dev')!=lan:raise RuntimeError('Неверный обратный маршрут: '+json.dumps(result))
+   print('Проверка возврата '+client+(' mark='+mark if mark else '')+' -> '+lan+': OK')
+  result=ipjson(['route','get','1.1.1.1','from',client,'iif',lan])
+  if not result or result[0].get('dev')!=out:raise RuntimeError('Неверный исходящий маршрут: '+json.dumps(result))
+  print('Проверка выхода '+lan+' -> '+out+': OK')
+def main():
+ p=argparse.ArgumentParser();p.add_argument('action',choices=['check','ensure','verify']);p.add_argument('--out');p.add_argument('pairs',nargs='+');a=p.parse_args();data=parse(a.pairs)
+ if a.action=='check':check(data);print('Приоритеты правил проверены')
+ elif a.action=='ensure':ensure(data)
+ else:
+  if not a.out:raise ValueError('Нужен --out')
+  verify(data,a.out)
+if __name__=='__main__':
+ try:main()
+ except (ValueError,RuntimeError,OSError) as e:print('ОШИБКА маршрутизации: '+str(e),file=sys.stderr);sys.exit(1)
+BR34_ROUTES
  cat > "$p/runtime" <<'BR26_RUNTIME'
 #!/bin/bash
 set -euo pipefail
 [[ -r /etc/bobarev-router-v2/config ]] || { echo 'Маршрутизатор не настроен. Выберите «Настроить».' >&2; exit 1; }
 source /etc/bobarev-router-v2/config
+networkd_pairs=()
+for i in "${!LANS[@]}"; do networkd_pairs+=("${LANS[i]}=${ADDRS[i]}"); done
 clean() {
  for spec in 'filter FORWARD BR2_FWD' 'nat POSTROUTING BR2_NAT' 'mangle FORWARD BR2_MSS'; do
   read -r table parent chain <<< "$spec"
@@ -6834,6 +6921,7 @@ for dev in "${LANS[@]}" "$OUT"; do ip link show dev "$dev" >/dev/null || { echo 
 if [[ "$OUT" == tailscale0 ]]; then
  ip -4 route show table 52 default | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null || { echo 'Exit node не активен'; exit 1; }
 fi
+python3 /usr/local/sbin/bobarev-router-routes.py check "${networkd_pairs[@]}"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 for dev in all "${LANS[@]}" "$OUT"; do sysctl -w "net.ipv4.conf.$dev.rp_filter=0" >/dev/null; done
 clean
@@ -6860,15 +6948,18 @@ for i in "${!LANS[@]}"; do
 iptables -w 5 -I FORWARD 1 -j BR2_FWD
 iptables -w 5 -t nat -I POSTROUTING 1 -j BR2_NAT
 iptables -w 5 -t mangle -I FORWARD 1 -j BR2_MSS
+python3 /usr/local/sbin/bobarev-router-routes.py ensure "${networkd_pairs[@]}"
 for i in "${!LANS[@]}"; do
  ip -4 rule add pref "$((5100+i))" iif "${LANS[i]}" lookup "$((199+i))"
  ip -4 route get 1.1.1.1 from "${STARTS[i]}" iif "${LANS[i]}"
 done
 if ! /usr/local/sbin/bobarev-router-performance; then
- echo 'ВНИМАНИЕ: профиль применён не полностью; проверьте журнал. Основная маршрутизация настроена.' >&2
+ echo 'ВНИМАНИЕ: профиль производительности применён частично; основная маршрутизация настроена.' >&2
 fi
+python3 /usr/local/sbin/bobarev-router-routes.py verify "${networkd_pairs[@]}" --out "$OUT"
+
 BR26_RUNTIME
- chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime" "$p/performance" "$p/networkd.py"
+ chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime" "$p/performance" "$p/networkd.py" "$p/routes.py"
  br26_apply
 }
 
@@ -6921,7 +7012,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.33
+# BOBAREV SHELL 3.14.34
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9711,7 +9802,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.33 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.34 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

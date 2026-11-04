@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.18 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.19 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 C_GREEN='\033[0;32m'
@@ -6648,6 +6648,50 @@ WantedBy=timers.target
 WDT
   systemctl daemon-reload
   systemctl enable --now bobarev-router-watchdog.timer
+  cat > /usr/local/sbin/bobarev-tailscale-bootfix <<'TB'
+#!/bin/bash
+# Ждём до 2 минут: если tailscaled завис в NoState — перезапускаем его.
+for i in $(seq 1 12); do
+  st="$(tailscale status 2>/dev/null | head -n 1)"
+  if [[ -n "$st" && "$st" != *"unexpected state: NoState"* && "$st" != *"Tailscale is starting"* ]]; then
+    exit 0
+  fi
+  sleep 10
+done
+logger -t bobarev-tailscale-bootfix "tailscaled завис в NoState — перезапуск"
+systemctl restart tailscaled
+sleep 20
+st="$(tailscale status 2>/dev/null | head -n 1)"
+if [[ -z "$st" || "$st" == *"unexpected state: NoState"* || "$st" == *"Tailscale is starting"* ]]; then
+  sleep 20
+  systemctl restart tailscaled
+fi
+TB
+  chmod 700 /usr/local/sbin/bobarev-tailscale-bootfix
+  cat > /etc/systemd/system/bobarev-tailscale-bootfix.service <<'TBS'
+[Unit]
+Description=Bobarev Tailscale boot fix (NoState recovery)
+After=tailscaled.service network-online.target
+Wants=tailscaled.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bobarev-tailscale-bootfix
+TBS
+  cat > /etc/systemd/system/bobarev-tailscale-bootfix.timer <<'TBT'
+[Unit]
+Description=Bobarev Tailscale boot fix timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+TBT
+  systemctl daemon-reload
+  systemctl enable --now bobarev-tailscale-bootfix.timer
  fi
 
  if command -v ufw >/dev/null && ufw status | grep -q 'Status: active'; then
@@ -6733,7 +6777,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.18
+# BOBAREV SHELL 3.14.19
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9523,7 +9567,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.18 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.19 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

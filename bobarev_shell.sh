@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.35 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.36 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -661,7 +661,6 @@ ${auth_lines}        }
             hide_via
 $( [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ] && echo "            upstream socks5://127.0.0.1:1080" )
 $( [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && echo "            upstream socks5://127.0.0.1:10808" )
-$( if [ -f /etc/naiveproxy/mesh-upstream.port ] && [ "${CASCADE_ROLE:-}" = standalone_naive ]; then read -r nm_port < /etc/naiveproxy/mesh-upstream.port; if [[ "$nm_port" =~ ^[0-9]{4,5}$ ]] && ((10#$nm_port >= 1024 && 10#$nm_port <= 65535)); then echo "            upstream socks5://127.0.0.1:$nm_port"; else echo "            upstream socks5://127.0.0.1:1"; fi; fi )
         }
     }
 
@@ -858,7 +857,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.35: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.36: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -901,7 +900,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.35: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.36: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -1471,6 +1470,27 @@ EOF
                 echo -e "${C_BLUE} Режим выхода сохранён: ${cur_out}. WireGuard wg0 настраивается отдельно через пункт 3.${C_RESET}"
 
                 echo -e "${C_GREEN} Настройка автономного NaiveProxy успешно завершена!${C_RESET}"
+
+                # Проверка режима выхода для автономного NaiveProxy
+                local ts_exit_now=""
+                if command -v tailscale >/dev/null 2>&1; then
+                    ts_exit_now="$(tailscale get exit-node 2>/dev/null || true)"
+                fi
+                if [ -n "$ts_exit_now" ] && [ "$ts_exit_now" != "none" ] && [ "$ts_exit_now" != "false" ]; then
+                    echo -e "${C_YELLOW} Внимание: активен Tailscale Exit Node: $ts_exit_now.${C_RESET}"
+                    echo -e "${C_YELLOW} Исходящий трафик NaiveProxy будет направляться через него.${C_RESET}"
+                    if systemctl is-active --quiet bobarev-shell-return.service 2>/dev/null; then
+                        echo -e "${C_GREEN} Защита обратного маршрута (bobarev-shell-return) активна.${C_RESET}"
+                    else
+                        echo -e "${C_RED} Защита обратного маршрута не активна.${C_RESET}"
+                        echo -e "${C_RED} Публичные SSH и NaiveProxy могут стать недоступны при использовании Exit Node.${C_RESET}"
+                        echo -e "${C_YELLOW} Настройте Mullvad через отдельный мастер, который создаёт bobarev-shell-return.${C_RESET}"
+                    fi
+                else
+                    echo -e "${C_BLUE} Tailscale Exit Node не выбран: NaiveProxy будет использовать прямой WAN.${C_RESET}"
+                    echo -e "${C_BLUE} Для выхода через Mullvad настройте его в разделе Mullvad после этой настройки.${C_RESET}"
+                fi
+
                 print_naive_shadowrocket_links
                 pause_enter
                 ;;
@@ -7025,7 +7045,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.35
+# BOBAREV SHELL 3.14.36
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9815,7 +9835,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.35 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.36 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

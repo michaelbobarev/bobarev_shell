@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.51 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.52 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.51: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.52: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.51: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.52: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -6778,7 +6778,7 @@ br49_netperf() {
  ncpu=$(nproc 2>/dev/null || echo 1)
  cpu_mask=$(python3 -c "print(hex((1<<int('$ncpu'))-1)[2:])")
  while true; do
-  smart_menu 'Производительность: RPS/XPS + fq_codel' "Распределяет обработку пакетов по ядрам (RPS/XPS) и ставит fq_codel на очереди интерфейсов.
+  smart_menu 'Ускорение сети' "Распределяет обработку пакетов по ядрам (RPS/XPS) и ставит fq_codel на очереди интерфейсов.
 Текущие интерфейсы: ${def:-не определены}.
 CPU mask: $cpu_mask.
 Изменения применяются сразу; сервис включается в автозагрузку." 24 "${WT_WIDTH:-85}" 3 c 1 'Включить / обновить' 2 'Отключить и удалить' 0 'Назад' || return 0
@@ -6790,7 +6790,7 @@ CPU mask: $cpu_mask.
        [[ "$i" =~ ^[A-Za-z0-9._-]+$ && -e "/sys/class/net/$i" ]] || { echo "Интерфейс $i не найден."; ok=false; }
       done
       [[ "$ok" == true ]] || { pause_enter; continue; }
-      nm_yes "Применить RPS/XPS + fq_codel для: $ifaces?" || continue
+      nm_yes "Настроить ускорение сети для: $ifaces?" || continue
       cat > "$bin" <<BR49_NETPERF
 #!/bin/bash
 set -euo pipefail
@@ -6807,7 +6807,7 @@ BR49_NETPERF
       chmod 700 "$bin" || return 1
       cat > "$svc" <<BR49_UNIT
 [Unit]
-Description=Bobarev RPS/XPS and fq_codel tuning
+Description=Bobarev network acceleration (RPS/XPS, fq_codel)
 After=network.target
 [Service]
 Type=oneshot
@@ -6819,7 +6819,7 @@ BR49_UNIT
       systemctl daemon-reload || return 1
       systemctl enable --now bobarev-netperf.service || return 1
       echo 'Применено. Проверка: tc qdisc show; cat /sys/class/net/*/queues/rx-*/rps_cpus' ;;
-   2) nm_yes 'Отключить и удалить настройки RPS/XPS + fq_codel?' || continue
+   2) nm_yes 'Отключить и удалить настройки ускорения сети?' || continue
       systemctl disable --now bobarev-netperf.service 2>/dev/null || true
       rm -f "$svc" "$bin"
       systemctl daemon-reload || true
@@ -6832,7 +6832,7 @@ BR49_UNIT
 mod_router_sbc() {
  local choice=''
  while true; do
-  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 4 choice 1 'Статус' 2 'Настроить' 3 'Производительность: RPS/XPS + fq_codel' 0 'Назад' || return 0
+  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 4 choice 1 'Статус' 2 'Настроить' 3 'Ускорение сети' 0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
    1) if [[ -f /etc/bobarev-router-v2/config ]]; then
@@ -7527,7 +7527,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.51
+# BOBAREV SHELL 3.14.52
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -10317,7 +10317,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.51 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.52 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

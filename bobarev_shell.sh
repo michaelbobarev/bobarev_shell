@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.48 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.49 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.48: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.49: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.48: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.49: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -5232,7 +5232,6 @@ ts42_audit() {
  echo 'Локальная проверка iptables не определяет роль устройства. nftables требует отдельного анализа.'
 }
 br48_dnsmasq_range() {
- # Print "start end" of the first active dhcp-range found in dnsmasq configs.
  local f
  for f in /etc/dnsmasq.d/*.conf /etc/dnsmasq.conf; do
   [[ -r "$f" ]] || continue
@@ -6620,6 +6619,8 @@ br26_apply() {
  (
  source "$p/config"
  DHCP_OWNER=${DHCP_OWNER:-managed}
+ MSS_CLAMP=${MSS_CLAMP:-true}
+ DNS_REDIRECT=${DNS_REDIRECT:-false}
  [[ "$DHCP_OWNER" == existing || "$DHCP_OWNER" == managed ]] || exit 1
  if [[ "$DHCP_OWNER" == existing ]]; then
   systemctl is-active --quiet dnsmasq.service || exit 1
@@ -6765,10 +6766,73 @@ UNIT
  echo 'Применено. Маршруты в обе стороны проверены. Откройте сайт и проверьте IP с LAN-клиента.' 
  )
 }
+br49_netperf() {
+ local c ifaces='' svc=/etc/systemd/system/bobarev-netperf.service bin=/usr/local/sbin/bobarev-netperf-apply
+ local def='' wan='' cpu_mask='' ncpu
+ if [[ -r /etc/bobarev-router-v2/config ]]; then
+  source /etc/bobarev-router-v2/config
+  def="${LANS[*]}"
+ fi
+ wan=$(ip -4 route show default 2>/dev/null | awk '$1=="default"{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1);exit}}')
+ [[ -n "$wan" && "$wan" != tailscale0 ]] && def="$def $wan"
+ ncpu=$(nproc 2>/dev/null || echo 1)
+ cpu_mask=$(python3 -c "print(hex((1<<int('$ncpu'))-1)[2:])")
+ while true; do
+  smart_menu 'Производительность: RPS/XPS + fq_codel' "Распределяет обработку пакетов по ядрам (RPS/XPS) и ставит fq_codel на очереди интерфейсов.
+Текущие интерфейсы: ${def:-не определены}.
+CPU mask: $cpu_mask.
+Изменения применяются сразу; сервис включается в автозагрузку." 24 "${WT_WIDTH:-85}" 3 c 1 'Включить / обновить' 2 'Отключить и удалить' 0 'Назад' || return 0
+  case "$c" in
+   0) return 0 ;;
+   1) br26_input 'Интерфейсы через пробел (LAN и WAN; tailscale0 не нужен)' "$def" ifaces || continue
+      local ok=true i
+      for i in $ifaces; do
+       [[ "$i" =~ ^[A-Za-z0-9._-]+$ && -e "/sys/class/net/$i" ]] || { echo "Интерфейс $i не найден."; ok=false; }
+      done
+      [[ "$ok" == true ]] || { pause_enter; continue; }
+      nm_yes "Применить RPS/XPS + fq_codel для: $ifaces?" || continue
+      cat > "$bin" <<BR49_NETPERF
+#!/bin/bash
+set -euo pipefail
+for iface in $ifaces; do
+ for q in /sys/class/net/\$iface/queues/rx-*/rps_cpus; do
+  [[ -e "\$q" ]] && echo "$cpu_mask" > "\$q" 2>/dev/null || true
+ done
+ for q in /sys/class/net/\$iface/queues/tx-*/xps_cpus; do
+  [[ -e "\$q" ]] && echo "$cpu_mask" > "\$q" 2>/dev/null || true
+ done
+ tc qdisc replace dev "\$iface" root fq_codel 2>/dev/null || true
+done
+BR49_NETPERF
+      chmod 700 "$bin" || return 1
+      cat > "$svc" <<BR49_UNIT
+[Unit]
+Description=Bobarev RPS/XPS and fq_codel tuning
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=$bin
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+BR49_UNIT
+      systemctl daemon-reload || return 1
+      systemctl enable --now bobarev-netperf.service || return 1
+      echo 'Применено. Проверка: tc qdisc show; cat /sys/class/net/*/queues/rx-*/rps_cpus' ;;
+   2) nm_yes 'Отключить и удалить настройки RPS/XPS + fq_codel?' || continue
+      systemctl disable --now bobarev-netperf.service 2>/dev/null || true
+      rm -f "$svc" "$bin"
+      systemctl daemon-reload || true
+      echo 'Удалено. Очереди/настройки ядер не восстанавливаются автоматически.' ;;
+  esac
+  pause_enter
+ done
+}
+
 mod_router_sbc() {
  local choice=''
  while true; do
-  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 3 choice 1 'Статус' 2 'Настроить' 0 'Назад' || return 0
+  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 4 choice 1 'Статус' 2 'Настроить' 3 'Производительность: RPS/XPS + fq_codel' 0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
    1) if [[ -f /etc/bobarev-router-v2/config ]]; then
@@ -6779,6 +6843,7 @@ mod_router_sbc() {
       else echo 'Маршрутизатор не настроен. Выберите «Настроить».'; fi
       pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
+   3) br49_netperf || true; pause_enter ;;
   esac
  done
 }
@@ -6977,6 +7042,9 @@ BR29_POOL
   fi
  fi
  if [[ "$dhcp_owner" == managed ]]; then
+ local mss=true dns_redirect=false
+ smart_menu 'MSS clamping' 'Подрезка MSS для TCP через туннель. Уменьшает риск зависаний из-за фрагментации при MTU 1420.' 20 "${WT_WIDTH:-85}" 2 mss true 'Включить (рекомендуется)' false 'Выключить' || return 0
+ smart_menu 'DNS-redirect' 'Перенаправлять UDP/TCP 53 клиентов на этот шлюз? Полезно, если на клиентах жёстко прописан DNS. Работает только в режиме маршрутизатора.' 20 "${WT_WIDTH:-85}" 2 dns_redirect true 'Включить' false 'Выключить (по умолчанию)' || return 0
  local -a dhcp_options=()
  if [[ $(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["dhcp"])' "$scan") == False ]]; then
   dhcp_options=(no 'Нет — сохранить ручную адресацию' yes 'Да — включить DHCP')
@@ -7035,6 +7103,8 @@ BR26_VALIDATE
   printf 'ENDS=('; printf ' %q' "${ends[@]}"; printf ' )\n'
   printf 'OUT=%q\nGATEWAY=%q\nDHCP=%q\nEXIT_NODE=%q\n' "$out" "$gw" "$dhcp" "$node"
   printf 'DHCP_OWNER=%q\n' "$dhcp_owner"
+  printf 'MSS_CLAMP=%q\n' "$mss"
+  printf 'DNS_REDIRECT=%q\n' "$dns_redirect"
  } > "$p/config"
  {
   printf 'port=53\nbind-dynamic\nno-resolv\ndhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
@@ -7284,6 +7354,12 @@ clean() {
   iptables -w 5 -t "$table" -F "$chain" 2>/dev/null || true
   iptables -w 5 -t "$table" -X "$chain" 2>/dev/null || true
  done
+ while iptables -w 5 -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+ for i in "${!LANS[@]}"; do
+  for proto in udp tcp; do
+   while iptables -w 5 -t nat -D PREROUTING -i "${LANS[i]}" -p "$proto" --dport 53 -j DNAT --to-destination "${ADDRS[i]}" 2>/dev/null; do :; done
+  done
+ done
  for i in "${!LANS[@]}"; do
   lan=${LANS[i]}; table=$((199+i)); pref=$((5100+i))
   while ip -4 rule del pref "$pref" iif "$lan" lookup "$table" 2>/dev/null; do :; done
@@ -7366,6 +7442,24 @@ for bin in iptables ip6tables; do
  "$bin" -w 5 -F BR42_WAIT
  "$bin" -w 5 -X BR42_WAIT
 done
+if [[ "${MSS_CLAMP:-true}" == true ]]; then
+ iptables -w 5 -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -w 5 -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+else
+ while iptables -w 5 -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+fi
+if [[ "${DNS_REDIRECT:-false}" == true ]]; then
+ for i in "${!LANS[@]}"; do
+  for proto in udp tcp; do
+   iptables -w 5 -t nat -C PREROUTING -i "${LANS[$i]}" -p "$proto" --dport 53 -j DNAT --to-destination "${ADDRS[$i]}" 2>/dev/null || iptables -w 5 -t nat -A PREROUTING -i "${LANS[$i]}" -p "$proto" --dport 53 -j DNAT --to-destination "${ADDRS[$i]}"
+  done
+ done
+else
+ for i in "${!LANS[@]}"; do
+  for proto in udp tcp; do
+   while iptables -w 5 -t nat -D PREROUTING -i "${LANS[$i]}" -p "$proto" --dport 53 -j DNAT --to-destination "${ADDRS[$i]}" 2>/dev/null; do :; done
+  done
+ done
+fi
 BR26_RUNTIME
  chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime" "$p/performance" "$p/networkd.py" "$p/routes.py"
  br26_apply
@@ -7420,7 +7514,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.48
+# BOBAREV SHELL 3.14.49
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -10210,7 +10304,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.48 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.49 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.45 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.46 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.45: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.46: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.45: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.46: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -6903,7 +6903,7 @@ BR29_POOL
  done
  local dhcp_owner=managed
  if systemctl is-active --quiet dnsmasq.service; then
-  smart_menu 'Владелец DHCP/DNS' 'Сохранить работающий dnsmasq? LAN/адреса должны соответствовать его конфигу. Миграция использует новый DNS/MTU и отдельные аренды.' 18 "${WT_WIDTH:-85}" 2 dhcp_owner existing 'Сохранить существующий (рекомендуется)' managed 'Перейти на Bobarev Router' || return 0
+  smart_menu 'Владелец DHCP/DNS' 'Сохранить работающий dnsmasq? LAN/адреса должны соответствовать его конфигу. Миграция использует новый DNS/MTU и отдельные аренды.' 18 "${WT_WIDTH:-85}" 2 dhcp_owner existing 'Сохранить существующий (рекомендуется)' managed 'Использовать отдельный DHCP/DNS скрипта' || return 0
  fi
  if [[ "$dhcp_owner" == managed ]]; then
  local -a dhcp_options=()
@@ -7349,7 +7349,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.45
+# BOBAREV SHELL 3.14.46
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -10139,7 +10139,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.45 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.46 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.37 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.39 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -858,7 +858,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.37: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.39: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -901,7 +901,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.37: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.39: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -6322,6 +6322,72 @@ br26_input() {
  _v=$(whiptail --inputbox "$1" 12 "${WT_WIDTH:-85}" "$2" 3>&1 1>&2 2>&3) || return 1
  printf -v "$3" '%s' "$_v"
 }
+br38_ts_ready() {
+ local state i
+ for i in {1..30}; do
+  state=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null) || state=''
+  [[ "$state" == Running ]] && return 0
+  sleep 2
+ done
+ echo 'Tailscale не достиг Running. LAN пока не изменён.' >&2
+ tailscale status || true
+ journalctl -u tailscaled -n 50 --no-pager || true
+ return 1
+}
+br38_ts_transport() {
+ local choice env answer file=/etc/systemd/system/tailscaled.service.d/90-control-443.conf backup='' legacy
+ command -v tailscale >/dev/null || return 1
+ env=$(systemctl show tailscaled --property=Environment --value)
+ smart_menu 'Tailscale: связь с админкой' "Текущее окружение: $env
+Включить TS_FORCE_NOISE_443=true (управляющее соединение TCP 443)?
+Внутренний параметр. Не исправляет NAT удалённого exit node.
+Новый файл: 90-control-443.conf. Старые настройки сохраняются." 20 "${WT_WIDTH:-85}" 2 choice KEEP 'Не менять существующую настройку' ENABLE 'Да — использовать TCP 443' || return 1
+ [[ "$choice" == ENABLE ]] || return 0
+ if [[ " $env " == *' TS_FORCE_NOISE_443=true '* ]]; then
+  echo 'TCP 443 уже включён. Перезапуск не требуется.'
+  echo 'Старые drop-in автоматически не переименовываются и не удаляются.'
+  return 0
+ fi
+ smart_menu 'Перезапуск Tailscale' 'Используйте локальный SSH/консоль: SSH через Tailscale оборвётся. Регистрация сохраняется.' 15 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Применить и перезапустить' || return 1
+ [[ "$answer" == YES ]] || return 1
+ mkdir -p /etc/systemd/system/tailscaled.service.d || return 1
+ if [[ -e "$file" ]]; then
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  backup=$(mktemp /root/bobarev-control443.XXXXXX) || return 1
+  cp -a "$file" "$backup" || return 1
+ fi
+ printf '[Service]\nEnvironment="TS_FORCE_NOISE_443=true"\n' > "$file" || return 1
+ if systemctl daemon-reload && systemctl restart tailscaled && br38_ts_ready; then
+  echo 'Tailscale: Running. IPv4 выхода проверяется отдельно.'
+  return 0
+ fi
+ echo 'Неудачная проверка: восстанавливаем изменённый drop-in.' >&2
+ if [[ -n "$backup" ]]; then cp -a "$backup" "$file" || return 1; else rm -f "$file"; fi
+ systemctl daemon-reload || true
+ systemctl restart tailscaled || true
+ return 1
+}
+br38_ts_ipv4() {
+ local value url
+ command -v curl >/dev/null || { echo 'Для проверки нужен curl.'; return 1; }
+ for url in https://1.1.1.1/cdn-cgi/trace https://api.ipify.org; do
+  value=$(curl -q --noproxy '*' -4 -fsS --connect-timeout 5 --max-time 12 "$url" 2>/dev/null) || continue
+  if python3 - "$value" <<'BR38_IP'
+import ipaddress,sys
+s=sys.argv[1].strip()
+s=next((x[3:] for x in s.splitlines() if x.startswith('ip=')),s)
+try:
+ a=ipaddress.ip_address(s)
+ assert a.version==4 and a.is_global
+except (ValueError,AssertionError):sys.exit(1)
+print('IPv4 самого маршрутизатора: '+str(a))
+BR38_IP
+  then return 0; fi
+ done
+ echo 'IPv4-тест не прошёл. Проверьте forwarding/NAT exit node. LAN пока не изменён.' >&2
+ return 1
+}
+
 br26_apply() {
  local p=/etc/bobarev-router-v2/pending dev i lan table pref occupied
  [[ -f "$p/config" ]] || { echo 'Нет отложенной конфигурации'; return 1; }
@@ -6342,12 +6408,14 @@ br26_apply() {
  python3 "$p/routes.py" check "${networkd_pairs[@]}" || exit 1
  python3 "$p/networkd.py" check "${networkd_pairs[@]}" || exit 1
  if [[ "$OUT" == tailscale0 ]]; then
+  br38_ts_ready || exit 1
   if [[ -n "$EXIT_NODE" ]]; then
    tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true --accept-routes=false || exit 1
   else
    tailscale set --exit-node-allow-lan-access=true || exit 1
   fi
   ts_wait_exit_node || { echo 'Нет default tailscale0; LAN пока не изменён'; exit 1; }
+  br38_ts_ipv4 || exit 1
  fi
  echo '[2/6] Проверка пакетов и DHCP-конфигурации'
  apt-get install -y dnsmasq-base iptables iproute2 || exit 1
@@ -6437,7 +6505,7 @@ UNIT
 mod_router_sbc() {
  local choice=''
  while true; do
-  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 15 "${WT_WIDTH:-85}" 3 choice 1 'Статус' 2 'Настроить' 0 'Назад' || return 0
+  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 17 "${WT_WIDTH:-85}" 4 choice 1 'Статус' 2 'Настроить' 3 'Связь Tailscale с админкой / TCP 443' 0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
    1) if [[ -f /etc/bobarev-router-v2/config ]]; then
@@ -6448,6 +6516,7 @@ mod_router_sbc() {
       else echo 'Маршрутизатор не настроен. Выберите «Настроить».'; fi
       pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
+   3) br38_ts_transport || true; pause_enter ;;
   esac
  done
 }
@@ -6561,6 +6630,7 @@ BR29_OUTPUTS
  fi
  [[ "$out" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$out" != lo ]] || { echo 'Неверное имя выхода'; return 1; }
  if [[ "$out" == tailscale0 ]]; then
+  br38_ts_transport || return 1
   detected=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((p.get("HostName","")+" "+next((ip for ip in p.get("TailscaleIPs",[]) if ":" not in ip),"") for p in d.get("Peer",{}).values() if p.get("ExitNode")),"не выбран"))' 2>/dev/null) || detected='не определён'
   br26_input "Exit node сейчас: $detected. Пустое поле — оставить текущий. Для смены укажите IP или имя." '' node || return 0
   [[ "$node" != -* && "$node" != *[[:space:]]* ]] || return 1
@@ -7029,7 +7099,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.37
+# BOBAREV SHELL 3.14.39
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9819,7 +9889,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.37 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.39 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.49 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.50 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.49: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.50: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.49: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.50: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -7041,10 +7041,10 @@ BR29_POOL
    fi
   fi
  fi
- if [[ "$dhcp_owner" == managed ]]; then
  local mss=true dns_redirect=false
  smart_menu 'MSS clamping' 'Подрезка MSS для TCP через туннель. Уменьшает риск зависаний из-за фрагментации при MTU 1420.' 20 "${WT_WIDTH:-85}" 2 mss true 'Включить (рекомендуется)' false 'Выключить' || return 0
  smart_menu 'DNS-redirect' 'Перенаправлять UDP/TCP 53 клиентов на этот шлюз? Полезно, если на клиентах жёстко прописан DNS. Работает только в режиме маршрутизатора.' 20 "${WT_WIDTH:-85}" 2 dns_redirect true 'Включить' false 'Выключить (по умолчанию)' || return 0
+ if [[ "$dhcp_owner" == managed ]]; then
  local -a dhcp_options=()
  if [[ $(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["dhcp"])' "$scan") == False ]]; then
   dhcp_options=(no 'Нет — сохранить ручную адресацию' yes 'Да — включить DHCP')
@@ -7103,8 +7103,8 @@ BR26_VALIDATE
   printf 'ENDS=('; printf ' %q' "${ends[@]}"; printf ' )\n'
   printf 'OUT=%q\nGATEWAY=%q\nDHCP=%q\nEXIT_NODE=%q\n' "$out" "$gw" "$dhcp" "$node"
   printf 'DHCP_OWNER=%q\n' "$dhcp_owner"
-  printf 'MSS_CLAMP=%q\n' "$mss"
-  printf 'DNS_REDIRECT=%q\n' "$dns_redirect"
+  printf 'MSS_CLAMP=%q\n' "${mss:-true}"
+  printf 'DNS_REDIRECT=%q\n' "${dns_redirect:-false}"
  } > "$p/config"
  {
   printf 'port=53\nbind-dynamic\nno-resolv\ndhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
@@ -7514,7 +7514,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.49
+# BOBAREV SHELL 3.14.50
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -10304,7 +10304,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.49 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.50 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

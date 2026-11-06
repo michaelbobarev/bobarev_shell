@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.39 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.40 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -379,7 +379,8 @@ select_and_apply_routed_interfaces() {
 
 flush_and_reload_nat() {
     local wan_dev=$(get_wan_if)
-    iptables -t nat -F 2>/dev/null || true
+    # Preserve foreign NAT tables, including Tailscale and containers. No global flush.
+    :
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         silent_run ufw reload
     fi
@@ -858,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.39: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.40: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -901,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.39: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.40: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -1664,10 +1665,10 @@ PostUp = ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 || true
 PostUp = ip link set dev warp mtu 1280 txqueuelen 10000 || true
 PostUp = tc qdisc replace dev warp root fq limit 30000 flow_limit 10000 2>/dev/null || true
 PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
-PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT
-PostUp = iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
-PostUp = iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o warp -j ACCEPT
+PostUp = iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg-cascade -o warp -j ACCEPT
+PostUp = iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
 PostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
 PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
@@ -1999,10 +2000,10 @@ apply_foreign_exit_mode() {
         ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
 
-        iptables -C FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o "$wan_dev" -j ACCEPT
-        iptables -C FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-        iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o "$wan_dev" -j ACCEPT
-        iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT
+        iptables -C FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT
+        iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         apply_wan_exit_nat "$wan_dev" "true"
 
         # Для прямого WG-моста: MSS 1200; для Tailscale (с учетом заголовка Disco): MSS 1140
@@ -2027,10 +2028,10 @@ apply_foreign_exit_mode() {
         ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
         ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
 
-        iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-cascade -o warp -j ACCEPT
-        iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-        iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i tailscale0 -o warp -j ACCEPT
-        iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg-cascade -o warp -j ACCEPT
+        iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o warp -j ACCEPT
+        iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
 
         iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
@@ -4933,7 +4934,8 @@ mod_ufw() {
         silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
     fi
 
-    iptables -t nat -F 2>/dev/null || true
+    # Preserve foreign NAT tables, including Tailscale and containers. No global flush.
+    :
     silent_run ufw --force enable
     silent_run ufw delete allow in on tailscale0
     if ! command -v tailscale &>/dev/null; then
@@ -6322,33 +6324,28 @@ br26_input() {
  _v=$(whiptail --inputbox "$1" 12 "${WT_WIDTH:-85}" "$2" 3>&1 1>&2 2>&3) || return 1
  printf -v "$3" '%s' "$_v"
 }
-br38_ts_ready() {
- local state i
+br40_ts_ready() {
+ local i state
  for i in {1..30}; do
   state=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null) || state=''
   [[ "$state" == Running ]] && return 0
   sleep 2
  done
- echo 'Tailscale не достиг Running. LAN пока не изменён.' >&2
  tailscale status || true
  journalctl -u tailscaled -n 50 --no-pager || true
+ echo 'Нет Running. Применение LAN остановлено.' >&2
  return 1
 }
-br38_ts_transport() {
- local choice env answer file=/etc/systemd/system/tailscaled.service.d/90-control-443.conf backup='' legacy
+br40_ts_transport() {
+ local choice answer env file=/etc/systemd/system/tailscaled.service.d/90-control-443.conf backup=''
  command -v tailscale >/dev/null || return 1
  env=$(systemctl show tailscaled --property=Environment --value)
- smart_menu 'Tailscale: связь с админкой' "Текущее окружение: $env
-Включить TS_FORCE_NOISE_443=true (управляющее соединение TCP 443)?
-Внутренний параметр. Не исправляет NAT удалённого exit node.
-Новый файл: 90-control-443.conf. Старые настройки сохраняются." 20 "${WT_WIDTH:-85}" 2 choice KEEP 'Не менять существующую настройку' ENABLE 'Да — использовать TCP 443' || return 1
+ smart_menu 'Tailscale: TCP 443' "Окружение: $env
+Включить внутренний TS_FORCE_NOISE_443=true для управляющего соединения?
+NAT удалённого сервера эта настройка не исправляет." 18 "${WT_WIDTH:-85}" 2 choice KEEP 'Сохранить текущие настройки' ENABLE 'Включить TCP 443' || return 1
  [[ "$choice" == ENABLE ]] || return 0
- if [[ " $env " == *' TS_FORCE_NOISE_443=true '* ]]; then
-  echo 'TCP 443 уже включён. Перезапуск не требуется.'
-  echo 'Старые drop-in автоматически не переименовываются и не удаляются.'
-  return 0
- fi
- smart_menu 'Перезапуск Tailscale' 'Используйте локальный SSH/консоль: SSH через Tailscale оборвётся. Регистрация сохраняется.' 15 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Применить и перезапустить' || return 1
+ [[ " $env " != *' TS_FORCE_NOISE_443=true '* ]] || { echo 'Уже включено; restart не нужен.'; return 0; }
+ smart_menu 'Перезапуск tailscaled' 'Используйте локальный SSH или консоль. SSH через Tailscale оборвётся.' 14 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Подтвердить' || return 1
  [[ "$answer" == YES ]] || return 1
  mkdir -p /etc/systemd/system/tailscaled.service.d || return 1
  if [[ -e "$file" ]]; then
@@ -6357,35 +6354,45 @@ br38_ts_transport() {
   cp -a "$file" "$backup" || return 1
  fi
  printf '[Service]\nEnvironment="TS_FORCE_NOISE_443=true"\n' > "$file" || return 1
- if systemctl daemon-reload && systemctl restart tailscaled && br38_ts_ready; then
-  echo 'Tailscale: Running. IPv4 выхода проверяется отдельно.'
-  return 0
- fi
- echo 'Неудачная проверка: восстанавливаем изменённый drop-in.' >&2
+ if systemctl daemon-reload && systemctl restart tailscaled && br40_ts_ready; then return 0; fi
  if [[ -n "$backup" ]]; then cp -a "$backup" "$file" || return 1; else rm -f "$file"; fi
  systemctl daemon-reload || true
  systemctl restart tailscaled || true
+ echo 'Изменённый drop-in восстановлен. Это не общий сетевой откат.' >&2
  return 1
 }
-br38_ts_ipv4() {
+br40_ts_ipv4() {
  local value url
- command -v curl >/dev/null || { echo 'Для проверки нужен curl.'; return 1; }
+ command -v curl >/dev/null || { echo 'Для IPv4-теста нужен curl.'; return 1; }
  for url in https://1.1.1.1/cdn-cgi/trace https://api.ipify.org; do
   value=$(curl -q --noproxy '*' -4 -fsS --connect-timeout 5 --max-time 12 "$url" 2>/dev/null) || continue
-  if python3 - "$value" <<'BR38_IP'
+  if python3 - "$value" <<'BR40_IP'
 import ipaddress,sys
-s=sys.argv[1].strip()
-s=next((x[3:] for x in s.splitlines() if x.startswith('ip=')),s)
+s=sys.argv[1].strip();s=next((x[3:] for x in s.splitlines() if x.startswith('ip=')),s)
 try:
- a=ipaddress.ip_address(s)
- assert a.version==4 and a.is_global
+ a=ipaddress.ip_address(s);assert a.version==4 and a.is_global
 except (ValueError,AssertionError):sys.exit(1)
 print('IPv4 самого маршрутизатора: '+str(a))
-BR38_IP
+BR40_IP
   then return 0; fi
  done
- echo 'IPv4-тест не прошёл. Проверьте forwarding/NAT exit node. LAN пока не изменён.' >&2
+ echo 'IPv4 не работает. Проверьте exit node и его NAT. LAN пока не изменён.' >&2
  return 1
+}
+br40_exit_audit() {
+ echo 'Диагностика локального IPv4 exit node (iptables). Правила не изменяются.'
+ local rc=0 first
+ sysctl net.ipv4.ip_forward || rc=1
+ first=$(iptables -w 5 -S FORWARD 2>/dev/null | grep '^-A ' | head -n 1) || first=''
+ echo "Первое правило FORWARD: $first"
+ [[ "$first" == '-A FORWARD -j ts-forward' ]] || { echo 'Проверьте порядок ts-forward: возможен обход маркировки.'; rc=1; }
+ iptables -w 5 -t nat -C POSTROUTING -j ts-postrouting 2>/dev/null || { echo 'Нет перехода в ts-postrouting.'; rc=1; }
+ iptables -w 5 -t nat -C ts-postrouting -m mark --mark 0x40000/0xff0000 -j MASQUERADE 2>/dev/null || { echo 'Нет штатного IPv4 MASQUERADE.'; rc=1; }
+ iptables -w 5 -S ts-forward || true
+ iptables -w 5 -t nat -S POSTROUTING || true
+ iptables -w 5 -t nat -S ts-postrouting || true
+ echo 'Для nftables-backend результаты iptables недостаточны. Проверка LAN-клиента выполняется отдельно.'
+ return "$rc"
 }
 
 br26_apply() {
@@ -6408,14 +6415,14 @@ br26_apply() {
  python3 "$p/routes.py" check "${networkd_pairs[@]}" || exit 1
  python3 "$p/networkd.py" check "${networkd_pairs[@]}" || exit 1
  if [[ "$OUT" == tailscale0 ]]; then
-  br38_ts_ready || exit 1
+  br40_ts_ready || exit 1
   if [[ -n "$EXIT_NODE" ]]; then
    tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true --accept-routes=false || exit 1
   else
    tailscale set --exit-node-allow-lan-access=true || exit 1
   fi
   ts_wait_exit_node || { echo 'Нет default tailscale0; LAN пока не изменён'; exit 1; }
-  br38_ts_ipv4 || exit 1
+  br40_ts_ipv4 || exit 1
  fi
  echo '[2/6] Проверка пакетов и DHCP-конфигурации'
  apt-get install -y dnsmasq-base iptables iproute2 || exit 1
@@ -6505,7 +6512,7 @@ UNIT
 mod_router_sbc() {
  local choice=''
  while true; do
-  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 17 "${WT_WIDTH:-85}" 4 choice 1 'Статус' 2 'Настроить' 3 'Связь Tailscale с админкой / TCP 443' 0 'Назад' || return 0
+  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 19 "${WT_WIDTH:-85}" 5 choice 1 'Статус' 2 'Настроить' 3 'Связь Tailscale / TCP 443' 4 'Диагностика NAT этого exit node' 0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
    1) if [[ -f /etc/bobarev-router-v2/config ]]; then
@@ -6516,7 +6523,8 @@ mod_router_sbc() {
       else echo 'Маршрутизатор не настроен. Выберите «Настроить».'; fi
       pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
-   3) br38_ts_transport || true; pause_enter ;;
+   3) br40_ts_transport || true; pause_enter ;;
+   4) br40_exit_audit || true; pause_enter ;;
   esac
  done
 }
@@ -6630,7 +6638,7 @@ BR29_OUTPUTS
  fi
  [[ "$out" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$out" != lo ]] || { echo 'Неверное имя выхода'; return 1; }
  if [[ "$out" == tailscale0 ]]; then
-  br38_ts_transport || return 1
+  br40_ts_transport || return 1
   detected=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((p.get("HostName","")+" "+next((ip for ip in p.get("TailscaleIPs",[]) if ":" not in ip),"") for p in d.get("Peer",{}).values() if p.get("ExitNode")),"не выбран"))' 2>/dev/null) || detected='не определён'
   br26_input "Exit node сейчас: $detected. Пустое поле — оставить текущий. Для смены укажите IP или имя." '' node || return 0
   [[ "$node" != -* && "$node" != *[[:space:]]* ]] || return 1
@@ -7099,7 +7107,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.39
+# BOBAREV SHELL 3.14.40
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9889,7 +9897,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.39 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.40 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

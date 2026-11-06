@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.46 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.47 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.46: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.47: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.46: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.47: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -5027,6 +5027,15 @@ TS42_IP
  echo 'IPv4 не работает; автоматического переключения на WAN нет.' >&2
  return 1
 }
+ts42_wait_default() {
+ local i
+ for i in {1..30}; do
+  ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default dev tailscale0([[:space:]]|$)' && return 0
+  sleep 2
+ done
+ echo 'Нет default через tailscale0 за 60 секунд.' >&2
+ return 1
+}
 ts42_control() {
  local answer env file=/etc/systemd/system/tailscaled.service.d/90-control-443.conf backup=''
  env=$(systemctl show tailscaled --property=Environment --value)
@@ -5130,7 +5139,7 @@ ts43_direct_mode() {
  smart_menu 'Прямой интернет (WAN без exit node)' "Отключить exit node и переключить LAN маршрутизатора на WAN этого устройства.
 Клиенты LAN получат внешний IP домашнего роутера/провайдера.
 Сохранённый VPN-выход: ${saved:-нет}.
-Конфигурация маршрутизатора будет переключена на WAN." 22 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Переключить на прямой интернет' || return 1
+Порядок: сначала маршрутизатор на WAN, затем отключение exit node." 22 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Переключить на прямой интернет' || return 1
  [[ "$answer" == YES ]] || return 0
  ts43_router_set_exit wan || return 1
  systemctl disable --now bobarev-tailscale-exit-restore.service 2>/dev/null || true
@@ -5146,24 +5155,41 @@ ts43_vpn_mode() {
  [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || return 1
  nm_yes "Вернуть VPN: выход $node для этого устройства и его LAN? Изменится внешний IP." || return 1
  ts42_wait_running || return 1
+ current=$(ts42_current_exit) || current=''
+ if [[ "$current" != "$node" ]]; then
+  tailscale set --exit-node="$node" --exit-node-allow-lan-access=true || return 1
+ fi
+ # Verify the exit path BEFORE switching the LAN router, to avoid a blackout.
+ ts42_wait_default || { echo 'VPN выход не готов; маршрутизатор оставлен в текущем режиме.'; return 1; }
+ ts42_ipv4 || { echo 'IPv4 через VPN не работает; маршрутизатор оставлен в текущем режиме. Проверьте exit node.'; return 1; }
  ts43_install_exit_restore "$node" || return 1
  ts43_router_set_exit tailscale0 "$node" || return 1
  systemctl start bobarev-tailscale-exit-restore.service || return 1
  ts42_ipv4
 }
 ts42_exit_select() {
- local node current
+ local node current router_out=''
  tailscale exit-node list || return 1
  current=$(ts42_current_exit) || current=''
  br26_input 'Явный IP/hostname выхода. Пустое значение не используется для сброса.' "$current" node || return 1
  [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || return 1
  nm_yes "Выбрать $node сейчас и восстанавливать его при загрузке? Изменится интернет этого устройства. При отказе WAN fallback не будет." || return 1
  if [[ -r /etc/bobarev-router-v2/config ]]; then
+  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config | cut -d= -f2- | tr -d '"')
   echo 'Если локальный маршрутизатор имеет собственный EXIT_NODE, выберите тот же узел в его мастере: иначе при старте его настройка имеет приоритет.'
  fi
  ts43_install_exit_restore "$node" || return 1
  systemctl start bobarev-tailscale-exit-restore.service || return 1
- ts42_ipv4
+ if ts42_ipv4; then
+  if [[ "$router_out" == tailscale0 ]]; then
+   echo 'Маршрутизатор использует tailscale0: LAN-клиенты также направлены через этот выход.'
+  else
+   echo 'Маршрутизатор использует WAN: LAN-клиенты не идут через этот exit node. Для перевода LAN в VPN используйте «Вернуть VPN exit node».'
+  fi
+ else
+  echo 'ВНИМАНИЕ: IPv4 через выбранный выход не работает. Если маршрутизатор в tailscale0, клиенты могут остаться без интернета; используйте «Прямой интернет: WAN без exit node» или восстановите exit node.' >&2
+  return 1
+ fi
 }
 ts42_exit_apply_now() {
  [[ -x /usr/local/sbin/bobarev-tailscale-exit-restore ]] || { echo 'Сначала выберите и сохраните явный выход.'; return 1; }
@@ -5176,6 +5202,30 @@ ts42_exit_disable_restore() {
  systemctl disable --now bobarev-tailscale-exit-restore.service || return 1
  echo 'Автоприменение выключено. Для смены текущего выхода используйте настройки шлюза Tailscale.'
 }
+ts43_consistency() {
+ local exit_now router_out='' router_exit='' route
+ exit_now=$(ts42_current_exit) || exit_now=''
+ if [[ -r /etc/bobarev-router-v2/config ]]; then
+  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config | cut -d= -f2- | tr -d '"')
+  router_exit=$(grep -E '^EXIT_NODE=' /etc/bobarev-router-v2/config | cut -d= -f2- | tr -d '"')
+ fi
+ route=$(ip route get 1.1.1.1 2>/dev/null || true)
+ echo "Текущий exit node Tailscale: ${exit_now:-нет}"
+ echo "Маршрутизатор OUT: ${router_out:-не настроен}"
+ echo "Маршрутизатор EXIT_NODE: ${router_exit:-пусто}"
+ echo "Фактический маршрут до 1.1.1.1:"
+ echo "$route"
+ if [[ "$router_out" == tailscale0 && -z "$exit_now" ]]; then
+  echo 'ВНИМАНИЕ: маршрутизатор в tailscale0, но exit node не выбран. LAN-клиенты могут остаться без интернета.'
+ elif [[ "$router_out" == tailscale0 && "$exit_now" != "$router_exit" ]]; then
+  echo 'ВНИМАНИЕ: выход Tailscale и EXIT_NODE маршрутизатора различаются. При старте маршрутизатора применится его EXIT_NODE.'
+ elif [[ "$router_out" != tailscale0 && -n "$exit_now" ]]; then
+  echo 'Режим: LAN через WAN, exit node выбран только для этого устройства. Клиенты используют чистый IP.'
+ else
+  echo 'Согласованность: ошибок не обнаружено.'
+ fi
+ echo 'Правило 5270 направляет собственный трафик устройства в таблицу 52 при активном exit node.'
+}
 ts42_audit() {
  hostname;sysctl net.ipv4.ip_forward
  iptables -S FORWARD;iptables -S ts-forward || true
@@ -5185,7 +5235,7 @@ ts42_audit() {
 ts42_tools() {
  local c target='' port='' endpoints='' val=''
  while true; do
-  smart_menu 'Tailscale: диагностика и дополнительные настройки' 'Изменения только с подтверждением. Ping/netcheck не меняют конфигурацию.' 26 "${WT_WIDTH:-85}" 13 c 1 'Путь до peer: direct / DERP / relay' 2 'Netcheck: NAT и UDP' 3 'IPv4 / IPv6 выхода' 4 'Рекомендованный exit node (без выбора)' 5 'Управление через TCP 443' 6 'Выбрать выход + восстановление при загрузке' 7 'Применить сохранённый выход сейчас' 8 'Прямой интернет: WAN без exit node' 9 'Вернуть VPN exit node' 10 'Отключить автоприменение выхода' 11 'Peer Relay (расширенно)' 12 'Автообновления клиента' 13 'Локальные правила Tailscale/NAT' 0 'Назад' || return 0
+  smart_menu 'Tailscale: диагностика и дополнительные настройки' 'Изменения только с подтверждением. Ping/netcheck не меняют конфигурацию.' 28 "${WT_WIDTH:-85}" 14 c 1 'Путь до peer: direct / DERP / relay' 2 'Netcheck: NAT и UDP' 3 'IPv4 / IPv6 выхода' 4 'Рекомендованный exit node (без выбора)' 5 'Управление через TCP 443' 6 'Выбрать выход + восстановление при загрузке' 7 'Применить сохранённый выход сейчас' 8 'Прямой интернет: WAN без exit node' 9 'Вернуть VPN exit node' 10 'Отключить автоприменение выхода' 11 'Согласованность выхода и маршрутизатора' 12 'Peer Relay (расширенно)' 13 'Автообновления клиента' 14 'Локальные правила Tailscale/NAT' 0 'Назад' || return 0
   case "$c" in
    0) return 0 ;;
    1) br26_input 'IP/hostname peer' "$target" target || continue
@@ -5199,7 +5249,8 @@ ts42_tools() {
    8) ts43_direct_mode || true ;;
    9) ts43_vpn_mode || true ;;
    10) ts42_exit_disable_restore || true ;;
-   11) echo 'Нужны разрешения relay в tailnet grants и доступный UDP-порт. Политики/проброс NAT автоматически не меняются.'
+   11) ts43_consistency || true ;;
+   12) echo 'Нужны разрешения relay в tailnet grants и доступный UDP-порт. Политики/проброс NAT автоматически не меняются.'
       if ! tailscale set --help 2>&1 | grep -q -- --relay-server-port; then echo 'Клиент не поддерживает Peer Relay.';pause_enter;continue;fi
       br26_input 'UDP-порт Peer Relay (1024..65535)' '40000' port || continue
       [[ "$port" =~ ^[0-9]{4,5}$ ]] && ((10#$port>=1024 && 10#$port<=65535)) || continue
@@ -5217,9 +5268,9 @@ TS42_ENDPOINT
         nm_yes "Применить static endpoints: $endpoints?" && tailscale set --relay-server-static-endpoints="$endpoints" || true
        fi
       fi ;;
-   12) smart_menu 'Автообновления Tailscale' 'Может перезапускать VPN. На маршрутизаторе это влияет на клиентов.' 15 "${WT_WIDTH:-85}" 2 val true 'Включить' false 'Выключить' || continue
+   13) smart_menu 'Автообновления Tailscale' 'Может перезапускать VPN. На маршрутизаторе это влияет на клиентов.' 15 "${WT_WIDTH:-85}" 2 val true 'Включить' false 'Выключить' || continue
       if nm_yes "Установить auto-update=$val?"; then tailscale set --auto-update="$val" || true;fi ;;
-   13) ts42_audit || true ;;
+   14) ts42_audit || true ;;
   esac
   pause_enter
  done
@@ -7349,7 +7400,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.46
+# BOBAREV SHELL 3.14.47
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -10139,7 +10190,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.46 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.47 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

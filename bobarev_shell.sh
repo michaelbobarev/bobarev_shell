@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.50 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.51 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.50: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.51: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.50: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.51: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -7369,6 +7369,13 @@ clean() {
 }
 if [[ ${1:-} == stop ]]; then clean; exit 0; fi
 # Fail-closed guard for forwarded LAN traffic during startup; INPUT remains available.
+guard_clean() {
+ for bin in iptables ip6tables; do
+  while "$bin" -w 5 -D FORWARD -j BR42_WAIT 2>/dev/null; do :; done
+  "$bin" -w 5 -F BR42_WAIT 2>/dev/null || true
+  "$bin" -w 5 -X BR42_WAIT 2>/dev/null || true
+ done
+}
 for bin in iptables ip6tables; do
  "$bin" -w 5 -N BR42_WAIT 2>/dev/null || "$bin" -w 5 -S BR42_WAIT >/dev/null
  for lan in "${LANS[@]}"; do
@@ -7378,23 +7385,29 @@ for bin in iptables ip6tables; do
  "$bin" -w 5 -I FORWARD 1 -j BR42_WAIT
 done
 if [[ "$OUT" == tailscale0 ]]; then
- [[ -n "${EXIT_NODE:-}" ]] || { echo 'EXIT_NODE пуст: откройте мастер и сохраните явный выход.'; exit 1; }
+ [[ -n "${EXIT_NODE:-}" ]] || { echo 'EXIT_NODE пуст: откройте мастер и сохраните явный выход.'; guard_clean; exit 1; }
  for attempt in {1..60}; do
   state=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null) || state=''
   [[ "$state" == Running ]] && break
   sleep 2
  done
- [[ "${state:-}" == Running ]] || { echo 'Нет Running. LAN forwarding закрыт.'; exit 1; }
+ [[ "${state:-}" == Running ]] || { echo 'Нет Running. Guard снят: без правил forwarding LAN не получит интернет, но и не останется в чёрной дыре.'; guard_clean; exit 1; }
+ peer_ready=false
+ for attempt in {1..60}; do
+  tailscale status 2>/dev/null | grep -q -- "$EXIT_NODE" && { peer_ready=true; break; }
+  sleep 2
+ done
+ [[ "$peer_ready" == true ]] || { echo 'Exit node не появился в netmap за 120 секунд. Guard снят; повторите позже или используйте WAN-режим.'; guard_clean; exit 1; }
  current=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((ip for p in (d.get("Peer") or {}).values() if p.get("ExitNode") for ip in p.get("TailscaleIPs",[]) if ":" not in ip),""))') || current=''
  if [[ "$current" != "$EXIT_NODE" ]]; then
-  tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true
+  tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true || { echo 'Не удалось применить exit node. Guard снят.'; guard_clean; exit 1; }
  fi
  ready=false
  for attempt in {1..60}; do
   if ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default dev tailscale0([[:space:]]|$)'; then ready=true; break; fi
   sleep 2
  done
- [[ "$ready" == true ]] || { echo 'Нет маршрута exit node. LAN forwarding закрыт.'; exit 1; }
+ [[ "$ready" == true ]] || { echo 'Нет маршрута exit node. Guard снят.'; guard_clean; exit 1; }
 fi
 # Missing custom interfaces are not created implicitly.
 for dev in "${LANS[@]}" "$OUT"; do ip link show dev "$dev" >/dev/null || { echo "Отсутствует интерфейс $dev. Сначала создайте его."; exit 1; }; done
@@ -7514,7 +7527,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.50
+# BOBAREV SHELL 3.14.51
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -10304,7 +10317,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.50 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.51 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

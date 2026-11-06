@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.47 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.48 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.47: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.48: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.47: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.48: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -5159,7 +5159,6 @@ ts43_vpn_mode() {
  if [[ "$current" != "$node" ]]; then
   tailscale set --exit-node="$node" --exit-node-allow-lan-access=true || return 1
  fi
- # Verify the exit path BEFORE switching the LAN router, to avoid a blackout.
  ts42_wait_default || { echo 'VPN выход не готов; маршрутизатор оставлен в текущем режиме.'; return 1; }
  ts42_ipv4 || { echo 'IPv4 через VPN не работает; маршрутизатор оставлен в текущем режиме. Проверьте exit node.'; return 1; }
  ts43_install_exit_restore "$node" || return 1
@@ -5231,6 +5230,14 @@ ts42_audit() {
  iptables -S FORWARD;iptables -S ts-forward || true
  iptables -t nat -S POSTROUTING;iptables -t nat -S ts-postrouting || true
  echo 'Локальная проверка iptables не определяет роль устройства. nftables требует отдельного анализа.'
+}
+br48_dnsmasq_range() {
+ # Print "start end" of the first active dhcp-range found in dnsmasq configs.
+ local f
+ for f in /etc/dnsmasq.d/*.conf /etc/dnsmasq.conf; do
+  [[ -r "$f" ]] || continue
+  awk '/^[[:space:]]*dhcp-range=/ {print; exit}' "$f" | head -n1 | awk -F'[=,]' '{print $2, $3}'
+ done | head -n1
 }
 ts42_tools() {
  local c target='' port='' endpoints='' val=''
@@ -6956,6 +6963,19 @@ BR29_POOL
  if systemctl is-active --quiet dnsmasq.service; then
   smart_menu 'Владелец DHCP/DNS' 'Сохранить работающий dnsmasq? LAN/адреса должны соответствовать его конфигу. Миграция использует новый DNS/MTU и отдельные аренды.' 18 "${WT_WIDTH:-85}" 2 dhcp_owner existing 'Сохранить существующий (рекомендуется)' managed 'Использовать отдельный DHCP/DNS скрипта' || return 0
  fi
+ if [[ "$dhcp_owner" == existing ]]; then
+  local dr r_start r_end answer
+  dr=$(br48_dnsmasq_range) || dr=''
+  if [[ "$dr" =~ ^[0-9.]+[[:space:]]+[0-9.]+$ && ${#lans[@]} -eq 1 ]]; then
+   read -r r_start r_end <<< "$dr"
+   if [[ "$r_start" != "${starts[0]}" || "$r_end" != "${ends[0]}" ]]; then
+    smart_menu 'DHCP: диапазон dnsmasq' "В работающем dnsmasq найден диапазон: $r_start - $r_end.
+В мастере указан: ${starts[0]} - ${ends[0]}.
+Для режима «Сохранить существующий» рекомендуется использовать диапазон dnsmasq." 20 "${WT_WIDTH:-85}" 2 answer adopt 'Использовать диапазон dnsmasq (рекомендуется)' keep 'Оставить значения мастера' || return 0
+    if [[ "$answer" == adopt ]]; then starts[0]=$r_start; ends[0]=$r_end; fi
+   fi
+  fi
+ fi
  if [[ "$dhcp_owner" == managed ]]; then
  local -a dhcp_options=()
  if [[ $(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["dhcp"])' "$scan") == False ]]; then
@@ -7400,7 +7420,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.47
+# BOBAREV SHELL 3.14.48
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -10190,7 +10210,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.47 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.48 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.40 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.41 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -379,7 +379,7 @@ select_and_apply_routed_interfaces() {
 
 flush_and_reload_nat() {
     local wan_dev=$(get_wan_if)
-    # Preserve foreign NAT tables, including Tailscale and containers. No global flush.
+    # Preserve foreign NAT chains.
     :
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         silent_run ufw reload
@@ -859,7 +859,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.40: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.41: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -902,7 +902,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.40: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.41: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -4934,7 +4934,7 @@ mod_ufw() {
         silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
     fi
 
-    # Preserve foreign NAT tables, including Tailscale and containers. No global flush.
+    # Preserve foreign NAT chains.
     :
     silent_run ufw --force enable
     silent_run ufw delete allow in on tailscale0
@@ -6324,28 +6324,26 @@ br26_input() {
  _v=$(whiptail --inputbox "$1" 12 "${WT_WIDTH:-85}" "$2" 3>&1 1>&2 2>&3) || return 1
  printf -v "$3" '%s' "$_v"
 }
-br40_ts_ready() {
+br41_ready() {
  local i state
- for i in {1..30}; do
+ for i in {1..60}; do
   state=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null) || state=''
-  [[ "$state" == Running ]] && return 0
+  [[ "$state" == Running ]] && ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default dev tailscale0([[:space:]]|$)' && return 0
   sleep 2
  done
+ echo 'Нет Running/default tailscale0 за 120 секунд.' >&2
  tailscale status || true
- journalctl -u tailscaled -n 50 --no-pager || true
- echo 'Нет Running. Применение LAN остановлено.' >&2
  return 1
 }
-br40_ts_transport() {
+br41_transport() {
  local choice answer env file=/etc/systemd/system/tailscaled.service.d/90-control-443.conf backup=''
  command -v tailscale >/dev/null || return 1
  env=$(systemctl show tailscaled --property=Environment --value)
- smart_menu 'Tailscale: TCP 443' "Окружение: $env
-Включить внутренний TS_FORCE_NOISE_443=true для управляющего соединения?
-NAT удалённого сервера эта настройка не исправляет." 18 "${WT_WIDTH:-85}" 2 choice KEEP 'Сохранить текущие настройки' ENABLE 'Включить TCP 443' || return 1
+ smart_menu 'Tailscale: TCP 443' "Текущее окружение: $env
+Включить внутренний TS_FORCE_NOISE_443=true? Это не исправляет NAT exit node." 17 "${WT_WIDTH:-85}" 2 choice KEEP 'Сохранить текущие настройки' ENABLE 'Включить TCP 443' || return 1
  [[ "$choice" == ENABLE ]] || return 0
  [[ " $env " != *' TS_FORCE_NOISE_443=true '* ]] || { echo 'Уже включено; restart не нужен.'; return 0; }
- smart_menu 'Перезапуск tailscaled' 'Используйте локальный SSH или консоль. SSH через Tailscale оборвётся.' 14 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Подтвердить' || return 1
+ smart_menu 'Restart Tailscale' 'Используйте локальный SSH/консоль. SSH через Tailscale оборвётся.' 14 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Подтвердить' || return 1
  [[ "$answer" == YES ]] || return 1
  mkdir -p /etc/systemd/system/tailscaled.service.d || return 1
  if [[ -e "$file" ]]; then
@@ -6354,45 +6352,38 @@ NAT удалённого сервера эта настройка не испр�
   cp -a "$file" "$backup" || return 1
  fi
  printf '[Service]\nEnvironment="TS_FORCE_NOISE_443=true"\n' > "$file" || return 1
- if systemctl daemon-reload && systemctl restart tailscaled && br40_ts_ready; then return 0; fi
+ if systemctl daemon-reload && systemctl restart tailscaled && br41_ready; then return 0; fi
  if [[ -n "$backup" ]]; then cp -a "$backup" "$file" || return 1; else rm -f "$file"; fi
  systemctl daemon-reload || true
  systemctl restart tailscaled || true
- echo 'Изменённый drop-in восстановлен. Это не общий сетевой откат.' >&2
  return 1
 }
-br40_ts_ipv4() {
+br41_ipv4() {
  local value url
- command -v curl >/dev/null || { echo 'Для IPv4-теста нужен curl.'; return 1; }
+ command -v curl >/dev/null || return 1
  for url in https://1.1.1.1/cdn-cgi/trace https://api.ipify.org; do
   value=$(curl -q --noproxy '*' -4 -fsS --connect-timeout 5 --max-time 12 "$url" 2>/dev/null) || continue
-  if python3 - "$value" <<'BR40_IP'
-import ipaddress,sys
+  if python3 - "$value" <<'BR41_IP'
+import sys,ipaddress
 s=sys.argv[1].strip();s=next((x[3:] for x in s.splitlines() if x.startswith('ip=')),s)
 try:
  a=ipaddress.ip_address(s);assert a.version==4 and a.is_global
 except (ValueError,AssertionError):sys.exit(1)
-print('IPv4 самого маршрутизатора: '+str(a))
-BR40_IP
+print('IPv4 маршрутизатора: '+str(a))
+BR41_IP
   then return 0; fi
  done
- echo 'IPv4 не работает. Проверьте exit node и его NAT. LAN пока не изменён.' >&2
+ echo 'Нет IPv4. Проверьте NAT exit node. LAN не применён.' >&2
  return 1
 }
-br40_exit_audit() {
- echo 'Диагностика локального IPv4 exit node (iptables). Правила не изменяются.'
- local rc=0 first
- sysctl net.ipv4.ip_forward || rc=1
- first=$(iptables -w 5 -S FORWARD 2>/dev/null | grep '^-A ' | head -n 1) || first=''
- echo "Первое правило FORWARD: $first"
- [[ "$first" == '-A FORWARD -j ts-forward' ]] || { echo 'Проверьте порядок ts-forward: возможен обход маркировки.'; rc=1; }
- iptables -w 5 -t nat -C POSTROUTING -j ts-postrouting 2>/dev/null || { echo 'Нет перехода в ts-postrouting.'; rc=1; }
- iptables -w 5 -t nat -C ts-postrouting -m mark --mark 0x40000/0xff0000 -j MASQUERADE 2>/dev/null || { echo 'Нет штатного IPv4 MASQUERADE.'; rc=1; }
- iptables -w 5 -S ts-forward || true
- iptables -w 5 -t nat -S POSTROUTING || true
- iptables -w 5 -t nat -S ts-postrouting || true
- echo 'Для nftables-backend результаты iptables недостаточны. Проверка LAN-клиента выполняется отдельно.'
- return "$rc"
+br41_exit_audit() {
+ echo 'Локальные правила Tailscale/NAT (iptables); изменений нет.'
+ sysctl net.ipv4.ip_forward
+ iptables -S FORWARD
+ iptables -S ts-forward || true
+ iptables -t nat -S POSTROUTING
+ iptables -t nat -S ts-postrouting || true
+ echo 'Наличие правил не доказывает роль exit node и не проверяет удалённый узел. Для nftables нужен отдельный анализ.'
 }
 
 br26_apply() {
@@ -6401,6 +6392,25 @@ br26_apply() {
  # Use a subshell so staged configuration cannot overwrite wizard variables.
  (
  source "$p/config"
+ DHCP_OWNER=${DHCP_OWNER:-managed}
+ [[ "$DHCP_OWNER" == existing || "$DHCP_OWNER" == managed ]] || exit 1
+ if [[ "$DHCP_OWNER" == existing ]]; then
+  systemctl is-active --quiet dnsmasq.service || { echo 'Нет работающего dnsmasq для сохранения'; exit 1; }
+  [[ $(systemctl is-enabled dnsmasq.service 2>/dev/null) == enabled ]] || { echo 'dnsmasq не enabled; сначала решите вопрос автозапуска.'; exit 1; }
+ fi
+ local old_dns_active=false old_dns_enabled=false dhcp_committed=false
+ systemctl is-active --quiet dnsmasq.service && old_dns_active=true
+ [[ $(systemctl is-enabled dnsmasq.service 2>/dev/null) == enabled ]] && old_dns_enabled=true
+ dhcp_restore_on_error() {
+  local rc=$?
+  if [[ "$rc" != 0 && "$DHCP_OWNER" == managed && "$old_dns_active" == true && "$dhcp_committed" == false ]]; then
+   systemctl disable --now bobarev-router-dhcp.service 2>/dev/null || true
+   [[ "$old_dns_enabled" != true ]] || systemctl enable dnsmasq.service || true
+   systemctl start dnsmasq.service || true
+   echo 'Возвращён старый DHCP/DNS. Полного отката маршрутов нет.' >&2
+  fi
+ }
+ trap dhcp_restore_on_error EXIT
  for dev in "${LANS[@]}" "$OUT"; do
   ip link show dev "$dev" >/dev/null 2>&1 || { echo "Конфигурация сохранена. Интерфейс $dev отсутствует; применение отложено."; exit 1; }
  done
@@ -6415,25 +6425,35 @@ br26_apply() {
  python3 "$p/routes.py" check "${networkd_pairs[@]}" || exit 1
  python3 "$p/networkd.py" check "${networkd_pairs[@]}" || exit 1
  if [[ "$OUT" == tailscale0 ]]; then
-  br40_ts_ready || exit 1
   if [[ -n "$EXIT_NODE" ]]; then
    tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true --accept-routes=false || exit 1
   else
    tailscale set --exit-node-allow-lan-access=true || exit 1
   fi
-  ts_wait_exit_node || { echo 'Нет default tailscale0; LAN пока не изменён'; exit 1; }
-  br40_ts_ipv4 || exit 1
+  br41_ready || exit 1
+  br41_ipv4 || exit 1
  fi
  echo '[2/6] Проверка пакетов и DHCP-конфигурации'
  apt-get install -y dnsmasq-base iptables iproute2 || exit 1
- dnsmasq --test --conf-file="$p/dhcp.conf" || exit 1
+ if [[ "$DHCP_OWNER" == managed ]]; then
+  dnsmasq --test --conf-file="$p/dhcp.conf" || exit 1
+ else
+  dnsmasq --test || exit 1
+ fi
  systemctl disable --now bobarev-router-watchdog.timer bobarev-tailscale-bootfix.timer 2>/dev/null || true
  systemctl stop bobarev-router-watchdog.service bobarev-tailscale-bootfix.service 2>/dev/null || true
  echo '[3/6] Применение LAN-конфигурации'
  systemctl stop bobarev-router-dhcp.service bobarev-router-v2.service 2>/dev/null || true
- if systemctl is-active --quiet dnsmasq.service; then
-  touch /etc/bobarev-router-dnsmasq-was-active
-  systemctl stop dnsmasq.service || exit 1
+ if [[ "$DHCP_OWNER" == managed && "$old_dns_active" == true ]]; then
+  local backup_dir
+  backup_dir=$(mktemp -d /root/bobarev-dhcp-backup.XXXXXX) || exit 1
+  cp -a /etc/dnsmasq.conf "$backup_dir/" || exit 1
+  [[ ! -d /etc/dnsmasq.d ]] || cp -a /etc/dnsmasq.d "$backup_dir/" || exit 1
+  [[ ! -f /var/lib/misc/dnsmasq.leases ]] || cp -a /var/lib/misc/dnsmasq.leases "$backup_dir/" || exit 1
+  echo "DHCP-бэкап: $backup_dir"
+  systemctl disable --now dnsmasq.service || exit 1
+ elif [[ "$DHCP_OWNER" == existing ]]; then
+  systemctl disable --now bobarev-router-dhcp.service || exit 1
  fi
  # Migrate the exact legacy rules owned by this module.
  if [[ -f /etc/bobarev-router-v2/config ]]; then
@@ -6469,10 +6489,11 @@ BR26_LEGACY
 [Unit]
 Description=Local IPv4 router
 After=network-online.target tailscaled.service ufw.service
-Wants=network-online.target
+Wants=network-online.target tailscaled.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+TimeoutStartSec=180s
 ExecStart=/usr/local/sbin/bobarev-router-v2 start
 ExecStop=/usr/local/sbin/bobarev-router-v2 stop
 [Install]
@@ -6498,13 +6519,26 @@ UNIT
  fi
  echo '[5/6] Запуск маршрутизатора и DHCP/DNS'
  systemctl daemon-reload || exit 1
- systemctl enable bobarev-router-v2.service bobarev-router-dhcp.service || exit 1
- if ! systemctl restart bobarev-router-v2.service || ! systemctl restart bobarev-router-dhcp.service; then
+ systemctl enable bobarev-router-v2.service || exit 1
+ if [[ "$DHCP_OWNER" == managed ]]; then
+  systemctl enable bobarev-router-dhcp.service || exit 1
+ else
+  systemctl disable bobarev-router-dhcp.service || exit 1
+ fi
+ if ! systemctl restart bobarev-router-v2.service; then
   journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
   echo 'Ошибка применения. Бэкапы и автоматический откат отключены.'; exit 1
  fi
+ if [[ "$DHCP_OWNER" == managed ]]; then
+  systemctl restart bobarev-router-dhcp.service || exit 1
+  sleep 2
+  systemctl is-active --quiet bobarev-router-dhcp.service || exit 1
+ else
+  systemctl is-active --quiet dnsmasq.service || exit 1
+ fi
  echo '[6/6] Проверка исходящего и обратного маршрутов'
  python3 /usr/local/sbin/bobarev-router-routes.py verify "${networkd_pairs[@]}" --out "$OUT" || exit 1
+ dhcp_committed=true
  rm -rf "$p"
  echo 'Применено. Маршруты в обе стороны проверены. Откройте сайт и проверьте IP с LAN-клиента.' 
  )
@@ -6512,7 +6546,7 @@ UNIT
 mod_router_sbc() {
  local choice=''
  while true; do
-  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 19 "${WT_WIDTH:-85}" 5 choice 1 'Статус' 2 'Настроить' 3 'Связь Tailscale / TCP 443' 4 'Диагностика NAT этого exit node' 0 'Назад' || return 0
+  smart_menu 'Режим локального маршрутизатора' 'Выберите действие.' 19 "${WT_WIDTH:-85}" 5 choice 1 'Статус' 2 'Настроить' 3 'Связь Tailscale / TCP 443' 4 'Локальные правила Tailscale/NAT' 0 'Назад' || return 0
   case "$choice" in
    0) return 0 ;;
    1) if [[ -f /etc/bobarev-router-v2/config ]]; then
@@ -6523,8 +6557,8 @@ mod_router_sbc() {
       else echo 'Маршрутизатор не настроен. Выберите «Настроить».'; fi
       pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
-   3) br40_ts_transport || true; pause_enter ;;
-   4) br40_exit_audit || true; pause_enter ;;
+   3) br41_transport || true; pause_enter ;;
+   4) br41_exit_audit || true; pause_enter ;;
   esac
  done
 }
@@ -6638,7 +6672,7 @@ BR29_OUTPUTS
  fi
  [[ "$out" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$out" != lo ]] || { echo 'Неверное имя выхода'; return 1; }
  if [[ "$out" == tailscale0 ]]; then
-  br40_ts_transport || return 1
+  br41_transport || return 1
   detected=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((p.get("HostName","")+" "+next((ip for ip in p.get("TailscaleIPs",[]) if ":" not in ip),"") for p in d.get("Peer",{}).values() if p.get("ExitNode")),"не выбран"))' 2>/dev/null) || detected='не определён'
   br26_input "Exit node сейчас: $detected. Пустое поле — оставить текущий. Для смены укажите IP или имя." '' node || return 0
   [[ "$node" != -* && "$node" != *[[:space:]]* ]] || return 1
@@ -6702,6 +6736,11 @@ BR29_POOL
   br26_input "LAN $dev: конец адресов, выдаваемых клиентам (DHCP)." "$last" last || return 0
   addrs+=("$addr");starts+=("$first");ends+=("$last")
  done
+ local dhcp_owner=managed
+ if systemctl is-active --quiet dnsmasq.service; then
+  smart_menu 'DHCP/DNS: владелец' 'Обнаружен работающий dnsmasq.service. Сохранение не меняет его файлы, аренды, DNS и MTU. Убедитесь, что выбранные LAN/адреса соответствуют его настройкам. Миграция меняет DNS/аренды/MTU по новому конфигу.' 20 "${WT_WIDTH:-85}" 2 dhcp_owner existing 'Сохранить существующий DHCP/DNS (рекомендуется)' managed 'Передать управление Bobarev Router' || return 0
+ fi
+ if [[ "$dhcp_owner" == managed ]]; then
  local -a dhcp_options=()
  if [[ $(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["dhcp"])' "$scan") == False ]]; then
   dhcp_options=(no 'Нет — сохранить ручную адресацию' yes 'Да — включить DHCP')
@@ -6709,6 +6748,10 @@ BR29_POOL
  smart_menu 'Режим локального маршрутизатора' 'Выдавать клиентам адреса автоматически? Прежний режим предложен первым.' 16 "${WT_WIDTH:-85}" 2 answer "${dhcp_options[@]}" || return 0
  [[ "$answer" == no ]] && dhcp=false
  br26_input 'DNS для клиентов: ранее настроенные адреса или стандартное предложение. Enter — принять.' "$dns" dns || return 0;dns=${dns// /}
+ else
+  dhcp=true
+  echo "Сохраняем dnsmasq.service. DNS/диапазоны/MTU в мастере не применяются к DHCP."
+ fi
  rows=$(python3 - "${lans[*]}" "${addrs[*]}" "${starts[*]}" "${ends[*]}" <<'BR26_ROWS'
 import sys,json
 print(json.dumps(list(zip(*(s.split() for s in sys.argv[1:])))))
@@ -6755,6 +6798,7 @@ BR26_VALIDATE
   printf 'STARTS=('; printf ' %q' "${starts[@]}"; printf ' )\n'
   printf 'ENDS=('; printf ' %q' "${ends[@]}"; printf ' )\n'
   printf 'OUT=%q\nGATEWAY=%q\nDHCP=%q\nEXIT_NODE=%q\n' "$out" "$gw" "$dhcp" "$node"
+  printf 'DHCP_OWNER=%q\n' "$dhcp_owner"
  } > "$p/config"
  {
   printf 'port=53\nbind-dynamic\nno-resolv\ndhcp-leasefile=/var/lib/misc/bobarev-router.leases\n'
@@ -7012,6 +7056,26 @@ clean() {
  done
 }
 if [[ ${1:-} == stop ]]; then clean; exit 0; fi
+# Guard forwarded LAN traffic during startup; local INPUT (DHCP/SSH) is unaffected.
+iptables -w 5 -N BR41_WAIT 2>/dev/null || iptables -w 5 -S BR41_WAIT >/dev/null
+ip6tables -w 5 -N BR41_WAIT 2>/dev/null || ip6tables -w 5 -S BR41_WAIT >/dev/null
+for lan in "${LANS[@]}"; do
+ iptables -w 5 -C BR41_WAIT -i "$lan" -j DROP 2>/dev/null || iptables -w 5 -A BR41_WAIT -i "$lan" -j DROP
+ ip6tables -w 5 -C BR41_WAIT -i "$lan" -j DROP 2>/dev/null || ip6tables -w 5 -A BR41_WAIT -i "$lan" -j DROP
+done
+while iptables -w 5 -D FORWARD -j BR41_WAIT 2>/dev/null; do :; done
+iptables -w 5 -I FORWARD 1 -j BR41_WAIT
+while ip6tables -w 5 -D FORWARD -j BR41_WAIT 2>/dev/null; do :; done
+ip6tables -w 5 -I FORWARD 1 -j BR41_WAIT
+if [[ "$OUT" == tailscale0 ]]; then
+ ready=false
+ for attempt in {1..60}; do
+  state=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null) || state=''
+  if [[ "$state" == Running ]] && ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default dev tailscale0([[:space:]]|$)'; then ready=true; break; fi
+  sleep 2
+ done
+ [[ "$ready" == true ]] || { echo 'Нет готового exit node за 120 секунд. LAN forwarding закрыт; DHCP не изменён.' >&2; exit 1; }
+fi
 # Missing custom interfaces are not created implicitly.
 for dev in "${LANS[@]}" "$OUT"; do ip link show dev "$dev" >/dev/null || { echo "Отсутствует интерфейс $dev. Сначала создайте его."; exit 1; }; done
 if [[ "$OUT" == tailscale0 ]]; then
@@ -7041,7 +7105,7 @@ for i in "${!LANS[@]}"; do
  iptables -w 5 -t nat -A BR2_NAT -s "$net" -o "$OUT" -j MASQUERADE
  ip6tables -w 5 -I FORWARD 1 -i "$lan" -j DROP
  done
-iptables -w 5 -I FORWARD 1 -j BR2_FWD
+iptables -w 5 -I FORWARD 2 -j BR2_FWD
 iptables -w 5 -t nat -I POSTROUTING 1 -j BR2_NAT
 iptables -w 5 -t mangle -I FORWARD 1 -j BR2_MSS
 python3 /usr/local/sbin/bobarev-router-routes.py ensure "${networkd_pairs[@]}"
@@ -7053,6 +7117,12 @@ if ! /usr/local/sbin/bobarev-router-performance; then
  echo 'ВНИМАНИЕ: профиль производительности применён частично; основная маршрутизация настроена.' >&2
 fi
 python3 /usr/local/sbin/bobarev-router-routes.py verify "${networkd_pairs[@]}" --out "$OUT"
+while iptables -w 5 -D FORWARD -j BR41_WAIT 2>/dev/null; do :; done
+while ip6tables -w 5 -D FORWARD -j BR41_WAIT 2>/dev/null; do :; done
+iptables -w 5 -F BR41_WAIT
+iptables -w 5 -X BR41_WAIT
+ip6tables -w 5 -F BR41_WAIT
+ip6tables -w 5 -X BR41_WAIT
 BR26_RUNTIME
  chmod 600 "$p/config" "$p/dhcp.conf" "$p/runtime" "$p/performance" "$p/networkd.py" "$p/routes.py"
  br26_apply
@@ -7107,7 +7177,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.40
+# BOBAREV SHELL 3.14.41
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -9897,7 +9967,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.40 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.41 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

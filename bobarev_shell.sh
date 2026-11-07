@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.66 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.67 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -3508,55 +3508,149 @@ EOF
 }
 
 cleanup_foreign_xray_exit() {
-    echo -e "${C_CYAN} === ОЧИСТКА НЕИСПОЛЬЗУЕМЫХ КОМПОНЕНТОВ (СЕРВЕР 2: ЧИСТЫЙ XRAY REALITY EXIT) ===${C_RESET}"
+    echo -e "${C_CYAN} === ОЧИСТКА НЕИСПОЛЬЗУЕМЫХ КОМПОНЕНТОВ (ТОЛЬКО СЕРВЕР 2: XRAY REALITY EXIT) ===${C_RESET}"
+    echo -e "${C_YELLOW} ВАЖНО: этот пункт никогда не отключает Caddy на Сервере 1 (вход NaiveProxy).${C_RESET}"
+    echo -e "${C_YELLOW} Порт 443 и токены Xray НЕ меняются. Никаких переездов не выполняется.${C_RESET}"
+    echo ""
 
-    local role=""
+    local role="" hostname_now=""
+    hostname_now="$(hostname 2>/dev/null || echo unknown)"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         role="${CASCADE_ROLE:-}"
     fi
 
-    if [ "$role" != "foreign_xray_exit" ]; then
-        echo -e "${C_YELLOW} Этот пункт предназначен только для Сервера 2 (роль: foreign_xray_exit).${C_RESET}"
-        echo -e "${C_YELLOW} Текущая роль: ${role:-не определена}.${C_RESET}"
-        pause_enter
-        return 0
-    fi
-
-    echo -e "${C_BLUE} Будут остановлены и отключены (без удаления файлов):${C_RESET}"
-    echo -e "   - caddy.service (если установлен)"
-    echo -e "   - hysteria-client.service (если установлен)"
-    echo -e "   - wg-quick@wg-cascade.service (если установлен)"
-    echo -e "   - bobarev-udp2raw.service (если установлен)"
+    echo -e "${C_BLUE} Имя сервера:${C_RESET} ${C_BOLD}${hostname_now}${C_RESET}"
+    echo -e "${C_BLUE} Сохранённая роль:${C_RESET} ${C_BOLD}${role:-не определена}${C_RESET}"
+    echo -e "${C_BLUE} Ожидаемая роль для очистки:${C_RESET} ${C_BOLD}foreign_xray_exit${C_RESET}"
     echo ""
-    if ! prompt_yn "Продолжить очистку неиспользуемых компонентов?" "false"; then
-        echo -e "${C_YELLOW} Отменено.${C_RESET}"
+
+    if [ "$role" != "foreign_xray_exit" ]; then
+        echo -e "${C_RED} ЗАБЛОКИРОВАНО: очистка разрешена только на Сервере 2 (foreign_xray_exit).${C_RESET}"
+        echo -e "${C_YELLOW} На Сервере 1 (ru_xray_entry) Caddy и локальный Xray-клиент защищены.${C_RESET}"
+        echo -e "${C_YELLOW} Ничего не остановлено и не отключено.${C_RESET}"
         pause_enter
         return 0
     fi
 
+    # Дополнительная проверка фактического конфига Xray: должен быть server (VLESS inbound), а не SOCKS client.
+    local xray_is_server=false
+    if [ -f /etc/xray/config.json ] && grep -q '"protocol"[[:space:]]*:[[:space:]]*"vless"' /etc/xray/config.json 2>/dev/null        && grep -q '"protocol"[[:space:]]*:[[:space:]]*"freedom"' /etc/xray/config.json 2>/dev/null; then
+        xray_is_server=true
+    fi
+
+    if [ "$xray_is_server" != "true" ]; then
+        echo -e "${C_RED} ЗАБЛОКИРОВАНО: конфигурация Xray не подтверждена как серверная (VLESS REALITY -> freedom).${C_RESET}"
+        echo -e "${C_YELLOW} Возможна роль входного узла или повреждённый/неопознанный конфиг.${C_RESET}"
+        echo -e "${C_YELLOW} Для безопасности очистка не выполняется. Ниже только диагностика.${C_RESET}"
+        echo ""
+        echo -e "${C_BLUE} Конфиг Xray:${C_RESET}"
+        if [ -f /etc/xray/config.json ]; then
+            sed -n '1,160p' /etc/xray/config.json
+        else
+            echo "  /etc/xray/config.json не найден"
+        fi
+        echo ""
+        echo -e "${C_BLUE} Слушатели 443:${C_RESET}"
+        ss -H -tlnp '( sport = :443 )' 2>/dev/null || true
+        pause_enter
+        return 0
+    fi
+
+    # Собираем список ТОЛЬКО действительно установленных и потенциально ненужных служб.
+    local -a candidates=()
+    local unit
     for unit in caddy.service hysteria-client.service 'wg-quick@wg-cascade.service' bobarev-udp2raw.service; do
         if systemctl list-unit-files "$unit" >/dev/null 2>&1 && [ -n "$(systemctl list-unit-files "$unit" 2>/dev/null)" ]; then
-            silent_run systemctl disable --now "$unit" || true
-            echo -e "${C_GREEN} Отключено: $unit${C_RESET}"
-        else
-            echo -e "${C_YELLOW} Не установлен: $unit (пропущено)${C_RESET}"
+            candidates+=("$unit")
         fi
     done
 
-    silent_run systemctl restart bobarev-xray.service || true
-    sleep 2
-
-    if systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_GREEN} Xray REALITY активен. Порт 443 теперь обслуживает только Xray.${C_RESET}"
-    else
-        echo -e "${C_RED} Внимание: bobarev-xray не активен после очистки.${C_RESET}"
-        journalctl -u bobarev-xray.service -n 30 --no-pager || true
+    if [ "${#candidates[@]}" -eq 0 ]; then
+        echo -e "${C_GREEN} Нечего очищать: дополнительные компоненты не установлены.${C_RESET}"
+        pause_enter
+        return 0
     fi
 
+    echo -e "${C_BLUE} Найдены следующие установленные компоненты:${C_RESET}"
+    local i
+    for i in "${!candidates[@]}"; do
+        local u="${candidates[$i]}"
+        local st
+        st="$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
+        echo -e "   $((i+1)). ${C_BOLD}${u}${C_RESET} — состояние: ${st}"
+    done
+    echo ""
+    echo -e "${C_YELLOW} ВНИМАНИЕ: отключение Caddy на этом сервере прекратит NaiveProxy/HTTPS-вход, если он здесь используется.${C_RESET}"
+    echo -e "${C_YELLOW} Продолжать можно только если ты уверен, что это именно Сервер 2 и Caddy здесь не нужен.${C_RESET}"
+    echo ""
+
+    if ! prompt_yn "Подтверждаю: это Сервер 2, и я хочу отключить перечисленные компоненты?" "false"; then
+        echo -e "${C_YELLOW} Отменено. Ничего не изменено.${C_RESET}"
+        pause_enter
+        return 0
+    fi
+
+    # Сохраняем исходное состояние и конфиги для восстановления.
+    local backup_dir="/var/lib/bobarev-shell/cleanup-backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+    {
+        echo "# BOBAREV CLEANUP BACKUP"
+        echo "# date: $(date -Is)"
+        echo "# host: $hostname_now"
+        echo "# role: $role"
+        echo ""
+        for u in "${candidates[@]}"; do
+            printf '%s %s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)" "$(systemctl is-enabled "$u" 2>/dev/null || echo unknown)"
+        done
+    } > "$backup_dir/services-state.txt"
+
+    for u in "${candidates[@]}"; do
+        if [ -f "/etc/systemd/system/${u%@*}.service" ] || [ -f "/lib/systemd/system/${u%@*}.service" ] || [ -f "/usr/lib/systemd/system/${u%@*}.service" ]; then
+            cp -a "/etc/systemd/system/${u%@*}.service" "$backup_dir/" 2>/dev/null || true
+        fi
+    done
+    [ -f /etc/caddy/Caddyfile ] && cp -a /etc/caddy/Caddyfile "$backup_dir/Caddyfile" 2>/dev/null || true
+    [ -f /etc/xray/config.json ] && cp -a /etc/xray/config.json "$backup_dir/xray-config.json" 2>/dev/null || true
+    [ -f /etc/default/bobarev-cascade ] && cp -a /etc/default/bobarev-cascade "$backup_dir/bobarev-cascade.env" 2>/dev/null || true
+    chmod -R go-rwx "$backup_dir" 2>/dev/null || true
+
+    echo -e "${C_BLUE} Резервная копия сохранена:${C_RESET} ${C_BOLD}${backup_dir}${C_RESET}"
+    echo ""
+
+    local changed=0
+    for u in "${candidates[@]}"; do
+        if systemctl disable --now "$u" >/dev/null 2>&1; then
+            if ! systemctl is-active --quiet "$u" 2>/dev/null; then
+                echo -e "${C_GREEN} Успешно отключено и остановлено: ${u}${C_RESET}"
+                changed=$((changed+1))
+            else
+                echo -e "${C_RED} Не удалось подтвердить остановку: ${u}. Оставлено как есть.${C_RESET}"
+            fi
+        else
+            echo -e "${C_RED} Команда disable --now завершилась с ошибкой: ${u}. Состояние не изменено принудительно.${C_RESET}"
+        fi
+    done
+
+    if [ "$changed" -gt 0 ]; then
+        silent_run systemctl daemon-reload || true
+        # Перезапускаем Xray, чтобы убедиться, что он продолжает держать выбранный порт.
+        silent_run systemctl restart bobarev-xray.service || true
+        sleep 2
+        if systemctl is-active --quiet bobarev-xray.service; then
+            echo -e "${C_GREEN} Xray REALITY активен. Выбранный порт и токены не изменялись.${C_RESET}"
+        else
+            echo -e "${C_RED} Внимание: bobarev-xray не активен после очистки. Проверь журнал.${C_RESET}"
+            journalctl -u bobarev-xray.service -n 30 --no-pager || true
+        fi
+    else
+        echo -e "${C_YELLOW} Ни один компонент не был изменён.${C_RESET}"
+    fi
+
+    echo ""
     echo -e "${C_BLUE} Текущие слушатели на 443:${C_RESET}"
-    ss -H -tlnp '( sport = :443 )' || true
+    ss -H -tlnp '( sport = :443 )' 2>/dev/null || true
     pause_enter
 }
 
@@ -3589,7 +3683,7 @@ manage_cascade_xray_menu() {
         "5" " Переключить выход: Чистый IP <-> WARP" \
         "6" " Показать токен подключения" \
         "7" " Остановить службы Xray" \
-        "8" " Очистить неиспользуемые компоненты (Сервер 2: чистый Xray exit)" \
+        "8" " Очистить неиспользуемые компоненты (только Сервер 2, порт 443 сохраняется)" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi

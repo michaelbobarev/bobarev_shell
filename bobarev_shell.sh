@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.65 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.66 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -3486,9 +3486,9 @@ EOF
     echo -e "${C_BLUE} Проверка выходного IP через локальный SOCKS5-мост Xray REALITY (127.0.0.1:10808)...${C_RESET}"
     local test_ip="" probe_url="" direct_ip=""
     for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org"; do
-        test_ip=$(curl -q -4 --noproxy "" --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 15 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]')
+        test_ip=$(curl -q -4 --noproxy '*' --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 12 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]')
         if [ -z "$test_ip" ]; then
-            test_ip=$(curl -q -4 --noproxy "" --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 15 "$probe_url" 2>/dev/null | tr -d '[:space:]')
+            test_ip=$(curl -q -4 --noproxy '*' --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 12 "$probe_url" 2>/dev/null | tr -d '[:space:]')
         fi
         if [ -n "$test_ip" ]; then break; fi
     done
@@ -3498,13 +3498,66 @@ EOF
         echo "journalctl -u bobarev-xray.service -n 100 --no-pager"
         return 1
     fi
-    direct_ip=$(curl -q -4 --noproxy '*' --connect-timeout 5 --max-time 15 https://api.ipify.org 2>/dev/null || echo "")
+    direct_ip=$(curl -q -4 --noproxy '*' --connect-timeout 5 --max-time 12 https://api.ipify.org 2>/dev/null || echo "")
     echo -e "\\n${C_GREEN} Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "   Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     if [ -n "$direct_ip" ] && [ "$test_ip" = "$direct_ip" ]; then
         echo -e "${C_YELLOW} Внимание: IP через SOCKS5 совпадает с прямым WAN. Проверьте маршрут Xray на Сервере 2.${C_RESET}"
     fi
     print_naive_shadowrocket_links
+}
+
+cleanup_foreign_xray_exit() {
+    echo -e "${C_CYAN} === ОЧИСТКА НЕИСПОЛЬЗУЕМЫХ КОМПОНЕНТОВ (СЕРВЕР 2: ЧИСТЫЙ XRAY REALITY EXIT) ===${C_RESET}"
+
+    local role=""
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        role="${CASCADE_ROLE:-}"
+    fi
+
+    if [ "$role" != "foreign_xray_exit" ]; then
+        echo -e "${C_YELLOW} Этот пункт предназначен только для Сервера 2 (роль: foreign_xray_exit).${C_RESET}"
+        echo -e "${C_YELLOW} Текущая роль: ${role:-не определена}.${C_RESET}"
+        pause_enter
+        return 0
+    fi
+
+    echo -e "${C_BLUE} Будут остановлены и отключены (без удаления файлов):${C_RESET}"
+    echo -e "   - caddy.service (если установлен)"
+    echo -e "   - hysteria-client.service (если установлен)"
+    echo -e "   - wg-quick@wg-cascade.service (если установлен)"
+    echo -e "   - bobarev-udp2raw.service (если установлен)"
+    echo ""
+    if ! prompt_yn "Продолжить очистку неиспользуемых компонентов?" "false"; then
+        echo -e "${C_YELLOW} Отменено.${C_RESET}"
+        pause_enter
+        return 0
+    fi
+
+    for unit in caddy.service hysteria-client.service 'wg-quick@wg-cascade.service' bobarev-udp2raw.service; do
+        if systemctl list-unit-files "$unit" >/dev/null 2>&1 && [ -n "$(systemctl list-unit-files "$unit" 2>/dev/null)" ]; then
+            silent_run systemctl disable --now "$unit" || true
+            echo -e "${C_GREEN} Отключено: $unit${C_RESET}"
+        else
+            echo -e "${C_YELLOW} Не установлен: $unit (пропущено)${C_RESET}"
+        fi
+    done
+
+    silent_run systemctl restart bobarev-xray.service || true
+    sleep 2
+
+    if systemctl is-active --quiet bobarev-xray.service; then
+        echo -e "${C_GREEN} Xray REALITY активен. Порт 443 теперь обслуживает только Xray.${C_RESET}"
+    else
+        echo -e "${C_RED} Внимание: bobarev-xray не активен после очистки.${C_RESET}"
+        journalctl -u bobarev-xray.service -n 30 --no-pager || true
+    fi
+
+    echo -e "${C_BLUE} Текущие слушатели на 443:${C_RESET}"
+    ss -H -tlnp '( sport = :443 )' || true
+    pause_enter
 }
 
 manage_cascade_xray_menu() {
@@ -3536,6 +3589,7 @@ manage_cascade_xray_menu() {
         "5" " Переключить выход: Чистый IP <-> WARP" \
         "6" " Показать токен подключения" \
         "7" " Остановить службы Xray" \
+        "8" " Очистить неиспользуемые компоненты (Сервер 2: чистый Xray exit)" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -3565,6 +3619,7 @@ manage_cascade_xray_menu() {
                 fi
                 pause_enter
                 ;;
+            8) cleanup_foreign_xray_exit ;;
             7)
                 if prompt_yn "Остановить и отключить службы Xray на этом сервере?" "false"; then
                     silent_run systemctl stop bobarev-xray.service

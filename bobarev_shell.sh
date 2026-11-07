@@ -3486,9 +3486,9 @@ EOF
     echo -e "${C_BLUE} Проверка выходного IP через локальный SOCKS5-мост Xray REALITY (127.0.0.1:10808)...${C_RESET}"
     local test_ip="" probe_url="" direct_ip=""
     for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org"; do
-        test_ip=$(curl -q -4 --noproxy '*' --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 12 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]')
+        test_ip=$(curl -q -4 --noproxy "" --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 15 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]')
         if [ -z "$test_ip" ]; then
-            test_ip=$(curl -q -4 --noproxy '*' --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 12 "$probe_url" 2>/dev/null | tr -d '[:space:]')
+            test_ip=$(curl -q -4 --noproxy "" --socks5-hostname 127.0.0.1:10808 --connect-timeout 5 --max-time 15 "$probe_url" 2>/dev/null | tr -d '[:space:]')
         fi
         if [ -n "$test_ip" ]; then break; fi
     done
@@ -3498,7 +3498,7 @@ EOF
         echo "journalctl -u bobarev-xray.service -n 100 --no-pager"
         return 1
     fi
-    direct_ip=$(curl -q -4 --noproxy '*' --connect-timeout 5 --max-time 12 https://api.ipify.org 2>/dev/null || echo "")
+    direct_ip=$(curl -q -4 --noproxy '*' --connect-timeout 5 --max-time 15 https://api.ipify.org 2>/dev/null || echo "")
     echo -e "\\n${C_GREEN} Каскад 3 (NaiveProxy -> Xray REALITY SOCKS5 -> Выход Зарубеж) успешно запущен!${C_RESET}"
     echo -e "   Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     if [ -n "$direct_ip" ] && [ "$test_ip" = "$direct_ip" ]; then

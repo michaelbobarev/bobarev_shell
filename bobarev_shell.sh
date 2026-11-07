@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.67 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.68 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -3510,7 +3510,7 @@ EOF
 cleanup_foreign_xray_exit() {
     echo -e "${C_CYAN} === ОЧИСТКА НЕИСПОЛЬЗУЕМЫХ КОМПОНЕНТОВ (ТОЛЬКО СЕРВЕР 2: XRAY REALITY EXIT) ===${C_RESET}"
     echo -e "${C_YELLOW} ВАЖНО: этот пункт никогда не отключает Caddy на Сервере 1 (вход NaiveProxy).${C_RESET}"
-    echo -e "${C_YELLOW} Порт 443 и токены Xray НЕ меняются. Никаких переездов не выполняется.${C_RESET}"
+    echo -e "${C_YELLOW} Порт 443 и токены Xray НЕ меняются. Никаких переездов и бэкапов не выполняется.${C_RESET}"
     echo ""
 
     local role="" hostname_now=""
@@ -3534,7 +3534,6 @@ cleanup_foreign_xray_exit() {
         return 0
     fi
 
-    # Дополнительная проверка фактического конфига Xray: должен быть server (VLESS inbound), а не SOCKS client.
     local xray_is_server=false
     if [ -f /etc/xray/config.json ] && grep -q '"protocol"[[:space:]]*:[[:space:]]*"vless"' /etc/xray/config.json 2>/dev/null        && grep -q '"protocol"[[:space:]]*:[[:space:]]*"freedom"' /etc/xray/config.json 2>/dev/null; then
         xray_is_server=true
@@ -3558,7 +3557,6 @@ cleanup_foreign_xray_exit() {
         return 0
     fi
 
-    # Собираем список ТОЛЬКО действительно установленных и потенциально ненужных служб.
     local -a candidates=()
     local unit
     for unit in caddy.service hysteria-client.service 'wg-quick@wg-cascade.service' bobarev-udp2raw.service; do
@@ -3592,33 +3590,6 @@ cleanup_foreign_xray_exit() {
         return 0
     fi
 
-    # Сохраняем исходное состояние и конфиги для восстановления.
-    local backup_dir="/var/lib/bobarev-shell/cleanup-backup-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$backup_dir"
-    {
-        echo "# BOBAREV CLEANUP BACKUP"
-        echo "# date: $(date -Is)"
-        echo "# host: $hostname_now"
-        echo "# role: $role"
-        echo ""
-        for u in "${candidates[@]}"; do
-            printf '%s %s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)" "$(systemctl is-enabled "$u" 2>/dev/null || echo unknown)"
-        done
-    } > "$backup_dir/services-state.txt"
-
-    for u in "${candidates[@]}"; do
-        if [ -f "/etc/systemd/system/${u%@*}.service" ] || [ -f "/lib/systemd/system/${u%@*}.service" ] || [ -f "/usr/lib/systemd/system/${u%@*}.service" ]; then
-            cp -a "/etc/systemd/system/${u%@*}.service" "$backup_dir/" 2>/dev/null || true
-        fi
-    done
-    [ -f /etc/caddy/Caddyfile ] && cp -a /etc/caddy/Caddyfile "$backup_dir/Caddyfile" 2>/dev/null || true
-    [ -f /etc/xray/config.json ] && cp -a /etc/xray/config.json "$backup_dir/xray-config.json" 2>/dev/null || true
-    [ -f /etc/default/bobarev-cascade ] && cp -a /etc/default/bobarev-cascade "$backup_dir/bobarev-cascade.env" 2>/dev/null || true
-    chmod -R go-rwx "$backup_dir" 2>/dev/null || true
-
-    echo -e "${C_BLUE} Резервная копия сохранена:${C_RESET} ${C_BOLD}${backup_dir}${C_RESET}"
-    echo ""
-
     local changed=0
     for u in "${candidates[@]}"; do
         if systemctl disable --now "$u" >/dev/null 2>&1; then
@@ -3635,7 +3606,6 @@ cleanup_foreign_xray_exit() {
 
     if [ "$changed" -gt 0 ]; then
         silent_run systemctl daemon-reload || true
-        # Перезапускаем Xray, чтобы убедиться, что он продолжает держать выбранный порт.
         silent_run systemctl restart bobarev-xray.service || true
         sleep 2
         if systemctl is-active --quiet bobarev-xray.service; then

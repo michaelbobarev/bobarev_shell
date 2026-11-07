@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.64 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.65 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.

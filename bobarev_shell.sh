@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.60 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.61 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -870,7 +870,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.60: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.61: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -913,7 +913,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.60: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.61: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -7628,7 +7628,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.60
+# BOBAREV SHELL 3.14.61
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -8333,8 +8333,19 @@ assert re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',sy
 assert re.fullmatch(r'[A-Za-z0-9_.+%-]+@[A-Za-z0-9.-]+',sys.argv[2]),'Неверный email'
 assert re.fullmatch(r'[A-Za-z0-9_-]{1,64}',sys.argv[3]),'Неверный пользователь'
 PY_INPUT
- pass=$(openssl rand -hex 16)
- [[ ${#pass} == 32 ]] || die 'Генератор пароля не сработал.'
+ # Сохраняем существующий пароль, если пользователь уже настроен ранее
+ # (чтобы ссылка NaiveProxy в Shadowrocket оставалась постоянной).
+ local existing_pass=''
+ if [[ -f /etc/naiveproxy/users.pass ]];then
+  existing_pass=$(awk -F: -v u="$user" '$1==u{print $2;exit}' /etc/naiveproxy/users.pass)
+ fi
+ if [[ -n $existing_pass ]];then
+  pass=$existing_pass
+  log "Пользователь '$user' уже существует — пароль сохранён, ссылка NaiveProxy остаётся прежней."
+ else
+  pass=$(openssl rand -hex 16)
+  [[ ${#pass} == 32 ]] || die 'Генератор пароля не сработал.'
+ fi
  for port in 80 443;do
   conflict=$(ss -H -lntup "sport = :$port" | grep -v '"caddy"' || true)
   [[ -z $conflict ]] || die "Порт $port занят: $conflict"
@@ -10542,7 +10553,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.60 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.61 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

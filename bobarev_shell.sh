@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.61 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.62 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -870,7 +870,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.61: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.62: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -913,7 +913,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.61: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.62: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -7628,7 +7628,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.61
+# BOBAREV SHELL 3.14.62
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -8261,7 +8261,7 @@ commit(){
  log 'Откройте НОВУЮ SSH-сессию по публичному IPv4 и проверьте NaiveProxy/Shadowrocket.'
  log 'Проверьте выходной IP через клиентский прокси. Серверный curl этого не заменяет.'
  log 'Введите KEEP после успешной проверки NaiveProxy/Shadowrocket. Автоматический откат — не ранее чем через 45 минут.'
- read -r -p 'Введите KEEP для подтверждения (ожидание без ограничения времени; автоматический откат не ранее чем через 45 минут): ' answer
+ answer=$(whiptail --title 'BOBAREV SHELL' --inputbox 'Введите KEEP для подтверждения (ожидание без ограничения времени; автоматический откат не ранее чем через 45 минут):' 10 60 '' 3>&1 1>&2 2>&3) || die 'Нет подтверждения.'
  [[ $answer == KEEP ]] || die 'Изменения не подтверждены.'
  exec 8>"$BASE/state.lock";flock -w 10 8
  [[ -f "$PENDING" && $(cat "$PENDING") == "$TX" && ! -f "$TX/restored" ]] || die 'Транзакция уже откатилась.'
@@ -8334,7 +8334,6 @@ assert re.fullmatch(r'[A-Za-z0-9_.+%-]+@[A-Za-z0-9.-]+',sys.argv[2]),'Невер
 assert re.fullmatch(r'[A-Za-z0-9_-]{1,64}',sys.argv[3]),'Неверный пользователь'
 PY_INPUT
  # Сохраняем существующий пароль, если пользователь уже настроен ранее
- # (чтобы ссылка NaiveProxy в Shadowrocket оставалась постоянной).
  local existing_pass=''
  if [[ -f /etc/naiveproxy/users.pass ]];then
   existing_pass=$(awk -F: -v u="$user" '$1==u{print $2;exit}' /etc/naiveproxy/users.pass)
@@ -8510,17 +8509,19 @@ apply(){
   echo '(список пуст — проверьте: tailscale status; возможно, Tailscale ещё не авторизован или Mullvad add-on не включён)'
  fi
  echo ''
- while true; do
-  read -r -p 'Введите IP/имя exit node из списка выше (Enter — показать список снова): ' NODE || die 'Отменено.'
-  if [[ -z $NODE ]];then
-   ts_list=$(tailscale exit-node list 2>&1) || true
-   echo ''
-   if [[ -n $ts_list ]];then printf '%s\n' "$ts_list";else echo '(список пуст — проверьте: tailscale status)';fi
-   echo ''
-   continue
-  fi
-  break
- done
+ # Выбор exit node в whiptail-меню (список выше остаётся в терминале для справки)
+ local ts_menu=() ts_ip ts_host
+ while read -r ts_ip ts_host _;do
+  [[ $ts_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || $ts_ip =~ ^[0-9a-fA-F:]+$ ]] || continue
+  [[ -z $ts_host ]] && ts_host="$ts_ip"
+  ts_menu+=("$ts_ip" "$ts_host")
+ done <<<"$ts_list"
+ if (( ${#ts_menu[@]} >= 2 ));then
+  NODE=$(whiptail --title 'BOBAREV SHELL — Выбор exit node' --menu 'Выберите exit node (список выше — в терминале):' 20 70 10 "${ts_menu[@]}" 3>&1 1>&2 2>&3) || die 'Отменено.'
+ else
+  NODE=$(ui_input 'Введите IP/имя exit node (список выше — в терминале):' '') || die 'Отменено.'
+ fi
+ [[ -z $NODE ]] && die 'Не выбран exit node.'
  [[ $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
  DIRECT_IP=$(probe_ip) || die 'Не определён прямой WAN IPv4; исходный интернет не подтверждён.'
  log "Прямой WAN IPv4: $DIRECT_IP"
@@ -10553,7 +10554,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.61 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.62 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

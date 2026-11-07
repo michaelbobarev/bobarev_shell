@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.52 (Hybrid Dual-Ingress WG & Mullvad DoT Gateway Edition)
+# Версия: 3.14.53 (Monolithic Fixed Edition: Xray/Hysteria Pinning/Router-v2 Sync)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -99,6 +99,15 @@ get_wan_if() {
 }
 
 DEFAULT_WAN_IF=$(get_wan_if)
+
+get_cpu_rps_mask() {
+    local ncpu
+    ncpu=$(nproc 2>/dev/null || echo 1)
+    [[ "$ncpu" =~ ^[0-9]+$ ]] || ncpu=1
+    (( ncpu < 1 )) && ncpu=1
+    (( ncpu > 64 )) && ncpu=64
+    python3 -c "print(hex((1 << $ncpu) - 1)[2:])" 2>/dev/null || printf '%x' $(( (1 << (ncpu > 16 ? 16 : ncpu)) - 1 ))
+}
 
 silent_run() { "$@" >/dev/null 2>&1 || true; }
 
@@ -402,7 +411,9 @@ flush_and_reload_nat() {
     if [ -x /usr/local/bin/bobarev-cascade-ru.sh ]; then
         /usr/local/bin/bobarev-cascade-ru.sh >/dev/null 2>&1 || true
     fi
-    if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
+    if [ -x /usr/local/sbin/bobarev-router-v2 ] && [ -f /etc/bobarev-router-v2/config ]; then
+        /usr/local/sbin/bobarev-router-v2 start >/dev/null 2>&1 || true
+    elif [ -x /usr/local/bin/bobarev-router-up.sh ]; then
         /usr/local/bin/bobarev-router-up.sh >/dev/null 2>&1 || true
     fi
     return 0
@@ -1016,7 +1027,7 @@ else
     sysctl -w net.ipv4.tcp_no_metrics_save=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_autocorking=0 >/dev/null 2>&1 || true
 fi
-WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
 if [ -n "$WAN_IF" ] && command -v tc &>/dev/null; then
     tc qdisc replace dev "$WAN_IF" root fq limit 30000 flow_limit 10000 2>/dev/null || true
 fi
@@ -1112,8 +1123,9 @@ setup_hybrid_wg_routing() {
         fi
     fi
 
-    local tmp_wg="/tmp/raw_wg0_input.conf"
-    rm -f "$tmp_wg"
+    local tmp_wg
+    tmp_wg=$(mktemp /root/.wg0_input.XXXXXX)
+    chmod 600 "$tmp_wg"
 
     if [ "$use_existing" = false ]; then
         whiptail --title "Конфигурация WireGuard" --msgbox "Сейчас откроется редактор nano.
@@ -1177,7 +1189,11 @@ PostUp = ip rule add sport 41641 lookup main priority 97
 PostUp = ip rule del sport $ssh_p lookup main priority 98 2>/dev/null || true
 PostUp = ip rule add sport $ssh_p lookup main priority 98
 
-# Д) Ответы Caddy клиентам Shadowrocket (порты 443 и 80) — уходят клиенту через физический шлюз
+# Д) Ответы на входящие соединения с физического интерфейса (CONNMARK + порты 443/80)
+PostUp = ip rule del fwmark 0x80000000/0x80000000 lookup main priority 94 2>/dev/null || true
+PostUp = ip rule add fwmark 0x80000000/0x80000000 lookup main priority 94
+PostUp = iptables -t mangle -C PREROUTING -i ${DEFAULT_WAN_IF:-ens3} -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark 0x80000000/0x80000000 2>/dev/null || iptables -t mangle -I PREROUTING 1 -i ${DEFAULT_WAN_IF:-ens3} -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark 0x80000000/0x80000000 2>/dev/null || true
+PostUp = iptables -t mangle -C OUTPUT -m connmark --mark 0x80000000/0x80000000 -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000 2>/dev/null || iptables -t mangle -A OUTPUT -m connmark --mark 0x80000000/0x80000000 -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000 2>/dev/null || true
 PostUp = ip rule del sport 443 lookup main priority 99 2>/dev/null || true
 PostUp = ip rule add sport 443 lookup main priority 99
 PostUp = ip rule del sport 80 lookup main priority 100 2>/dev/null || true
@@ -1208,6 +1224,9 @@ PostDown = ip rule del sport $ssh_p lookup main priority 98 2>/dev/null || true
 PostDown = ip rule del sport 41641 lookup main priority 97 2>/dev/null || true
 PostDown = ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null || true
 PostDown = ip rule del fwmark 51820 lookup main priority 95 2>/dev/null || true
+PostDown = ip rule del fwmark 0x80000000/0x80000000 lookup main priority 94 2>/dev/null || true
+PostDown = iptables -t mangle -D OUTPUT -m connmark --mark 0x80000000/0x80000000 -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000 2>/dev/null || true
+PostDown = iptables -t mangle -D PREROUTING -i ${DEFAULT_WAN_IF:-ens3} -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark 0x80000000/0x80000000 2>/dev/null || true
 PostDown = iptables -t mangle -D OUTPUT -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t mangle -D FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 PostDown = iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || true
@@ -1285,6 +1304,7 @@ disable_hybrid_wg_routing() {
     ip route flush table 150 2>/dev/null || true
     while ip rule del priority 30000 2>/dev/null; do :; done
     while ip rule del priority 1000 2>/dev/null; do :; done
+    while ip rule del fwmark 0x80000000/0x80000000 lookup main priority 94 2>/dev/null; do :; done
     while ip rule del fwmark 51820 lookup main priority 95 2>/dev/null; do :; done
     while ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null; do :; done
     while ip rule del sport 41641 lookup main priority 97 2>/dev/null; do :; done
@@ -1866,19 +1886,27 @@ ensure_udp2raw_installed() {
         fi
     fi
 
-    tar -xzf "${tmp_u2r}/udp2raw.tar.gz" -C "$tmp_u2r"
+    if ! tar -xzf "${tmp_u2r}/udp2raw.tar.gz" -C "$tmp_u2r" 2>/dev/null; then
+        rm -rf "$tmp_u2r"
+        echo -e "${C_RED} Ошибка распаковки архива udp2raw!${C_RESET}"
+        return 1
+    fi
     local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     local bin_name="udp2raw_amd64"
     if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
-        bin_name="udp2raw_arm"
+        if [ -f "${tmp_u2r}/udp2raw_arm64" ]; then
+            bin_name="udp2raw_arm64"
+        else
+            bin_name="udp2raw_arm"
+        fi
     fi
 
     if [ -f "${tmp_u2r}/${bin_name}" ]; then
-        cp "${tmp_u2r}/${bin_name}" "$UDP2RAW_BIN"
-        chmod +x "$UDP2RAW_BIN"
+        install -m 755 "${tmp_u2r}/${bin_name}" "$UDP2RAW_BIN"
     else
-        cp "${tmp_u2r}/udp2raw_amd64" "$UDP2RAW_BIN"
-        chmod +x "$UDP2RAW_BIN"
+        rm -rf "$tmp_u2r"
+        echo -e "${C_RED} Не найден подходящий бинарник udp2raw (${bin_name}) для архитектуры ${arch}!${C_RESET}"
+        return 1
     fi
     rm -rf "$tmp_u2r"
     echo -e "${C_GREEN} Движок побитовой маскировки udp2raw успешно установлен.${C_RESET}"
@@ -1931,10 +1959,8 @@ clean_duplicate_cascade_iptables() {
     local wan_dev=$(get_wan_if)
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     if [ -n "$wan_dev" ]; then
         while iptables -D FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
-        while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
         while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     fi
     for mss_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
@@ -2761,10 +2787,15 @@ SVC_EOF
         pub_ipv6=$(curl -6 -s --max-time 4 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
     fi
 
-    local bridge_token=$(printf '%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" | base64 -w0 2>/dev/null || printf '%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" | base64 | tr -d '\n\r ')
+    local cert_pin=""
+    if [ -s /etc/hysteria/server.crt ]; then
+        cert_pin=$(openssl x509 -noout -fingerprint -sha256 -in /etc/hysteria/server.crt 2>/dev/null | awk -F= '{print $2}' | tr -d '[:space:]' || true)
+    fi
+
+    local bridge_token=$(printf '%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" | base64 | tr -d '\n\r ')
     local bridge_token_v6=""
     if [ -n "$pub_ipv6" ]; then
-        bridge_token_v6=$(printf '%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" | base64 -w0 2>/dev/null || printf '%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" | base64 | tr -d '\n\r ')
+        bridge_token_v6=$(printf '%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" | base64 | tr -d '\n\r ')
     fi
 
     cat << EOF > /etc/default/bobarev-cascade
@@ -2772,6 +2803,7 @@ CASCADE_ROLE="foreign_hysteria_exit"
 FOREIGN_EXIT_MODE="$exit_mode"
 HYSTERIA_PORT="$h_port"
 HYSTERIA_PASS="$h_pass"
+HYSTERIA_CERT_PIN="$cert_pin"
 HYSTERIA_TOKEN="$bridge_token"
 HYSTERIA_TOKEN_V6="$bridge_token_v6"
 SERVER_PUB_IP="$pub_ip"
@@ -2810,8 +2842,8 @@ setup_cascade_hysteria_server1_ru() {
 
     local clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
     local decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\n\r' || echo "")
-    local s2_ip="" s2_port="" s2_pass=""
-    IFS='|' read -r s2_ip s2_port s2_pass <<< "$decoded"
+    local s2_ip="" s2_port="" s2_pass="" s2_pin=""
+    IFS='|' read -r s2_ip s2_port s2_pass s2_pin <<< "$decoded"
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ]; then
         echo -e "${C_RED} Ошибка: Неверный формат Токена Hysteria 2!${C_RESET}"
@@ -2863,13 +2895,21 @@ setup_cascade_hysteria_server1_ru() {
     if [[ "$s2_ip" =~ : ]]; then
         h_server_target="[${s2_ip}]:${s2_port}"
     fi
+    local tls_block="tls:
+  sni: www.bing.com
+  insecure: true"
+    if [ -n "${s2_pin:-}" ]; then
+        tls_block="tls:
+  sni: www.bing.com
+  insecure: false
+  pinSHA256: \"${s2_pin}\""
+        echo -e "${C_GREEN} Включена защита от MITM: привязка сертификата Сервера 2 (pinSHA256: ${s2_pin}).${C_RESET}"
+    fi
     cat << EOF > /etc/hysteria/client.yaml
 server: ${h_server_target}
 auth: "${s2_pass}"
 
-tls:
-  sni: www.bing.com
-  insecure: true
+${tls_block}
 
 quic:
   initStreamReceiveWindow: 16777216
@@ -3041,6 +3081,13 @@ ensure_xray_installed() {
         rm -rf "$tmp_xray"
         echo -e "${C_RED} Ошибка скачивания архива Xray-core с GitHub.${C_RESET}"
         return 1
+    fi
+    if curl -fsSL "${x_url}.dgst" -o "${tmp_xray}/xray.zip.dgst" 2>/dev/null; then
+        local exp_xray_sha=$(awk -F'= ' '/^SHA2-256=/{print $2; exit}' "${tmp_xray}/xray.zip.dgst" | tr -d '[:space:]' || true)
+        if [ -n "$exp_xray_sha" ] && ! verify_sha256 "${tmp_xray}/xray.zip" "$exp_xray_sha"; then
+            rm -rf "$tmp_xray"
+            return 1
+        fi
     fi
 
     unzip -qo "${tmp_xray}/xray.zip" -d "$tmp_xray"
@@ -3259,10 +3306,10 @@ setup_cascade_xray_server2_foreign() {
     local exit_mode="direct"
     [ "$exit_choice" = "2" ] && exit_mode="warp"
 
-    # Генерация ключей x25519, UUID и ShortId
+    # Генерация ключей x25519, UUID и ShortId (совместимо со старым Public key и новым Password в Xray v25/v26+)
     local keys=$(/usr/local/bin/xray x25519 2>/dev/null || true)
-    local x_priv=$(echo "$keys" | grep -i "Private" | awk '{print $NF}' | tr -d '[:space:]')
-    local x_pub=$(echo "$keys" | grep -i "Public" | awk '{print $NF}' | tr -d '[:space:]')
+    local x_priv=$(echo "$keys" | awk -F':' 'tolower($1) ~ /private/ {print $2; exit}' | tr -d '[:space:]')
+    local x_pub=$(echo "$keys" | awk -F':' 'tolower($1) ~ /public|password/ {print $2; exit}' | tr -d '[:space:]')
     local x_uuid=$(/usr/local/bin/xray uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
     local x_short_id=$(openssl rand -hex 8)
 
@@ -3954,14 +4001,15 @@ DOCKER_UFW_EOF
 
 configure_rps_for_interfaces() {
     local wan_if=$(get_wan_if)
+    local cpu_mask=$(get_cpu_rps_mask)
     [ -n "$wan_if" ] && ip link set dev "$wan_if" txqueuelen 10000 2>/dev/null || true
     for iface in wg-cascade warp tailscale0 $wan_if; do
         [ -z "$iface" ] && continue
         for qdir in /sys/class/net/"$iface"/queues/rx-*; do
-            [ -d "$qdir" ] && echo "ff" > "$qdir/rps_cpus" 2>/dev/null || true
+            [ -d "$qdir" ] && echo "$cpu_mask" > "$qdir/rps_cpus" 2>/dev/null || true
         done
         for tdir in /sys/class/net/"$iface"/queues/tx-*; do
-            [ -d "$tdir" ] && echo "ff" > "$tdir/xps_cpus" 2>/dev/null || true
+            [ -d "$tdir" ] && echo "$cpu_mask" > "$tdir/xps_cpus" 2>/dev/null || true
         done
     done
 }
@@ -3977,7 +4025,7 @@ while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|w
     [ "$tries" -ge 15 ] && exit 0
     sleep 2
 done
-NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
 if [ -n "$NETDEV" ]; then
     if systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null || [ -f /etc/systemd/system/bobarev-udp2raw.service ]; then
         # Для сырых сокетов udp2raw (PF_PACKET) склейка UDP GRO и аппаратный оффлоад TCP вызывают сбои инкапсуляции и дропы пакетов > MTU на virtio_net
@@ -4877,7 +4925,7 @@ mod_ufw() {
             silent_run ufw allow "${WG_CASCADE_PORT}/udp" comment 'WG Direct Cascade UDP'
             silent_run ufw allow "${WG_CASCADE_PORT}/tcp" comment 'WG Direct Cascade FakeTCP'
         fi
-        if [ -n "${HYSTERIA_PORT:-}" ] && systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
+        if [ -n "${HYSTERIA_PORT:-}" ] && { [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] || systemctl is-active --quiet hysteria-server.service 2>/dev/null; }; then
             silent_run ufw allow "${HYSTERIA_PORT}/udp" comment 'Hysteria 2 QUIC UDP'
             silent_run ufw allow "${HYSTERIA_PORT}/tcp" comment 'Hysteria 2 TCP'
         fi
@@ -4886,7 +4934,23 @@ mod_ufw() {
         fi
     fi
 
-    if [ -f /etc/default/bobarev-router ]; then
+    if [ -r /etc/bobarev-router-v2/config ]; then
+        (
+            # shellcheck disable=SC1091
+            source /etc/bobarev-router-v2/config
+            for r_lan in "${LANS[@]}"; do
+                [ -z "$r_lan" ] && continue
+                [ "${DHCP:-true}" = "true" ] && silent_run ufw allow in on "$r_lan" to any port 67 proto udp comment 'LAN DHCP'
+                silent_run ufw allow in on "$r_lan" to any port 53 proto udp comment 'LAN DNS UDP'
+                silent_run ufw allow in on "$r_lan" to any port 53 proto tcp comment 'LAN DNS TCP'
+                if [ -n "${OUT:-}" ]; then
+                    silent_run ufw route allow in on "$r_lan" out on "$OUT" comment "LAN $r_lan to $OUT"
+                    silent_run ufw route allow in on "$OUT" out on "$r_lan" comment "$OUT to LAN $r_lan"
+                fi
+            done
+            echo -e "${C_BLUE} Восстановлены правила UFW для локального маршрутизатора v2 (LAN: ${LANS[*]} -> ${OUT:-N/A}).${C_RESET}"
+        )
+    elif [ -f /etc/default/bobarev-router ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-router
         if [ -n "${ROUTER_LAN_IF:-}" ] && [ -n "${ROUTER_OUT_IF:-}" ]; then
@@ -4952,7 +5016,9 @@ mod_ufw() {
     if [ -x /usr/local/bin/bobarev-cascade-ru.sh ]; then
         /usr/local/bin/bobarev-cascade-ru.sh || true
     fi
-    if [ -x /usr/local/bin/bobarev-router-up.sh ]; then
+    if [ -x /usr/local/sbin/bobarev-router-v2 ] && [ -f /etc/bobarev-router-v2/config ]; then
+        /usr/local/sbin/bobarev-router-v2 start || true
+    elif [ -x /usr/local/bin/bobarev-router-up.sh ]; then
         /usr/local/bin/bobarev-router-up.sh || true
     fi
     echo -e "${C_GREEN} Межсетевой экран (UFW) включен и активно защищает систему.${C_RESET}"
@@ -5174,7 +5240,7 @@ ts42_exit_select() {
  [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || return 1
  nm_yes "Выбрать $node сейчас и восстанавливать его при загрузке? Изменится интернет этого устройства. При отказе WAN fallback не будет." || return 1
  if [[ -r /etc/bobarev-router-v2/config ]]; then
-  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config | cut -d= -f2- | tr -d '"')
+  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
   echo 'Если локальный маршрутизатор имеет собственный EXIT_NODE, выберите тот же узел в его мастере: иначе при старте его настройка имеет приоритет.'
  fi
  ts43_install_exit_restore "$node" || return 1
@@ -5205,8 +5271,8 @@ ts43_consistency() {
  local exit_now router_out='' router_exit='' route
  exit_now=$(ts42_current_exit) || exit_now=''
  if [[ -r /etc/bobarev-router-v2/config ]]; then
-  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config | cut -d= -f2- | tr -d '"')
-  router_exit=$(grep -E '^EXIT_NODE=' /etc/bobarev-router-v2/config | cut -d= -f2- | tr -d '"')
+  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+  router_exit=$(grep -E '^EXIT_NODE=' /etc/bobarev-router-v2/config 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
  fi
  route=$(ip route get 1.1.1.1 2>/dev/null || true)
  echo "Текущий exit node Tailscale: ${exit_now:-нет}"
@@ -5558,7 +5624,7 @@ mod_logging_manager() {
     if [ -f /etc/systemd/system/clean-logs-boot.service ] || [ -f /usr/local/bin/disable-logging.sh ]; then
         cur_mode=" Отключены (Stealth)"
     elif grep -qE "^\s*SystemMaxUse=" /etc/systemd/journald.conf 2>/dev/null; then
-        local cur_lim=$(grep -E "^\s*SystemMaxUse=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+        local cur_lim=$(grep -E "^\s*SystemMaxUse=" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
         cur_mode=" Ограничены (${cur_lim})"
     fi
     
@@ -6351,7 +6417,25 @@ mod_server_audit() {
             echo -e "   Трансляция NAT на выходе:  ${C_BLUE}  Выходной интерфейс не определён; проверка не выполнена${C_RESET}"
         fi
 
-        if [ -f /etc/default/bobarev-router ]; then
+        if [ -r /etc/bobarev-router-v2/config ]; then
+            (
+                # shellcheck disable=SC1091
+                source /etc/bobarev-router-v2/config
+                local r_lan="${LANS[*]:-не задан}"
+                local r_ip="${ADDRS[*]:-не задан}"
+                local r_out="${OUT:-не задан}"
+                local r_out_human="${C_GREEN}Через сетевой канал $r_out${C_RESET}"
+                case "$r_out" in
+                    wg*)        r_out_human="${C_GREEN} Через защищенный туннель WireGuard ($r_out)${C_RESET}" ;;
+                    tailscale0) r_out_human="${C_GREEN} Через закрытую сеть Tailscale (Exit Node: ${EXIT_NODE:-авто})${C_RESET}" ;;
+                    tun*|utun*) r_out_human="${C_GREEN} Через прокси-туннель ($r_out)${C_RESET}" ;;
+                    "$wan_if")  r_out_human="${C_BLUE} Напрямую через провайдера ($r_out, без VPN)${C_RESET}" ;;
+                esac
+                echo -e "   Режим локального роутера:  ${C_GREEN} Активен v2 (LAN: $r_lan, шлюз: $r_ip)${C_RESET}"
+                echo -e "   Интернет для клиентов LAN: $r_out_human"
+                echo -e "   Защита от утечки IP:       ${C_GREEN} Включена (изолированная таблица + BR42_WAIT + unreachable metric)${C_RESET}"
+            )
+        elif [ -f /etc/default/bobarev-router ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-router
             local r_lan="${ROUTER_LAN_IF:-не задан}"
@@ -6678,6 +6762,7 @@ br26_apply() {
   [[ ! -d /etc/dnsmasq.d ]] || cp -a /etc/dnsmasq.d "$bd/" || exit 1
   [[ ! -f /var/lib/misc/dnsmasq.leases ]] || cp -a /var/lib/misc/dnsmasq.leases "$bd/" || exit 1
   echo "DHCP backup: $bd"
+  touch /etc/bobarev-router-dnsmasq-was-active
   systemctl disable --now dnsmasq.service || exit 1
  elif [[ "$DHCP_OWNER" == existing ]]; then
   systemctl disable --now bobarev-router-dhcp.service || exit 1
@@ -6801,7 +6886,11 @@ for iface in $ifaces; do
  for q in /sys/class/net/\$iface/queues/tx-*/xps_cpus; do
   [[ -e "\$q" ]] && echo "$cpu_mask" > "\$q" 2>/dev/null || true
  done
- tc qdisc replace dev "\$iface" root fq_codel 2>/dev/null || true
+ if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")" = "bbr" ]; then
+  tc qdisc replace dev "\$iface" root fq limit 30000 flow_limit 10000 2>/dev/null || tc qdisc replace dev "\$iface" root fq_codel 2>/dev/null || true
+ else
+  tc qdisc replace dev "\$iface" root fq_codel 2>/dev/null || true
+ fi
 done
 BR49_NETPERF
       chmod 700 "$bin" || return 1
@@ -7141,6 +7230,7 @@ source /etc/bobarev-router-v2/config
 all_devs=("${LANS[@]}" "$OUT")
 while read -r dev; do [[ -n "$dev" ]] && all_devs+=("$dev"); done < <(ip -4 route show table main default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
 [[ -d /sys/class/net/tailscale0 ]] && all_devs+=(tailscale0)
+cpu_mask=$(python3 -c "import os; n=os.cpu_count() or 1; print(hex((1<<min(max(n,1),64))-1)[2:])" 2>/dev/null || echo "f")
 declare -A seen=()
 for dev in "${all_devs[@]}"; do
  [[ -n "$dev" && "$dev" != lo && -z "${seen[$dev]:-}" ]] || continue
@@ -7149,11 +7239,11 @@ for dev in "${all_devs[@]}"; do
  if ! ip link set dev "$dev" txqueuelen 10000; then profile_errors=1; fi
  for q in /sys/class/net/"$dev"/queues/rx-*; do
   [[ -d "$q" && -e "$q/rps_cpus" ]] || continue
-  if ! { printf 'f\n' > "$q/rps_cpus"; } 2>/dev/null; then echo "RPS недоступен: $q" >&2; profile_errors=1; fi
+  if ! { printf '%s\n' "$cpu_mask" > "$q/rps_cpus"; } 2>/dev/null; then echo "RPS недоступен: $q" >&2; profile_errors=1; fi
  done
  for q in /sys/class/net/"$dev"/queues/tx-*; do
   [[ -d "$q" && -e "$q/xps_cpus" ]] || continue
-  if ! { printf 'f\n' > "$q/xps_cpus"; } 2>/dev/null; then echo "XPS недоступен: $q" >&2; profile_errors=1; fi
+  if ! { printf '%s\n' "$cpu_mask" > "$q/xps_cpus"; } 2>/dev/null; then echo "XPS недоступен: $q" >&2; profile_errors=1; fi
  done
  done
 if ! iptables -w 5 -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
@@ -8154,7 +8244,14 @@ build_caddy(){
  temp=$(mktemp -d "$TX/caddy-build-XXXXXX")
  arch=$(dpkg --print-architecture)
  case $arch in amd64) sha=$GO_SHA256_AMD64;;arm64) sha=$GO_SHA256_ARM64;;*) die 'Поддерживаются amd64/arm64.';;esac
- if ! command -v go >/dev/null || ! go version | grep -F "go${GO_VERSION_PIN}" >/dev/null;then
+ local need_go_dl=1
+ if command -v go >/dev/null;then
+  local gver gmaj gmin
+  gver=$(go version 2>/dev/null | grep -oP 'go\K[0-9]+\.[0-9]+' || echo "0.0")
+  gmaj=${gver%%.*}; gmin=${gver#*.}
+  if (( gmaj > 1 || (gmaj == 1 && gmin >= 25) ));then need_go_dl=0;fi
+ fi
+ if (( need_go_dl == 1 ));then
   curl -q --proto '=https' -fSL --retry 2 --connect-timeout 10 --max-time 300 "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" -o "$temp/go.tar.gz"
   actual=$(sha256sum "$temp/go.tar.gz" | awk '{print $1}')
   [[ $actual == "$sha" ]] || die 'SHA256 Go не совпал с pin исходника; сборка остановлена.'
@@ -8567,7 +8664,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/xray /etc/systemd/system/bobarev-xray.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/hysteria /etc/xray /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -8588,7 +8685,11 @@ mod_backup_manager() {
             tar -xzf "$import_path" -C / 2>/dev/null
             silent_run systemctl daemon-reload 2>/dev/null || true
             sysctl --system >/dev/null 2>&1 || true
-            [ -x /usr/local/bin/bobarev-router-up.sh ] && /usr/local/bin/bobarev-router-up.sh
+            if [ -x /usr/local/sbin/bobarev-router-v2 ] && [ -f /etc/bobarev-router-v2/config ]; then
+                silent_run systemctl restart bobarev-router-v2.service
+            elif [ -x /usr/local/bin/bobarev-router-up.sh ]; then
+                /usr/local/bin/bobarev-router-up.sh
+            fi
             [ -x /usr/local/bin/bobarev-cascade-ru.sh ] && /usr/local/bin/bobarev-cascade-ru.sh
             [ -f /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
             is_naive_active && silent_run systemctl restart caddy.service
@@ -9258,7 +9359,7 @@ run_realtime_fail_safe_recorder() {
                 echo ">>> [СЭМПЛ #${SAMPLE_NUM} | Время: $(date +%H:%M:%S) (+$(( $(date +%s) - RT_START_EPOCH ))s)] <<<"
                 echo "[Активные TCP-соединения с ненулевой очередью или трафиком]:"
                 if [ -n "$LIVE_FILTER" ]; then
-                    CLEAN_IP=$(echo "$LIVE_FILTER" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -n 1)
+                    CLEAN_IP=$(echo "$LIVE_FILTER" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -n 1 || true)
                     if [ -n "$CLEAN_IP" ]; then
                         ss -tin state established | grep -A 1 -E "${CLEAN_IP}|10\.200\.200\.|100\.|172\.16\.|:443 " | head -n 40 || echo "  (нет активных TCP-соединений каскада в эту секунду)"
                     else
@@ -9616,8 +9717,13 @@ nm_reload_caddy() {
 
 nm_prompt() {
  local value
- IFS= read -r -p "$1 [$2]: " value || return 1
- printf -v "$3" '%s' "${value:-$2}"
+ if command -v whiptail >/dev/null 2>&1 && [[ -t 0 ]]; then
+  value=$(whiptail --inputbox "$1" 11 "${WT_WIDTH:-85}" "$2" 3>&1 1>&2 2>&3) || return 1
+  printf -v "$3" '%s' "${value:-$2}"
+ else
+  IFS= read -r -p "$1 [$2]: " value || return 1
+  printf -v "$3" '%s' "${value:-$2}"
+ fi
 }
 nm_state() { systemctl is-active "$1.service" 2>/dev/null || true; }
 nm_detect_role() {
@@ -9743,7 +9849,15 @@ nm_apply() {
  if [[ "$role" == 1 ]]; then (umask 077; printf '%s\n' "$NM_LOCAL" > /etc/naiveproxy/mesh-upstream.port); fi
 }
 
-nm_yes() { local answer; nm_prompt "$1 Введите ДА" нет answer || return 1; [[ "$answer" == ДА || "$answer" == да || "$answer" == YES ]]; }
+nm_yes() {
+ if command -v whiptail >/dev/null 2>&1 && [[ -t 0 ]]; then
+  whiptail --yesno "$1" 12 "${WT_WIDTH:-85}" --defaultno
+  return $?
+ fi
+ local answer
+ nm_prompt "$1 Введите ДА" нет answer || return 1
+ [[ "$answer" == ДА || "$answer" == да || "$answer" == YES ]]
+}
 nm_bound() {
  [[ -f /etc/naiveproxy/mesh-upstream.port || -f /etc/naiveproxy/mesh-paused ]] && return 0
  if [[ "$(nm_state naive-mesh-bridge)" == active || "$(nm_state gost-mesh)" == active ]]; then

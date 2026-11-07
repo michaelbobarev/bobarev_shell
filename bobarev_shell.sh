@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.58 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.59 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -870,7 +870,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.58: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.59: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -913,7 +913,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.58: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.59: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -7628,7 +7628,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.58
+# BOBAREV SHELL 3.14.59
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -8491,7 +8491,13 @@ apply(){
  install_dependencies
  echo ''
  echo 'Доступные exit node (Mullvad и другие):'
- tailscale exit-node list
+ local ts_list=''
+ ts_list=$(tailscale exit-node list 2>&1) || true
+ if [[ -n $ts_list ]];then
+  printf '%s\n' "$ts_list"
+ else
+  echo '(список пуст — проверьте: tailscale status; возможно, Tailscale ещё не авторизован или Mullvad add-on не включён)'
+ fi
  echo ''
  NODE=$(ui_input 'Выберите IP/имя exit node из списка выше:' '') || die 'Отменено.'
  [[ -z $NODE ]] && die 'Не выбран exit node.'
@@ -10527,7 +10533,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.58 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.59 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

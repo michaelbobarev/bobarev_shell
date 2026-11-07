@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.68 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.69 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -870,7 +870,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.64: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.69: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -913,7 +913,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.64: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.69: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -3560,7 +3560,7 @@ cleanup_foreign_xray_exit() {
     local -a candidates=()
     local unit
     for unit in caddy.service hysteria-client.service 'wg-quick@wg-cascade.service' bobarev-udp2raw.service; do
-        if systemctl list-unit-files "$unit" >/dev/null 2>&1 && [ -n "$(systemctl list-unit-files "$unit" 2>/dev/null)" ]; then
+        if systemctl is-active --quiet "$unit" 2>/dev/null || systemctl is-enabled --quiet "$unit" 2>/dev/null || [ -f "/etc/systemd/system/$unit" ]; then
             candidates+=("$unit")
         fi
     done
@@ -3645,7 +3645,7 @@ manage_cascade_xray_menu() {
         fi
 
         local c_choice
-        if ! smart_menu " Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
+        if ! smart_menu " Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 21 $WT_WIDTH 9 "c_choice" \
         "1" " Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
         "2" " Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
         "3" " Управление пользователями NaiveProxy" \
@@ -5050,6 +5050,9 @@ mod_ufw() {
         fi
         if [ -n "${XRAY_PORT:-}" ] && [ "${CASCADE_ROLE:-}" = "foreign_xray_exit" ]; then
             silent_run ufw allow "${XRAY_PORT}/tcp" comment 'Xray REALITY TCP'
+        fi
+        if [ -n "${MULLVAD_VLESS_PORT:-}" ]; then
+            silent_run ufw allow "${MULLVAD_VLESS_PORT}/tcp" comment 'Xray VLESS REALITY Mullvad'
         fi
     fi
 
@@ -6615,10 +6618,22 @@ mod_server_audit() {
         if [[ -r /etc/default/bobarev-cascade ]]; then
             audit_saved_role=$(sed -n 's/^CASCADE_ROLE="\([a-zA-Z0-9_]*\)"$/\1/p' /etc/default/bobarev-cascade | head -n 1)
         fi
+        local audit_out_mode=""
+        if [[ -r /etc/default/bobarev-cascade ]]; then
+            audit_out_mode=$(sed -n 's/^NAIVE_OUT_MODE="\([a-zA-Z0-9_]*\)"$/\1/p' /etc/default/bobarev-cascade | head -n 1)
+        fi
         case "$audit_saved_role" in
             ru_hysteria_entry) cascade_status="${C_BLUE}NaiveProxy запущен; сохранена настройка каскада Hysteria 2${C_RESET}" ;;
             ru_xray_entry) cascade_status="${C_BLUE}NaiveProxy запущен; сохранена настройка каскада Xray REALITY${C_RESET}" ;;
-            standalone_naive) cascade_status="${C_BLUE}NaiveProxy запущен в автономной конфигурации; фактический внешний IP не проверен${C_RESET}" ;;
+            standalone_naive)
+                if [ "$audit_out_mode" = "mullvad_ts" ] && systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
+                    cascade_status="${C_GREEN}Шлюз Mullvad Exit Node (NaiveProxy + VLESS-REALITY активны)${C_RESET}"
+                elif [ "$audit_out_mode" = "mullvad_ts" ]; then
+                    cascade_status="${C_GREEN}Шлюз Mullvad Exit Node (NaiveProxy активен)${C_RESET}"
+                else
+                    cascade_status="${C_BLUE}NaiveProxy запущен в автономной конфигурации; фактический внешний IP не проверен${C_RESET}"
+                fi
+                ;;
             *) cascade_status="${C_BLUE}NaiveProxy запущен; направление выхода по этой проверке не определено${C_RESET}" ;;
         esac
     elif is_wg_cascade_active && is_warp_active; then
@@ -7747,7 +7762,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.64
+# BOBAREV SHELL 3.14.69
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7818,7 +7833,7 @@ transaction(){
  mkdir -p "$BASE/transactions"
  TX=$(mktemp -d "$BASE/transactions/tx-$(date +%Y%m%d-%H%M%S)-XXXXXX")
  chmod 700 "$TX"
- for p in /etc/ufw /etc/default/ufw /etc/resolv.conf /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d /etc/caddy /etc/naiveproxy /etc/default/bobarev-cascade /usr/local/bin/caddy /etc/systemd/system/caddy.service /etc/systemd/system/naive-return-route.service /usr/local/sbin/bobarev-mullvad-return-route.sh /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service "$CFG" "$BASE/client-links.txt"; do snap_file "$p"; done
+ for p in /etc/ufw /etc/default/ufw /etc/resolv.conf /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d /etc/caddy /etc/naiveproxy /etc/xray /etc/default/bobarev-cascade /usr/local/bin/caddy /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/naive-return-route.service /usr/local/sbin/bobarev-mullvad-return-route.sh /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service "$CFG" "$BASE/client-links.txt" "$BASE/vless-links.txt"; do snap_file "$p"; done
  for u in ufw.service caddy.service systemd-resolved.service naive-return-route.service bobarev-shell-return.service bobarev-shell-dns.service; do unit_state "$u"; done
  if command -v resolvectl >/dev/null;then
   python3 - "$TX" "$WAN" <<'PY_LINK_SNAPSHOT'
@@ -8382,7 +8397,7 @@ PY_EXIT
 }
 renew_watchdog(){
  mkdir -p /run/systemd/system/bobarev-shell-rollback.timer.d
- printf '[Timer]\nOnActiveSec=\nOnActiveSec=5min\n' > /run/systemd/system/bobarev-shell-rollback.timer.d/window.conf
+ printf '[Timer]\nOnActiveSec=\nOnActiveSec=45min\n' > /run/systemd/system/bobarev-shell-rollback.timer.d/window.conf
  systemctl daemon-reload;systemctl restart bobarev-shell-rollback.timer
 }
 commit(){
@@ -8562,7 +8577,12 @@ ProtectSystem=full
 [Install]
 WantedBy=multi-user.target
 UNIT_CADDY
+ local saved_vless_p=""
+ if [[ -f /etc/default/bobarev-cascade ]]; then
+  saved_vless_p=$(awk -F= '/^MULLVAD_VLESS_PORT=/{gsub(/["'"'"']/, "", $2); print $2; exit}' /etc/default/bobarev-cascade 2>/dev/null || true)
+ fi
  printf 'CASCADE_ROLE=%q\nNAIVE_DOMAIN=%q\nNAIVE_EMAIL=%q\nNAIVE_OUT_MODE=%q\n' standalone_naive "$domain" "$email" mullvad_ts > /etc/default/bobarev-cascade
+ [[ -n "$saved_vless_p" ]] && printf 'MULLVAD_VLESS_PORT=%q\n' "$saved_vless_p" >> /etc/default/bobarev-cascade
  systemctl daemon-reload;systemctl enable caddy.service;systemctl restart caddy.service
  local http_code="" verified=0
  for n in {1..30};do
@@ -8744,11 +8764,22 @@ setup_vless_reality_mullvad_inbound() {
  ensure_xray_installed || return 1
  local x_port="8443"
  prompt_default "1/2. Введите TCP-порт для VLESS-REALITY (например 8443, чтобы не занимать 443 у NaiveProxy):" "$x_port" x_port
- [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ] && return 0
+ if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
  x_port="${x_port//[^0-9]/}"
+ if [ -z "$x_port" ] || [ "$x_port" -lt 1 ] || [ "$x_port" -gt 65535 ]; then
+  echo -e "${C_RED} Ошибка: укажите корректный TCP-порт (1..65535).${C_RESET}"
+  return 1
+ fi
+ if { [ "$x_port" = "443" ] || [ "$x_port" = "80" ]; } && systemctl is-active --quiet caddy.service 2>/dev/null; then
+  echo -e "${C_RED} Порт ${x_port}/tcp уже используется службой NaiveProxy (Caddy)! Выберите другой порт (например, 8443).${C_RESET}"
+  return 1
+ fi
+ if ! check_required_ports_free "foreign" "$x_port"; then
+  return 1
+ fi
  local x_sni="gateway.icloud.com"
  prompt_default "2/2. Введите SNI-домен для маскировки REALITY (TLS 1.3):" "$x_sni" x_sni
- [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ] && return 0
+ if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
 
  local keys=$(/usr/local/bin/xray x25519 2>/dev/null || true)
  local x_priv=$(echo "$keys" | awk -F':' 'tolower($1) ~ /private/ {print $2; exit}' | tr -d '[:space:]')
@@ -8756,24 +8787,53 @@ setup_vless_reality_mullvad_inbound() {
  local x_uuid=$(/usr/local/bin/xray uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
  local x_short_id=$(openssl rand -hex 8)
 
- [ -z "$x_priv" ] || [ -z "$x_pub" ] && { echo -e "${C_RED} Ошибка генерации ключей x25519!${C_RESET}"; return 1; }
+ if [ -z "$x_priv" ] || [ -z "$x_pub" ]; then
+  echo -e "${C_RED} Ошибка генерации ключей x25519!${C_RESET}"
+  return 1
+ fi
 
  render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "direct"
  write_xray_service
  silent_run systemctl enable --now bobarev-xray.service
  systemctl restart bobarev-xray.service || return 1
+ sleep 1
+ if ! systemctl is-active --quiet bobarev-xray.service; then
+  echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
+  journalctl -u bobarev-xray.service -n 20 --no-pager || true
+  return 1
+ fi
 
  if command -v ufw &>/dev/null; then
   silent_run ufw allow "${x_port}/tcp" comment 'Xray VLESS REALITY Mullvad'
  fi
 
  local wan_dev=$(get_wan_if)
- local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-ens3}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+ local pub_ip=""
+ if [ -f /var/lib/bobarev-shell-mullvad/config ]; then
+  pub_ip=$(awk -F= '/^DIRECT_IP=/{gsub(/["'"'"']/, "", $2); print $2; exit}' /var/lib/bobarev-shell-mullvad/config 2>/dev/null | tr -d '[:space:]' || true)
+ fi
+ if [ -z "$pub_ip" ]; then
+  pub_ip=$(ip -4 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+ fi
+ if [ -z "$pub_ip" ] && [ -n "$wan_dev" ]; then
+  pub_ip=$(curl -4 -s --interface "$wan_dev" --max-time 4 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+ fi
  local pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
  [ -z "$pub_ip" ] && pub_ip="IP_СЕРВЕРА"
 
- local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=tcp#VPS-Mullvad-IPv4"
  mkdir -p /var/lib/bobarev-shell-mullvad
+ if [ -f /etc/default/bobarev-cascade ]; then
+  sed -i '/^MULLVAD_VLESS_PORT=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+  echo "MULLVAD_VLESS_PORT="$x_port"" >> /etc/default/bobarev-cascade
+ else
+  printf 'CASCADE_ROLE="standalone_naive"
+NAIVE_OUT_MODE="mullvad_ts"
+MULLVAD_VLESS_PORT="%s"
+' "$x_port" > /etc/default/bobarev-cascade
+  chmod 600 /etc/default/bobarev-cascade
+ fi
+
+ local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=tcp#VPS-Mullvad-IPv4"
  {
   echo "=== VLESS-REALITY ССЫЛКИ ДЛЯ SHADOWROCKET / V2BOX (ВЫХОД ЧЕРЕЗ TAILSCALE MULLVAD) ==="
   echo "IPv4: $vless_v4"
@@ -8917,7 +8977,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/hysteria /etc/xray /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /var/lib/bobarev-shell-mullvad/client-links.txt /var/lib/bobarev-shell-mullvad/vless-links.txt /usr/local/lib/bobarev-shell /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/hysteria /etc/xray /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -10684,7 +10744,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.64 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.69 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

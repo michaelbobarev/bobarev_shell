@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.53 (Monolithic Fixed Edition: Xray/Hysteria Pinning/Router-v2 Sync)
+# Версия: 3.14.54 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -870,7 +870,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.52: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.54: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -913,7 +913,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.52: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.54: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -6811,7 +6811,8 @@ ExecStop=/usr/local/sbin/bobarev-router-v2 stop
 [Install]
 WantedBy=multi-user.target
 UNIT
- cat > /etc/systemd/system/bobarev-router-dhcp.service <<'UNIT'
+ if [[ "$DHCP_OWNER" == managed ]]; then
+  cat > /etc/systemd/system/bobarev-router-dhcp.service <<'UNIT'
 [Unit]
 Description=Local DHCP and DNS
 Requires=bobarev-router-v2.service
@@ -6822,6 +6823,10 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 UNIT
+ else
+  systemctl disable --now bobarev-router-dhcp.service 2>/dev/null || true
+  rm -f /etc/systemd/system/bobarev-router-dhcp.service
+ fi
  if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -E '^Status: active' >/dev/null; then
   for lan in "${LANS[@]}"; do
    [[ "$DHCP" == true ]] && ufw allow in on "$lan" to any port 67 proto udp
@@ -6832,9 +6837,9 @@ UNIT
  echo '[5/6] Запуск маршрутизатора и DHCP/DNS'
  systemctl daemon-reload || exit 1
  systemctl enable bobarev-router-v2.service || exit 1
- if [[ "$DHCP_OWNER" == managed ]]; then systemctl enable bobarev-router-dhcp.service || exit 1; else systemctl disable bobarev-router-dhcp.service || exit 1; fi
+ if [[ "$DHCP_OWNER" == managed ]]; then systemctl enable bobarev-router-dhcp.service || exit 1; fi
  if ! systemctl restart bobarev-router-v2.service; then
-  journalctl -u bobarev-router-v2.service -u bobarev-router-dhcp.service -n 40 --no-pager || true
+  journalctl -u bobarev-router-v2.service -n 40 --no-pager || true
   echo 'Ошибка применения. Бэкапы и автоматический откат отключены.'; exit 1
  fi
  if [[ "$DHCP_OWNER" == managed ]]; then
@@ -6928,7 +6933,11 @@ mod_router_sbc() {
        cat /etc/bobarev-router-v2/config
        ip -4 rule show
        iptables -w 5 -nvL BR2_FWD --line-numbers 2>/dev/null || true
-       systemctl --no-pager -l status bobarev-router-v2.service bobarev-router-dhcp.service || true
+       local dhcp_svc="bobarev-router-dhcp.service"
+       if grep -qE '^DHCP_OWNER=["'"'"']?existing["'"'"']?$' /etc/bobarev-router-v2/config 2>/dev/null; then
+        dhcp_svc="dnsmasq.service"
+       fi
+       systemctl --no-pager -l status bobarev-router-v2.service "$dhcp_svc" || true
       else echo 'Маршрутизатор не настроен. Выберите «Настроить».'; fi
       pause_enter ;;
    2) mod_router_sbc_setup || true; pause_enter ;;
@@ -7241,10 +7250,12 @@ for dev in "${all_devs[@]}"; do
   [[ -d "$q" && -e "$q/rps_cpus" ]] || continue
   if ! { printf '%s\n' "$cpu_mask" > "$q/rps_cpus"; } 2>/dev/null; then echo "RPS недоступен: $q" >&2; profile_errors=1; fi
  done
- for q in /sys/class/net/"$dev"/queues/tx-*; do
-  [[ -d "$q" && -e "$q/xps_cpus" ]] || continue
-  if ! { printf '%s\n' "$cpu_mask" > "$q/xps_cpus"; } 2>/dev/null; then echo "XPS недоступен: $q" >&2; profile_errors=1; fi
- done
+ if [[ "$dev" != tailscale* && "$dev" != tun* && "$dev" != wg* && "$dev" != warp* ]]; then
+  for q in /sys/class/net/"$dev"/queues/tx-*; do
+   [[ -d "$q" && -w "$q/xps_cpus" ]] || continue
+   { printf '%s\n' "$cpu_mask" > "$q/xps_cpus"; } 2>/dev/null || true
+  done
+ fi
  done
 if ! iptables -w 5 -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
  iptables -w 5 -t mangle -I FORWARD 1 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
@@ -7617,7 +7628,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.52
+# BOBAREV SHELL 3.14.54
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7662,9 +7673,6 @@ preflight(){
 import json,subprocess,sys
 r=json.loads(subprocess.check_output(['ip','-j','-4','route','show','table','main','default']))
 if len(r)!=1 or not r[0].get('dev') or r[0]['dev'].startswith(('tailscale','wg','tun','warp')):sys.exit('Нужен один обычный WAN default в table main.')
-for link in json.loads(subprocess.check_output(['ip','-j','-6','addr','show'])):
- if link['ifname']=='tailscale0':continue
- if any(a.get('scope')=='global' for a in link.get('addr_info',[])):sys.exit('Глобальный IPv6: требуется отдельная dual-stack схема. Настройка не применена.')
 PY_NET
  WAN=$(ip -j -4 route show table main default | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["dev"])')
  [[ "$WAN" =~ ^[a-zA-Z0-9_.:-]+$ ]] || die 'Неверное имя WAN.'
@@ -7904,7 +7912,17 @@ route_stop(){
    if iptables -w -t mangle -S "$chain" >/dev/null 2>&1;then iptables -w -t mangle -F "$chain" || rc=1;iptables -w -t mangle -X "$chain" || rc=1;fi
   done
  fi
+ if command -v ip6tables >/dev/null;then
+  while ip6tables -w -t mangle -D PREROUTING -j BMGE6_IN 2>/dev/null;do :;done
+  while ip6tables -w -t mangle -D OUTPUT -j BMGE6_OUT 2>/dev/null;do :;done
+  while ip6tables -w -t mangle -D OUTPUT -j BMGE6_MSS 2>/dev/null;do :;done
+  while ip6tables -w -t mangle -D FORWARD -j BMGE6_MSS 2>/dev/null;do :;done
+  for chain in BMGE6_IN BMGE6_OUT BMGE6_MSS;do
+   if ip6tables -w -t mangle -S "$chain" >/dev/null 2>&1;then ip6tables -w -t mangle -F "$chain" || rc=1;ip6tables -w -t mangle -X "$chain" || rc=1;fi
+  done
+ fi
  while ip -4 rule del pref "$PREF" fwmark "$MARK" lookup main 2>/dev/null;do :;done
+ while ip -6 rule del pref "$PREF" fwmark "$MARK" lookup main 2>/dev/null;do :;done
  return "$rc"
 }
 route_start(){
@@ -7924,11 +7942,26 @@ route_start(){
  iptables -w -t mangle -N BMGE_OUT
  iptables -w -t mangle -A BMGE_OUT -m connmark --mark "$MARK" -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000
  iptables -w -t mangle -A OUTPUT -j BMGE_OUT
+ if command -v ip6tables >/dev/null && ip -6 addr show dev "$WAN" scope global 2>/dev/null | grep -q 'inet6';then
+  ip -6 rule add pref "$PREF" fwmark "$MARK" lookup main 2>/dev/null || true
+  ip6tables -w -t mangle -N BMGE6_IN 2>/dev/null || true
+  ip6tables -w -t mangle -A BMGE6_IN -i "$WAN" -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark "$MARK" 2>/dev/null || true
+  ip6tables -w -t mangle -I PREROUTING 1 -j BMGE6_IN 2>/dev/null || true
+  ip6tables -w -t mangle -N BMGE6_OUT 2>/dev/null || true
+  ip6tables -w -t mangle -A BMGE6_OUT -m connmark --mark "$MARK" -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000 2>/dev/null || true
+  ip6tables -w -t mangle -A OUTPUT -j BMGE6_OUT 2>/dev/null || true
+ fi
  if [[ ${MSS_PROFILE:-auto} == diagnostic1140 ]];then
   iptables -w -t mangle -N BMGE_MSS
   iptables -w -t mangle -A BMGE_MSS -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
   iptables -w -t mangle -A OUTPUT -j BMGE_MSS
   iptables -w -t mangle -A FORWARD -j BMGE_MSS
+  if command -v ip6tables >/dev/null;then
+   ip6tables -w -t mangle -N BMGE6_MSS 2>/dev/null || true
+   ip6tables -w -t mangle -A BMGE6_MSS -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+   ip6tables -w -t mangle -A OUTPUT -j BMGE6_MSS 2>/dev/null || true
+   ip6tables -w -t mangle -A FORWARD -j BMGE6_MSS 2>/dev/null || true
+  fi
  fi
  sysctl -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf."$WAN".rp_filter=2
 }
@@ -8536,14 +8569,62 @@ ensure_mullvad_return_route_and_dot_dns() {
  echo 'Используйте мастер пункта 24: изменения применяются только транзакцией с откатом.'
  return 1
 }
+setup_vless_reality_mullvad_inbound() {
+ echo -e "${C_CYAN} === ДОПОЛНИТЕЛЬНЫЙ ВХОД VLESS-REALITY (IPv4 + IPv6) -> MULLVAD EXIT NODE ===${C_RESET}"
+ ensure_xray_installed || return 1
+ local x_port="8443"
+ prompt_default "1/2. Введите TCP-порт для VLESS-REALITY (например 8443, чтобы не занимать 443 у NaiveProxy):" "$x_port" x_port
+ [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ] && return 0
+ x_port="${x_port//[^0-9]/}"
+ local x_sni="gateway.icloud.com"
+ prompt_default "2/2. Введите SNI-домен для маскировки REALITY (TLS 1.3):" "$x_sni" x_sni
+ [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ] && return 0
+
+ local keys=$(/usr/local/bin/xray x25519 2>/dev/null || true)
+ local x_priv=$(echo "$keys" | awk -F':' 'tolower($1) ~ /private/ {print $2; exit}' | tr -d '[:space:]')
+ local x_pub=$(echo "$keys" | awk -F':' 'tolower($1) ~ /public|password/ {print $2; exit}' | tr -d '[:space:]')
+ local x_uuid=$(/usr/local/bin/xray uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+ local x_short_id=$(openssl rand -hex 8)
+
+ [ -z "$x_priv" ] || [ -z "$x_pub" ] && { echo -e "${C_RED} Ошибка генерации ключей x25519!${C_RESET}"; return 1; }
+
+ render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "direct"
+ write_xray_service
+ silent_run systemctl enable --now bobarev-xray.service
+ systemctl restart bobarev-xray.service || return 1
+
+ if command -v ufw &>/dev/null; then
+  silent_run ufw allow "${x_port}/tcp" comment 'Xray VLESS REALITY Mullvad'
+ fi
+
+ local wan_dev=$(get_wan_if)
+ local pub_ip=$(ip -4 -o addr show dev "${wan_dev:-ens3}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+ local pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+ [ -z "$pub_ip" ] && pub_ip="IP_СЕРВЕРА"
+
+ local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=tcp#VPS-Mullvad-IPv4"
+ mkdir -p /var/lib/bobarev-shell-mullvad
+ {
+  echo "=== VLESS-REALITY ССЫЛКИ ДЛЯ SHADOWROCKET / V2BOX (ВЫХОД ЧЕРЕЗ TAILSCALE MULLVAD) ==="
+  echo "IPv4: $vless_v4"
+  if [ -n "$pub_ipv6" ]; then
+   echo "IPv6: vless://${x_uuid}@[${pub_ipv6}]:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=tcp#VPS-Mullvad-IPv6"
+  fi
+ } > /var/lib/bobarev-shell-mullvad/vless-links.txt
+ chmod 600 /var/lib/bobarev-shell-mullvad/vless-links.txt
+
+ echo -e "\n${C_GREEN} Вход VLESS-REALITY на порту ${x_port}/tcp запущен! Весь трафик с него уходит в активный Tailscale Mullvad Exit Node.${C_RESET}"
+ cat /var/lib/bobarev-shell-mullvad/vless-links.txt
+}
+
 manage_naive_mullvad_menu() {
  local pick='' profile=''
  local ctl=/usr/local/lib/bobarev-shell/mullvad.sh
  install_bobarev_mullvad_runtime || return 1
  while true;do
-  smart_menu 'BOBAREV SHELL — NaiveProxy / Mullvad' \
-   'VPS IPv4. Мастер с резервной копией, conntrack return-path, строгим DoT и откатом. Перед стартом нужны консоль хостинга, A-запись и открытые 80/443. LAN и глобальный IPv6 требуют отдельной схемы.' \
-   24 "$WT_WIDTH" 10 pick \
+  smart_menu 'BOBAREV SHELL — NaiveProxy / VLESS / Mullvad' \
+   'VPS IPv4 + Dual-Stack IPv6. Мастер с резервной копией, conntrack return-path (IPv4/IPv6), строгим DoT и откатом. Позволяет подключаться с iPhone по NaiveProxy (HTTP/2) и/или VLESS-REALITY и выходить через Mullvad Exit Node в Tailscale.' \
+   25 "$WT_WIDTH" 11 pick \
    1 'Мастер под ключ: Tailscale + NaiveProxy + DNS + exit node' \
    2 'Список доступных exit nodes' \
    3 'Подключить / сменить exit node и DNS (без сборки Caddy)' \
@@ -8552,6 +8633,7 @@ manage_naive_mullvad_menu() {
    6 'Пользователи NaiveProxy / ссылки' \
    7 'Диагностика и проверка после перезагрузки' \
    8 'Диагностический MSS: auto / 1140 (с откатом)' \
+   9 'Добавить вход VLESS-REALITY (порт 8443, IPv4/IPv6) -> Mullvad' \
    0 'Назад' || return 0
   case "$pick" in
    0) return 0;;
@@ -8562,10 +8644,11 @@ manage_naive_mullvad_menu() {
    5) if nm_yes 'Восстановить сохранённые файлы и прежний exit node? Поздние ручные изменения могут быть заменены.';then
        if [[ -f /var/lib/bobarev-shell-mullvad/pending ]];then bash "$ctl" recover pending || echo 'Откат неполный!';else bash "$ctl" recover latest || echo 'Откат неполный!';fi
       fi;pause_enter;;
-   6) manage_naive_users_menu; if nm_yes 'Показать сохранённые мастером ссылки (содержат пароль)?';then bash "$ctl" links || true;fi;pause_enter;;
+   6) manage_naive_users_menu; if nm_yes 'Показать сохранённые мастером ссылки (содержат пароль)?';then bash "$ctl" links || true; [ -f /var/lib/bobarev-shell-mullvad/vless-links.txt ] && cat /var/lib/bobarev-shell-mullvad/vless-links.txt || true;fi;pause_enter;;
    7) bash "$ctl" diag || true;pause_enter;;
    8) MODULE_CANCELED=false;prompt_default 'Профиль: auto (без принудительного MSS) или diagnostic1140' auto profile
       if [[ "$MODULE_CANCELED" == false ]];then bash "$ctl" mss "$profile" || echo 'Профиль не применён.';fi;pause_enter;;
+   9) setup_vless_reality_mullvad_inbound || true;pause_enter;;
   esac
  done
 }
@@ -10431,7 +10514,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.52 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.54 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.62 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.14.63 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -870,7 +870,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.62: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.14.63: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -913,7 +913,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.62: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.14.63: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -7628,7 +7628,7 @@ install_bobarev_mullvad_runtime() {
  install -d -m 700 "$lib"
  cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
 #!/usr/bin/env bash
-# BOBAREV SHELL 3.14.62
+# BOBAREV SHELL 3.14.63
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -8324,9 +8324,9 @@ build_caddy(){
 }
 setup_caddy(){
  local domain email user pass hash conflict
- read -r -p 'Домен NaiveProxy (A-запись уже на VPS): ' domain
- read -r -p 'Email ACME: ' email
- read -r -p 'Новый пользователь (a-z A-Z 0-9 _ -): ' user
+ domain=$(ui_input 'Домен NaiveProxy (A-запись уже на VPS):' '') || die 'Отменено.'
+ email=$(ui_input 'Email ACME:' '') || die 'Отменено.'
+ user=$(ui_input 'Новый пользователь (a-z A-Z 0-9 _ -):' '') || die 'Отменено.'
  python3 - "$domain" "$email" "$user" <<'PY_INPUT'
 import re,sys
 assert re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',sys.argv[1]) and '.' in sys.argv[1],'Неверный домен'
@@ -8523,6 +8523,7 @@ apply(){
  fi
  [[ -z $NODE ]] && die 'Не выбран exit node.'
  [[ $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
+
  DIRECT_IP=$(probe_ip) || die 'Не определён прямой WAN IPv4; исходный интернет не подтверждён.'
  log "Прямой WAN IPv4: $DIRECT_IP"
  if [[ $kind == full ]];then setup_caddy;fi
@@ -10554,7 +10555,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.62 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.14.63 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"

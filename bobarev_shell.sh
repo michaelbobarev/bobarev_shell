@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.7 (Restored Full Edition)
+# Версия: 3.18.8 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6232,43 +6232,30 @@ mod_boot_diag() {
 
 # Audit-only: inspect direct POSTROUTING rules; never alter firewall.
 audit_nat_output() {
-    local iface="$1" rules stats total unique repeated groups
-    if ! command -v iptables >/dev/null 2>&1; then
-        echo -e "   Трансляция NAT на выходе:  ${C_BLUE}  Проверка недоступна: не найден компонент iptables${C_RESET}"
-        return 0
-    fi
+    local iface="$1" rules stats total unique repeated
     if ! rules=$(iptables -t nat -S POSTROUTING 2>/dev/null); then
-        echo -e "   Трансляция NAT на выходе:  ${C_BLUE}  Не удалось прочитать правила; состояние NAT не определено${C_RESET}"
+        audit_human_row 'NAT на выходе (IPv4):' "${C_YELLOW}Не удалось прочитать правила${C_RESET}"
         return 0
     fi
     stats=$(printf '%s\n' "$rules" | awk -v iface="$iface" '
-        $1 == "-A" && $2 == "POSTROUTING" {
-            out=""; jump=""
-            for (i=3; i<=NF; i++) {
-                if ($i == "-o" && i<NF) out=$(i+1)
-                if ($i == "-j" && i<NF) jump=$(i+1)
-            }
-            if (out==iface && (jump=="MASQUERADE" || jump=="SNAT")) {
-                key=$0
-                total++
-                if (++seen[key]==1) unique++
-            }
+      $1=="-A" && $2=="POSTROUTING" {
+        out="";jump="";neg=0
+        for(i=3;i<=NF;i++) {
+          if($i=="-o"){out=$(i+1);if($(i-1)=="!")neg=1}
+          if($i=="-j")jump=$(i+1)
         }
-        END {
-            for (key in seen) if (seen[key]>1) groups++
-            printf "%d %d %d %d", total+0, unique+0, total-unique, groups+0
-        }')
-    read -r total unique repeated groups <<< "$stats"
-    if [[ "$total" == 0 ]]; then
-        echo -e "   Трансляция NAT на выходе:  ${C_BLUE}  Прямых правил для $iface не найдено; другие цепочки и сетевые механизмы не проверялись${C_RESET}"
-    elif [[ "$repeated" == 0 ]]; then
-        echo -e "   Трансляция NAT на выходе:  ${C_BLUE}  На $iface настроено правил: $total; точных повторов нет${C_RESET}"
-        if ((total>1)); then
-            echo -e "                              ${C_BLUE}Несколько разных правил — само по себе не ошибка. Очистка по этому признаку не требуется.${C_RESET}"
-        fi
+        if(!neg && out==iface && (jump=="MASQUERADE" || jump=="SNAT")){
+          total++;if(++seen[$0]==1)unique++
+        }
+      } END{printf "%d %d %d",total+0,unique+0,total-unique}')
+    read -r total unique repeated <<< "$stats"
+    if [ "$total" -eq 0 ]; then
+        audit_human_row 'NAT на выходе (IPv4):' "${C_BLUE}$iface — прямых правил не найдено${C_RESET}"
+    elif [ "$repeated" -gt 0 ]; then
+        audit_human_row 'NAT на выходе (IPv4):' "${C_YELLOW}$iface — правил: $total, повторов: $repeated${C_RESET}"
+        audit_human_row '' "${C_BLUE}Есть одинаковые правила; это не означает сбой связи.${C_RESET}"
     else
-        echo -e "   Трансляция NAT на выходе:  ${C_BLUE}  На $iface правил: $total; различных: $unique; лишних точных повторов: $repeated${C_RESET}"
-        echo -e "                              ${C_BLUE}Замечание к конфигурации, не доказательство сбоя. Автоматическая очистка не выполняется.${C_RESET}"
+        audit_human_row 'NAT на выходе (IPv4):' "${C_BLUE}$iface — правил: $total, повторов нет${C_RESET}"
     fi
 }
 
@@ -6301,115 +6288,81 @@ audit_profile_state() {
 }
 
 bobarev_network_human_audit() {
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo -e "   ${C_YELLOW}Параметры сети: проверка недоступна без Python 3${C_RESET}"
-        return 0
+    local mode="$1" iface='' value='' q='' link mtu flags handshakes last=0 stamp now
+    if [ "$mode" = kernel ]; then
+        value=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+        audit_human_row 'Очередь по умолчанию:' "${C_BLUE}${value:-Не удалось определить}${C_RESET}"
+        value=$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || true)
+        case "$value" in 0) value='Отключено' ;; 1) value='При обнаружении проблемы' ;; 2) value='Включено постоянно' ;; *) value='Не удалось определить' ;; esac
+        audit_human_row 'Восстановление MTU TCP:' "${C_BLUE}$value${C_RESET}"
+    elif [ "$mode" = scheme ]; then
+        for link in wg0 wg-cascade warp tailscale0; do
+            [ -r "/sys/class/net/$link/mtu" ] || continue
+            mtu=$(cat "/sys/class/net/$link/mtu" 2>/dev/null || true)
+            flags=$(cat "/sys/class/net/$link/flags" 2>/dev/null || true)
+            value='состояние не определено'
+            if [[ "$flags" =~ ^0x[0-9a-fA-F]+$ ]]; then
+                if (( flags & 1 )); then value='поднят'; else value='выключен'; fi
+            fi
+            audit_human_row "Туннель $link:" "${C_BLUE}MTU ${mtu:-?}; $value${C_RESET}"
+            if [ "$link" != tailscale0 ] && command -v wg >/dev/null 2>&1; then
+                if handshakes=$(wg show "$link" latest-handshakes 2>/dev/null); then
+                    last=$(printf '%s\n' "$handshakes" | awk '$2>m{m=$2} END{print m+0}')
+                    if [ "$last" -gt 0 ]; then
+                        now=$(date +%s);stamp=$((now-last));[ "$stamp" -ge 0 ] || stamp=0
+                        audit_human_row '  Последний обмен:' "${C_BLUE}$stamp сек. назад${C_RESET}"
+                    else audit_human_row '  Последний обмен:' "${C_YELLOW}Ещё не зарегистрирован${C_RESET}"; fi
+                else audit_human_row '  Последний обмен:' "${C_YELLOW}Не удалось проверить${C_RESET}"; fi
+            fi
+        done
+    elif [ "$mode" = network ]; then
+        iface=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++)if($i=="dev"){print $(i+1);exit}}' || true)
+        audit_human_row 'Маршрут самого сервера:' "${C_BLUE}${iface:-Не удалось определить}${C_RESET}"
+        if [ -n "$iface" ]; then
+            mtu=$(cat "/sys/class/net/$iface/mtu" 2>/dev/null || true)
+            audit_human_row 'MTU этого интерфейса:' "${C_BLUE}${mtu:-Не определён} байт${C_RESET}"
+            q=$(tc qdisc show dev "$iface" 2>/dev/null | awk '/ root /{print $2}' | sort -u | paste -sd ',' - || true)
+            [ -z "$q" ] || audit_human_row 'Очередь этого интерфейса:' "${C_BLUE}$q${C_RESET}"
+        fi
+        local tool family rules='' parsed='' all='' ok=0 count=0 scope kind
+        for tool in iptables ip6tables; do
+            family=IPv4;[ "$tool" != ip6tables ] || family=IPv6
+            if rules=$("$tool" -t mangle -S 2>/dev/null); then
+                ok=$((ok+1))
+                parsed=$(printf '%s\n' "$rules" | awk -v family="$family" '
+                  $1=="-A" {
+                    target="";kind="";scope=family "; "
+                    if($2=="FORWARD")scope=scope "пересылаемый трафик"
+                    else if($2=="OUTPUT")scope=scope "запросы сервера"
+                    else scope=scope "цепочка " $2
+                    for(i=3;i<=NF;i++){
+                      if($i=="-j")target=$(i+1)
+                      if($i=="--clamp-mss-to-pmtu")kind="Автоматически по маршруту"
+                      if($i=="--set-mss")kind="Ограничение " $(i+1) " байт"
+                      if($i=="-o" || $i=="-i")scope=scope "; " ($i=="-o"?"выход ":"вход ") ($(i-1)=="!"?"не ":"") $(i+1)
+                      if($i=="-s" || $i=="-d" || $i=="--dport" || $i=="--sport")scope=scope "; есть условия отбора"
+                    }
+                    if(target=="TCPMSS")print (kind==""?"Значение не распознано":kind) "|" scope
+                  }')
+                [ -z "$parsed" ] || all="${all}${parsed}"$'\n'
+            fi
+        done
+        while IFS='|' read -r kind scope; do
+            [ -n "$kind" ] || continue
+            count=$((count+1))
+            if [ "$count" -le 4 ]; then
+                audit_human_row 'Ограничение MSS:' "${C_BLUE}$kind${C_RESET}"
+                audit_human_row '  Применение:' "${C_BLUE}$scope${C_RESET}"
+            fi
+        done <<< "$all"
+        [ "$count" -le 4 ] || audit_human_row 'Другие правила MSS:' "${C_BLUE}$((count-4)); см. сетевую диагностику${C_RESET}"
+        if [ "$count" -eq 0 ]; then
+            if [ "$ok" -gt 0 ]; then value='В прочитанных правилах не найдено'; else value='Не удалось прочитать правила'; fi
+            audit_human_row 'Ограничение MSS:' "${C_BLUE}$value${C_RESET}"
+        fi
+        [ "$ok" -eq 2 ] || audit_human_row 'Проверка MSS:' "${C_YELLOW}Часть правил недоступна${C_RESET}"
     fi
-    python3 - "$1" <<'BOBAREV_NETWORK_HUMAN'
-import sys, subprocess, json, shlex, re, time
-from pathlib import Path
-mode=sys.argv[1]
-def run(args):
-    try:
-        p=subprocess.run(args,capture_output=True,text=True,timeout=5)
-        return p.returncode,p.stdout.strip()
-    except (OSError,subprocess.TimeoutExpired):return 127,''
-def row(k,v,warn=False):
-    v=re.sub(r'[\x00-\x1f\x7f]',' ',str(v))
-    print('   '+k+' '*max(1,28-len(k))+('\033[0;33m' if warn else '\033[0;34m')+v+'\033[0m')
-def readconf():
-    d={}
-    try:
-        for line in Path('/etc/default/bobarev-cascade').read_text().splitlines():
-            k,sep,v=line.partition('=')
-            if k in ('CASCADE_ROLE','NAIVE_OUT_MODE') and sep:
-                try:
-                    t=shlex.split(v,comments=True)
-                    if len(t)==1 and re.fullmatch('[A-Za-z0-9_-]+',t[0]):d[k]=t[0]
-                except ValueError:pass
-    except OSError:pass
-    return d
-def rules(text,family):
-    result=[]
-    for line in text.splitlines():
-        try:t=shlex.split(line)
-        except ValueError:continue
-        if '-A' not in t or '-j' not in t:continue
-        if t[t.index('-j')+1]!='TCPMSS':continue
-        chain=t[t.index('-A')+1]
-        scope={'OUTPUT':'запросы сервера','FORWARD':'пересылаемый трафик','POSTROUTING':'исходящий трафик'}.get(chain,'цепочка '+chain)
-        for flag,label in [('-i','вход'),('-o','выход')]:
-            if flag in t:
-                n=t.index(flag);scope+='; '+label+' '+('не ' if n>0 and t[n-1]=='!' else '')+t[n+1]
-        limited=any(x in t for x in ('-s','-d','--dport','--sport','-m'))
-        if limited:scope+='; с условиями отбора'
-        if '--clamp-mss-to-pmtu' in t:value='Автоматически по маршруту'
-        elif '--set-mss' in t:value='Ограничение '+t[t.index('--set-mss')+1]+' байт'
-        else:value='Правило с неизвестным значением'
-        result.append((value,family+'; '+scope))
-    return list(dict.fromkeys(result))
-if mode=='kernel':
-    rc,q=run(['sysctl','-n','net.core.default_qdisc']);row('Очередь по умолчанию:',q if rc==0 else 'Не удалось определить',rc!=0)
-    rc,v=run(['sysctl','-n','net.ipv4.tcp_mtu_probing'])
-    row('Восстановление MTU TCP:',{'0':'Отключено','1':'При обнаружении проблемы','2':'Включено постоянно'}.get(v,'Не удалось определить'),rc!=0)
-elif mode=='scheme':
-    d=readconf();role=d.get('CASCADE_ROLE','');out=d.get('NAIVE_OUT_MODE','')
-    if role=='standalone_naive':
-        row('Выход по настройкам:',{'direct':'Напрямую','wg0':'Через WireGuard wg0','mullvad_ts':'Через Tailscale / Mullvad'}.get(out,'Не удалось определить'))
-    elif role in ('ru_hysteria_entry','ru_xray_entry','ru_wg_entry','ru_entry'):
-        row('Выход по настройкам:',{'ru_hysteria_entry':'Через Hysteria 2','ru_xray_entry':'Через Xray REALITY','ru_wg_entry':'Через WireGuard','ru_entry':'Через Tailscale'}[role])
-    rc,t=run(['ip','-j','link','show'])
-    try:links=json.loads(t) if rc==0 else []
-    except ValueError:links=[]
-    for link in links:
-        name=link.get('ifname','')
-        if name not in ('wg0','wg-cascade','warp','tailscale0'):continue
-        up='UP' in link.get('flags',[])
-        row('Туннель '+name+':','MTU '+str(link.get('mtu','?'))+'; '+('поднят' if up else 'выключен'),not up)
-        if name in ('wg0','wg-cascade','warp'):
-            rc,t=run(['wg','show',name,'latest-handshakes']);ages=[]
-            if rc==0:
-                for line in t.splitlines():
-                    try:
-                        ts=int(line.split()[-1])
-                        if ts>0:ages.append(max(0,int(time.time())-ts))
-                    except (ValueError,IndexError):pass
-                row('  Последний обмен:',str(min(ages))+' сек. назад' if ages else 'Ещё не зарегистрирован',not ages)
-            else:row('  Последний обмен:','Не удалось проверить',True)
-        if name=='tailscale0':
-            rc,t=run(['tailscale','status','--json'])
-            try:
-                data=json.loads(t) if rc==0 else {};ex=data.get('ExitNodeStatus') or {}
-                row('Узел выхода Tailscale:',('Выбран; '+('доступен' if ex.get('Online') else 'доступность не подтверждена')) if ex else 'Не выбран / не определён')
-            except ValueError:row('Узел выхода Tailscale:','Не удалось проверить',True)
-    for unit,title in [('hysteria-client.service','Hysteria 2'),('bobarev-xray.service','Xray REALITY'),('xraymesh.service','XRayMesh')]:
-        if run(['systemctl','is-active','--quiet',unit])[0]==0:row(title+':','Служба запущена')
-elif mode=='network':
-    rc,t=run(['ip','-j','-4','route','get','1.1.1.1'])
-    try:iface=json.loads(t)[0].get('dev','') if rc==0 else ''
-    except (ValueError,IndexError,TypeError):iface=''
-    row('Маршрут самого сервера:',iface or 'Не удалось определить',not iface)
-    if iface:
-        try:row('MTU этого интерфейса:',Path('/sys/class/net',iface,'mtu').read_text().strip()+' байт')
-        except OSError:row('MTU этого интерфейса:','Не удалось прочитать',True)
-        rc,t=run(['tc','-j','qdisc','show','dev',iface])
-        try:
-            kinds=sorted({q['kind'] for q in json.loads(t) if q.get('root') and q.get('kind')}) if rc==0 else []
-            if kinds:row('Очередь этого интерфейса:',', '.join(kinds))
-        except (ValueError,TypeError):pass
-    found=[];readok=0
-    for command,family in [('iptables','IPv4'),('ip6tables','IPv6')]:
-        rc,t=run([command,'-t','mangle','-S'])
-        if rc==0:readok+=1;found.extend(rules(t,family))
-    if found:
-        for n,(value,scope) in enumerate(found[:4]):
-            row('Ограничение MSS:' if n==0 else 'Ещё правило MSS:',value)
-            row('  Применение:',scope)
-        if len(found)>4:row('Другие правила MSS:',str(len(found)-4)+'; см. сетевую диагностику')
-    else:row('Ограничение MSS:','В прочитанных правилах не найдено' if readok else 'Не удалось прочитать правила',not readok)
-    if readok<2:row('Проверка MSS:','Часть правил недоступна',True)
-
-BOBAREV_NETWORK_HUMAN
+    return 0
 }
 
 mod_server_audit() {
@@ -6714,7 +6667,15 @@ mod_server_audit() {
         fi
     }
     check_param "kernel.dmesg_restrict"           "1"        "Защита журнала ядра:       " "Включена" "Отключена"
-    check_param "net.ipv4.ip_forward"             "1"        "Форвардинг пакетов (IPv4): " "Включен (маршрутизация активна)" "Отключен"
+    check_param "net.ipv4.ip_forward"             "1"        "Пересылка пакетов (IPv4): " "Разрешена в ядре" "Отключен"
+    local v6_forward v6_off v6_text
+    v6_forward=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || true)
+    v6_off=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || true)
+    if [ "$v6_off" = 1 ]; then v6_text="${C_BLUE}IPv6 отключён общей настройкой${C_RESET}"
+    elif [ "$v6_forward" = 1 ]; then v6_text="${C_BLUE}Разрешена в ядре${C_RESET}"
+    elif [ "$v6_forward" = 0 ]; then v6_text="${C_BLUE}Отключена${C_RESET}"
+    else v6_text="${C_YELLOW}Не удалось определить${C_RESET}"; fi
+    audit_human_row 'Пересылка пакетов (IPv6):' "$v6_text"
     check_param "net.ipv4.tcp_syncookies"         "1"        "Защита от флуда (SYN):     " "Включена" "Отключена"
     check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:    " "Активно" "Стандартное"
     check_param "net.core.rmem_max"               "67108864" "Расширенные буферы VPN:    " "Активны (расширенные буферы под высокие скорости)" "Стандартные"
@@ -6729,7 +6690,6 @@ mod_server_audit() {
     esac
 
     bobarev_network_human_audit kernel
-
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_out=$(LC_ALL=C ufw status 2>/dev/null || echo "")
@@ -6952,7 +6912,6 @@ mod_server_audit() {
     fi
 
     bobarev_network_human_audit scheme
-
     echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Открытые порты ---${C_RESET}"
     local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' || echo "")
     for iface in $active_ifs; do
@@ -10969,7 +10928,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.7 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.8 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11284,7 +11243,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.7" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.8" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

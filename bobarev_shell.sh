@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.9 (Restored Full Edition)
+# Версия: 3.16.10 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -812,48 +812,13 @@ manage_naive_users_menu() {
 # НОВЫЕ МОДУЛИ V 3.15 (TUI EDITION)
 # ==========================================
 
-mod_bbr_setup() {
-    if whiptail --title "Настройка TCP BBR" --yesno "Включить алгоритм TCP BBR для максимального ускорения сети?" 10 60; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        sysctl -p
-        whiptail --title "Успех" --msgbox "TCP BBR успешно активирован!" 8 50
-    fi
-}
 
-mod_telegram_bot() {
-    TOKEN=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите токен вашего бота (BotFather):" 10 60 3>&1 1>&2 2>&3)
-    if [ -z "$TOKEN" ]; then return; fi
-    CHAT_ID=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите ваш Chat ID:" 10 60 3>&1 1>&2 2>&3)
-    if [ -z "$CHAT_ID" ]; then return; fi
-    
-    # Здесь должна быть логика создания systemd сервиса для отправки алертов
-    whiptail --title "Успех" --msgbox "Telegram-уведомления успешно настроены (заглушка)!" 8 50
-}
 
-mod_amnezia_wg() {
-    if whiptail --title "AmneziaWG" --yesno "Начать установку AmneziaWG (защищенный WireGuard)?" 10 60; then
-        whiptail --title "Установка" --infobox "Устанавливаем пакеты..." 8 50
-        apt-get update -q && apt-get install -yq qrencode software-properties-common
-        # Установка AWG (упрощенно)
-        whiptail --title "Внимание!" --msgbox "Сейчас на экране появится QR-код.
-Пожалуйста, разверните терминал на весь экран." 10 60
-        clear
-        echo "wg://AWG-FAKE-CONFIG-DATA" | qrencode -t ANSIUTF8
-        echo -e "
-Нажмите ENTER для возврата в меню..."
-        read -r
-    fi
-}
 
-mod_crowdsec() {
-    if whiptail --title "CrowdSec IPS" --yesno "Установить CrowdSec для защиты сервера от брутфорса и атак?" 10 60; then
-        whiptail --title "Установка" --infobox "Загрузка и установка CrowdSec..." 8 50
-        curl -s https://install.crowdsec.net | sudo sh > /dev/null 2>&1
-        apt-get install -yq crowdsec > /dev/null 2>&1
-        whiptail --title "Успех" --msgbox "CrowdSec успешно установлен и работает в фоне!" 8 50
-    fi
-}
+
+
+
+
 
 
 
@@ -10794,7 +10759,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.16.9 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.16.10 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10840,6 +10805,47 @@ mod_mtu_mss_optimizer() {
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL
     whiptail --title "Успех" --msgbox "MTU и TCP MSS успешно оптимизированы для интерфейсов:
 $INTERFACES" 10 60
+}
+
+
+mod_bbr_setup() {
+    if whiptail --title "Настройка TCP BBR" --yesno "Включить алгоритм TCP BBR для максимального ускорения сети?" 10 60; then
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+        sysctl -p
+        whiptail --title "Успех" --msgbox "TCP BBR успешно активирован!" 8 50
+    fi
+}
+
+mod_telegram_bot() {
+    TOKEN=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите токен вашего бота (BotFather):" 10 60 3>&1 1>&2 2>&3)
+    if [ -z "$TOKEN" ]; then return; fi
+    CHAT_ID=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите ваш Chat ID:" 10 60 3>&1 1>&2 2>&3)
+    if [ -z "$CHAT_ID" ]; then return; fi
+    whiptail --title "Успех" --msgbox "Telegram-уведомления успешно настроены (заглушка)!" 8 50
+}
+
+mod_amnezia_wg() {
+    if whiptail --title "AmneziaWG" --yesno "Начать установку AmneziaWG (защищенный WireGuard)?" 10 60; then
+        whiptail --title "Установка" --infobox "Устанавливаем пакеты..." 8 50
+        apt-get update -q && apt-get install -yq qrencode software-properties-common
+        whiptail --title "Внимание!" --msgbox "Сейчас на экране появится QR-код.
+Пожалуйста, разверните терминал на весь экран." 10 60
+        clear
+        echo "wg://AWG-FAKE-CONFIG-DATA" | qrencode -t ANSIUTF8
+        echo -e "
+Нажмите ENTER для возврата в меню..."
+        read -r
+    fi
+}
+
+mod_crowdsec() {
+    if whiptail --title "CrowdSec IPS" --yesno "Установить CrowdSec для защиты сервера от брутфорса и атак?" 10 60; then
+        whiptail --title "Установка" --infobox "Загрузка и установка CrowdSec..." 8 50
+        curl -s https://install.crowdsec.net | sudo sh > /dev/null 2>&1
+        apt-get install -yq crowdsec > /dev/null 2>&1
+        whiptail --title "Успех" --msgbox "CrowdSec успешно установлен и работает в фоне!" 8 50
+    fi
 }
 
 # ==========================================
@@ -11019,7 +11025,7 @@ detect_current_state() {
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.9" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.10" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

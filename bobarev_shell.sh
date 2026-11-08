@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.16 (Restored Full Edition)
+# Версия: 3.18.17 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6451,10 +6451,20 @@ bobarev_network_human_audit() {
     local mode="$1" iface='' value='' q='' link mtu flags handshakes last=0 stamp now
     if [ "$mode" = kernel ]; then
         value=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
-        audit_human_row 'Очередь по умолчанию:' "${C_BLUE}${value:-Не удалось определить}${C_RESET}"
+        case "$value" in
+            fq) value='Раздельные очереди соединений (fq)' ;;
+            '') value='Не удалось определить' ;;
+            *) value="Алгоритм очереди: $value" ;;
+        esac
+        audit_human_row 'Обработка сетевого трафика:' "${C_BLUE}$value${C_RESET}"
         value=$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || true)
-        case "$value" in 0) value='Отключено' ;; 1) value='При обнаружении проблемы' ;; 2) value='Включено постоянно' ;; *) value='Не удалось определить' ;; esac
-        audit_human_row 'Восстановление MTU TCP:' "${C_BLUE}$value${C_RESET}"
+        case "$value" in
+            0) value='Автовосстановление отключено' ;;
+            1) value='Автовосстановление при проблемах' ;;
+            2) value='Автовосстановление включено постоянно' ;;
+            *) value='Не удалось определить' ;;
+        esac
+        audit_human_row 'Подбор размера TCP-пакетов:' "${C_BLUE}$value${C_RESET}"
     elif [ "$mode" = scheme ]; then
         for link in wg0 wg-cascade warp tailscale0; do
             [ -r "/sys/class/net/$link/mtu" ] || continue
@@ -6862,15 +6872,13 @@ mod_server_audit() {
             echo -e "   Пересылка трафика (Шлюз):  ${C_YELLOW}  Запрещена (только локальные подключения)${C_RESET}"
         fi
 
-        # BOBAREV AUDIT BEGIN: UFW permissions only; no firewall changes.
+        # BOBAREV AUDIT BEGIN — UFW permissions, not external connectivity.
         local audit_rules ssh_public ssh_via_ts ts_ports ts_all
         audit_rules=$(printf '%s\n' "$ufw_out" | awk '
             {
-                sub(/[[:space:]]*#.*/, "")
-                port=$1
+                sub(/[[:space:]]*#.*/, ""); port=$1
                 if (port !~ /^[0-9]+(:[0-9]+)?(\/(tcp|udp))?$/ && port != "Anywhere") next
-                sub(/^[^[:space:]]+[[:space:]]+/, "")
-                sub(/^\(v6\)[[:space:]]+/, "")
+                sub(/^[^[:space:]]+[[:space:]]+/, ""); sub(/^\(v6\)[[:space:]]+/, "")
                 if ($0 ~ /^ALLOW[[:space:]]+(IN[[:space:]]+)?Anywhere([[:space:]]|$)/) print "public",port
                 if ($0 ~ /^on[[:space:]]+tailscale0[[:space:]]+ALLOW[[:space:]]+(IN[[:space:]]+)?Anywhere([[:space:]]|$)/) print "tailscale",port
             }
@@ -7124,22 +7132,18 @@ mod_server_audit() {
         echo -e "     Пакеты: Ошибки = $err_str | Потери = $drop_str"
     done
 
-    # Additional route/MTU/MSS detail is omitted from the compact audit.
+    # Compact interface summary; detailed helper retained.
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_ports_list
-        # BOBAREV PORTS BEGIN
         ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '
             {
-                sub(/[[:space:]]*#.*/, "")
-                port=$1
+                sub(/[[:space:]]*#.*/, ""); port=$1
                 if (port !~ /^[0-9]+(:[0-9]+)?(\/(tcp|udp))?$/ && port != "Anywhere") next
-                sub(/^[^[:space:]]+[[:space:]]+/, "")
-                sub(/^\(v6\)[[:space:]]+/, "")
+                sub(/^[^[:space:]]+[[:space:]]+/, ""); sub(/^\(v6\)[[:space:]]+/, "")
                 if ($0 ~ /^ALLOW[[:space:]]+(IN[[:space:]]+)?Anywhere([[:space:]]|$)/) print port
             }
         ' | LC_ALL=C sort -u | paste -sd ',' - || true)
-        # BOBAREV PORTS END
         [ -z "$ufw_ports_list" ] && ufw_ports_list="Разрешения Anywhere не найдены"
         echo -e "   ${C_RESET}Открытые наружу порты:     ${C_BLUE}${ufw_ports_list}${C_RESET}"
     elif command -v ss &>/dev/null; then
@@ -11118,7 +11122,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.16 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.17 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11433,7 +11437,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.16" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.17" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

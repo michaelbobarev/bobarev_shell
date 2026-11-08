@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.13 (Restored Full Edition)
+# Версия: 3.16.14 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -1919,7 +1919,6 @@ ensure_udp2raw_installed() {
     fi
 
     # Защита поставки: точный SHA256 должен быть задан администратором.
-    # Не используем предположительный хеш: при ошибке установка прерывается.
     local u2r_sha="${UDP2RAW_SHA256:-}"
     if [ -z "$u2r_sha" ]; then
         rm -rf "$tmp_u2r"
@@ -10846,7 +10845,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.16.13 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.16.14 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11129,14 +11128,14 @@ detect_current_state() {
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
     detect_current_state || true
-    local state_summary="Схема: ${CONN_SCHEME:-не определена}
+    state_summary="Схема: ${CONN_SCHEME:-не определена}
 Роль: ${ROLE:-не подтверждена}
 Caddy: ${SRV_CADDY:-неизвестно}
 Xray: ${SRV_XRAY:-неизвестно}
 Hysteria: ${SRV_HYSTERIA:-неизвестно}
 Tailscale: ${TS_STATE:-не настроена}"
 
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.13" --menu "$state_summary
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.14" --menu "$state_summary
 
 Выберите раздел:" 20 80 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear

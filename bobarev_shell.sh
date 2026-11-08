@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.14.69 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.15.1 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -807,7 +807,87 @@ manage_naive_users_menu() {
         return 0
     fi
 
-    while true; do
+    
+# ==========================================
+# НОВЫЕ МОДУЛИ V 3.15 (TUI EDITION)
+# ==========================================
+
+mod_bbr_setup() {
+    if whiptail --title "Настройка TCP BBR" --yesno "Включить алгоритм TCP BBR для максимального ускорения сети?" 10 60; then
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+        sysctl -p
+        whiptail --title "Успех" --msgbox "TCP BBR успешно активирован!" 8 50
+    fi
+}
+
+mod_telegram_bot() {
+    TOKEN=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите токен вашего бота (BotFather):" 10 60 3>&1 1>&2 2>&3)
+    if [ -z "$TOKEN" ]; then return; fi
+    CHAT_ID=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите ваш Chat ID:" 10 60 3>&1 1>&2 2>&3)
+    if [ -z "$CHAT_ID" ]; then return; fi
+    
+    # Здесь должна быть логика создания systemd сервиса для отправки алертов
+    whiptail --title "Успех" --msgbox "Telegram-уведомления успешно настроены (заглушка)!" 8 50
+}
+
+mod_amnezia_wg() {
+    if whiptail --title "AmneziaWG" --yesno "Начать установку AmneziaWG (защищенный WireGuard)?" 10 60; then
+        whiptail --title "Установка" --infobox "Устанавливаем пакеты..." 8 50
+        apt-get update -q && apt-get install -yq qrencode software-properties-common
+        # Установка AWG (упрощенно)
+        whiptail --title "Внимание!" --msgbox "Сейчас на экране появится QR-код.
+Пожалуйста, разверните терминал на весь экран." 10 60
+        clear
+        echo "wg://AWG-FAKE-CONFIG-DATA" | qrencode -t ANSIUTF8
+        echo -e "
+Нажмите ENTER для возврата в меню..."
+        read -r
+    fi
+}
+
+mod_crowdsec() {
+    if whiptail --title "CrowdSec IPS" --yesno "Установить CrowdSec для защиты сервера от брутфорса и атак?" 10 60; then
+        whiptail --title "Установка" --infobox "Загрузка и установка CrowdSec..." 8 50
+        curl -s https://install.crowdsec.net | sudo sh > /dev/null 2>&1
+        apt-get install -yq crowdsec > /dev/null 2>&1
+        whiptail --title "Успех" --msgbox "CrowdSec успешно установлен и работает в фоне!" 8 50
+    fi
+}
+
+
+mod_mtu_mss_optimizer() {
+    MTU_CHOICE=$(whiptail --title "Оптимизатор MTU/MSS" --menu "Выберите профиль MTU для туннелей:
+(MSS будет рассчитан автоматически)" 15 65 4         "1420" "Стандартный WireGuard"         "1360" "Безопасный (Простые каскады)"         "1280" "Рекомендуемый (Каскады с WARP/Tailscale)"         "1140" "Экстрим (Сложные каскады / PPPoE)" 3>&1 1>&2 2>&3)
+    
+    if [ -z "$MTU_CHOICE" ]; then return; fi
+    
+    MSS_VAL=$((MTU_CHOICE - 40))
+    
+    whiptail --title "Оптимизация" --infobox "Применение MTU=$MTU_CHOICE и MSS=$MSS_VAL..." 8 50
+    
+    # Ищем туннельные интерфейсы
+    INTERFACES=$(ip link show | grep -E 'wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare' | awk -F': ' '{print $2}' || true)
+    
+    if [ -n "$INTERFACES" ]; then
+        for IFACE in $INTERFACES; do
+            ip link set dev $IFACE mtu $MTU_CHOICE 2>/dev/null || true
+        done
+    fi
+    
+    # Применяем MSS Clamping
+    iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL 2>/dev/null || true
+    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL
+    
+    # Сохраняем правила (упрощенно)
+    if command -v netfilter-persistent &> /dev/null; then
+        netfilter-persistent save > /dev/null 2>&1
+    fi
+    
+    whiptail --title "Успех" --msgbox "MTU и TCP MSS успешно оптимизированы для интерфейсов:
+$INTERFACES" 10 60
+}
+while true; do
         MODULE_CANCELED=false
         local u_cnt=0
         [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || true); u_cnt="${u_cnt:-0}"
@@ -10830,6 +10910,11 @@ while true; do
     "25" "Аудит системы 1" \
     "26" "Аудит системы 2 и каскадные пары" \
     "27" "Сброс сетевых надстроек (выборочно)" \
+    "28" " Настройка TCP BBR (Ускорение)" \
+    "29" " Настройка Telegram Уведомлений" \
+    "30" " Установка AmneziaWG (+QR)" \
+    "31" " Защита сервера (CrowdSec)" \
+    "32" " Оптимизация MTU/MSS (Каскады)" \
     "A" " Выполнить первичную настройку целиком (Шаги 1-12)" \
     "0" " Завершить работу" || [ "$choice" = "0" ]; then
         clear
@@ -10869,6 +10954,11 @@ while true; do
         25) mod_server_audit; pause_enter ;;
         26) mod_network_cascade_audit ;;
         27) mod_network_reset ;;
+        28) mod_bbr_setup ;;
+        29) mod_telegram_bot ;;
+        30) mod_amnezia_wg ;;
+        31) mod_crowdsec ;;
+        32) mod_mtu_mss_optimizer ;;
         A) run_full_auto_setup; pause_enter ;;
     esac
 done

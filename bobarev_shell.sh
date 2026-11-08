@@ -373,7 +373,6 @@ ensure_ufw_wan_nat_afterinit() {
         fi
         cat > "$helper" <<'HELPER_EOF'
 #!/bin/sh
-# BOBAREV WAN NAT — управление переходом POSTROUTING -> BBR_WAN_*
 state="/etc/default/bobarev-wan-nat"
 [ -f "$state" ] || exit 0
 action="$1"
@@ -1419,6 +1418,14 @@ EOF
         echo -e "${C_YELLOW} Повторная инициализация интерфейса wg0...${C_RESET}"
         ip link del dev wg0 2>/dev/null || true
         systemctl restart wg-quick@wg0
+        # Предупреждение: порты, открытые наружу (Anywhere)
+        local open_anywhere
+        open_anywhere=$(echo "$ufw_out" | awk '/^[0-9]+\/(tcp|udp)[[:space:]]+ALLOW IN[[:space:]]+Anywhere$/ {print $1}' | tr '\n' ' ')
+        open_anywhere="${open_anywhere% }"
+        if [ -n "$open_anywhere" ]; then
+            echo -e "   ${C_YELLOW}ВНИМАНИЕ: открыты наружу (Anywhere): $open_anywhere${C_RESET}"
+        fi
+
     fi
 
     if command -v tailscale &>/dev/null; then
@@ -6853,14 +6860,6 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_out=$(LC_ALL=C ufw status 2>/dev/null || echo "")
-
-        # Предупреждение: порты, открытые наружу (Anywhere, без ограничения на tailscale0)
-        local exposed_ports
-        exposed_ports=$(echo "$ufw_out" | grep 'ALLOW IN' | grep 'Anywhere' | grep -v 'on tailscale0' | grep -v 'on lo' | awk '{print $1}' | sort -u | tr '\n' ' ')
-        if [ -n "$exposed_ports" ]; then
-            echo -e "   ${C_YELLOW}ВНИМАНИЕ: открыты наружу (Anywhere): ${exposed_ports}${C_RESET}"
-        fi
-
         echo -e "   Статус брандмауэра:        ${C_GREEN} Включен и защищает сервер${C_RESET}"
         
         local fwd_policy=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")

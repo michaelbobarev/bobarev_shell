@@ -1419,9 +1419,7 @@ EOF
         systemctl restart wg-quick@wg0
         # Предупреждение: порты, открытые наружу (Anywhere, без ограничения интерфейсом)
         local open_anywhere
-        open_anywhere=$(echo "$ufw_out" | awk '
-            /^[0-9]+\/(tcp|udp)[[:space:]]+ALLOW IN[[:space:]]+Anywhere([[:space:]]|$)/ { print $1 }
-        ' | tr '\n' ' ')
+        open_anywhere=$(echo "$ufw_out" | grep -E '^[0-9]+/(tcp|udp)([[:space:]]+\(v6\))?[[:space:]]+ALLOW IN[[:space:]]+Anywhere' | grep -vE '^[0-9]+/(tcp|udp)[[:space:]]+on[[:space:]]' | awk '{print $1}' | sort -u | tr '\n' ' ')
         open_anywhere="${open_anywhere% }"
         if [ -n "$open_anywhere" ]; then
             echo -e "   ${C_YELLOW}ВНИМАНИЕ: открыты наружу (Anywhere): $open_anywhere${C_RESET}"

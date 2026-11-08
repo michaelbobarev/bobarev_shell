@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.5-rc1 (Restored Full Edition)
+# Версия: 3.18.6 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6272,6 +6272,34 @@ audit_nat_output() {
     fi
 }
 
+audit_human_row() {
+    local label="$1" value="$2" gap
+    gap=$((28-${#label})); [ "$gap" -gt 0 ] || gap=1
+    printf '   %s%*s%b\n' "$label" "$gap" '' "$value"
+}
+
+audit_profile_state() {
+    local label="$1" file="$2" key expected actual total=0 matched=0 missing=0
+    if [ ! -r "$file" ]; then
+        audit_human_row "$label" "${C_BLUE}Профиль скрипта не найден${C_RESET}"
+        return 0
+    fi
+    while read -r key expected; do
+        [ -n "$key" ] || continue
+        total=$((total+1))
+        if actual=$(sysctl -n "$key" 2>/dev/null); then
+            [ "$actual" != "$expected" ] || matched=$((matched+1))
+        else missing=$((missing+1)); fi
+    done < <(awk -F= '/^[[:space:]]*[a-zA-Z0-9_.]+[[:space:]]*=/ {gsub(/[[:space:]]/,"",$1);sub(/#.*/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);print $1,$2}' "$file")
+    if [ "$total" -eq 0 ]; then
+        audit_human_row "$label" "${C_BLUE}Нет параметров для проверки${C_RESET}"
+    elif [ "$matched" -eq "$total" ]; then
+        audit_human_row "$label" "${C_GREEN}Применён ($matched из $total параметров)${C_RESET}"
+    else
+        audit_human_row "$label" "${C_YELLOW}Совпадает $matched из $total; недоступно: $missing${C_RESET}"
+    fi
+}
+
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -6449,7 +6477,7 @@ mod_server_audit() {
 
     local verdict_human="${C_GREEN} По короткому тесту не определяется${C_RESET}"
     if [ "$oversell_score" -eq 1 ]; then
-        verdict_human="${C_YELLOW} Замечены задержки; причина не установлена${C_RESET}"
+        verdict_human="${C_YELLOW} Есть задержки; причина не установлена${C_RESET}"
     elif [ "$oversell_score" -ge 2 ]; then
         verdict_human="${C_RED} Жесткий оверселлинг! (хостер урезает железо)${C_RESET}"
     fi
@@ -6481,75 +6509,81 @@ mod_server_audit() {
         echo -e "   Повышение прав (Sudo):     ${C_BLUE}  Стандартный запрос пароля${C_RESET}"
     fi
 
-    local root_locked=$(passwd -S root 2>/dev/null || echo "")
-    if echo "$root_locked" | grep -qE " L | LK | NP "; then
-        echo -e "   Пароль суперпользователя:  ${C_GREEN} Заблокирован (защищено)${C_RESET}"
-    else
-        echo -e "   Пароль суперпользователя:  ${C_RED} Активен (разрешен прямой вход root)${C_RESET}"
-    fi
+    local root_pw_state root_pw_human
+    root_pw_state=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
+    case "$root_pw_state" in
+        L|LK) root_pw_human="${C_GREEN}Пароль заблокирован${C_RESET}" ;;
+        P|PS) root_pw_human="${C_YELLOW}Пароль установлен${C_RESET}" ;;
+        NP) root_pw_human="${C_YELLOW}Пароль не задан${C_RESET}" ;;
+        *) root_pw_human="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
+    audit_human_row 'Учётная запись root:' "$root_pw_human"
 
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
-    local ssh_port="не определён" root_ssh="unknown" pass_auth="unknown"
-    local sshd_cmd=$(get_sshd_cmd)
-
+    local ssh_port=unknown sshd_cmd ssh_eff='' root_text pass_text key_text valid_text
+    sshd_cmd=$(get_sshd_cmd)
+    valid_text="${C_YELLOW}Не удалось проверить${C_RESET}"
     if [ -n "$sshd_cmd" ]; then
-        local conf_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "")
-        local conf_root=$($sshd_cmd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1 || echo "")
-        local conf_pass=$($sshd_cmd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1 || echo "")
-        
-        [ -n "$conf_port" ] && ssh_port="$conf_port"
-        [ -n "$conf_root" ] && root_ssh="$conf_root"
-        [ -n "$conf_pass" ] && pass_auth="$conf_pass"
+        if "$sshd_cmd" -t >/dev/null 2>&1; then
+            valid_text="${C_GREEN}Ошибок не обнаружено${C_RESET}"
+            ssh_eff=$("$sshd_cmd" -T 2>/dev/null || true)
+        else valid_text="${C_RED}Обнаружена ошибка конфигурации${C_RESET}"; fi
     fi
-
-    local port_status_human
-    if [ "$ssh_port" = "22" ]; then
-        port_status_human="${C_YELLOW}22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
-    else
-        port_status_human="${C_GREEN}$ssh_port (Нестандартный порт)${C_RESET}"
-    fi
-
-    local root_status_human
-    case "${root_ssh,,}" in
-        no) root_status_human="${C_GREEN}Запрещен${C_RESET}" ;;
-        prohibit-password|without-password) root_status_human="${C_GREEN}Только по SSH-ключам${C_RESET}" ;;
-        yes) root_status_human="${C_RED}Разрешен${C_RESET}" ;;
-        *) root_status_human="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    ssh_port=$(printf '%s\n' "$ssh_eff" | awk '$1=="port"{print $2;exit}')
+    ssh_port=${ssh_port:-unknown}
+    local root_policy pass_policy key_policy
+    root_policy=$(printf '%s\n' "$ssh_eff" | awk '$1=="permitrootlogin"{print $2;exit}')
+    pass_policy=$(printf '%s\n' "$ssh_eff" | awk '$1=="passwordauthentication"{print $2;exit}')
+    key_policy=$(printf '%s\n' "$ssh_eff" | awk '$1=="pubkeyauthentication"{print $2;exit}')
+    case "$root_policy" in
+        yes) root_text="${C_YELLOW}Разрешён настройками SSH${C_RESET}" ;;
+        no) root_text="${C_GREEN}Запрещён${C_RESET}" ;;
+        prohibit-password|without-password) root_text="${C_BLUE}Без входа по паролю${C_RESET}" ;;
+        forced-commands-only) root_text="${C_BLUE}Только заданные команды${C_RESET}" ;;
+        *) root_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
     esac
-
-    local pass_status_human
-    case "${pass_auth,,}" in
-        no) pass_status_human="${C_GREEN}Отключена${C_RESET}" ;;
-        yes) pass_status_human="${C_YELLOW}Разрешена настройками SSH${C_RESET}" ;;
-        *) pass_status_human="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    case "$pass_policy" in
+        yes) pass_text="${C_YELLOW}Разрешён настройками SSH${C_RESET}" ;;
+        no) pass_text="${C_GREEN}Отключён${C_RESET}" ;;
+        *) pass_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
     esac
-
-    local root_pw
-    root_pw=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
-    case "$root_pw" in L|LK) root_status_human="$root_status_human; пароль root заблокирован" ;; esac
-    local guard_text='' journal_text='' protection
-    systemctl is-active --quiet sshguard.service 2>/dev/null && guard_text=sshguard
-    if systemctl is-active --quiet fail2ban.service 2>/dev/null; then
-        guard_text="${guard_text:+$guard_text и }fail2ban"
+    case "$key_policy" in
+        yes) key_text="${C_GREEN}Разрешён настройками SSH${C_RESET}" ;;
+        no) key_text="${C_YELLOW}Отключён${C_RESET}" ;;
+        *) key_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
+    local port_text="${C_BLUE}${ssh_port} (по настройкам)${C_RESET}"
+    if [[ "$ssh_port" =~ ^[0-9]+$ ]]; then
+        if ss -Hltnp 2>/dev/null | awk -v p="$ssh_port" '$4 ~ (":"p"$") && /sshd/ {found=1} END{exit !found}'; then
+            port_text="${C_GREEN}${ssh_port} (слушается)${C_RESET}"
+        fi
     fi
-    journal_text=$(journalctl -b -n 1 -o cat --no-pager _COMM=sshd + _COMM=sshd-session 2>/dev/null || true)
-    if [ -z "$guard_text" ]; then
-        protection="${C_YELLOW}Активные службы не обнаружены${C_RESET}"
-    elif [ -z "$journal_text" ] || [ "$journal_text" = '-- No entries --' ]; then
-        protection="${C_YELLOW}$guard_text запущены; журнал SSH не подтверждён${C_RESET}"
+    audit_human_row 'Используемый порт SSH:' "$port_text"
+    audit_human_row 'Вход для root по SSH:' "$root_text"
+    audit_human_row 'Вход по паролю:' "$pass_text"
+    audit_human_row 'Вход по ключам:' "$key_text"
+    audit_human_row 'Конфигурация SSH:' "$valid_text"
+    local user_home_key
+    user_home_key=$(getent passwd "$active_user" | cut -d: -f6)
+    if [ -n "$user_home_key" ] && [ -s "$user_home_key/.ssh/authorized_keys" ]; then
+        audit_human_row 'Ключи администратора:' "${C_BLUE}Файл ключей заполнен ($active_user)${C_RESET}"
     else
-        protection="${C_BLUE}$guard_text запущены; журнал SSH доступен${C_RESET}"
+        audit_human_row 'Ключи администратора:' "${C_BLUE}В стандартном файле не найдены${C_RESET}"
     fi
-    audit_short_row() {
-        local label="$1" value="$2" gap
-        gap=$((28-${#label})); [ "$gap" -gt 0 ] || gap=1
-        printf '   %s%*s%b\n' "$label" "$gap" '' "$value"
-    }
-    audit_short_row 'Используемый порт SSH:' "$port_status_human"
-    audit_short_row 'Вход для root по SSH:' "$root_status_human"
-    audit_short_row 'Авторизация по паролю:' "$pass_status_human"
-    audit_short_row 'Защита от перебора:' "$protection"
-    unset -f audit_short_row
+    local guards='' journal_ssh='' protection
+    systemctl is-active --quiet sshguard.service 2>/dev/null && guards=sshguard
+    if systemctl is-active --quiet fail2ban.service 2>/dev/null; then guards="${guards:+$guards и }fail2ban"; fi
+    journal_ssh=$(journalctl -b -n 1 -o cat --no-pager _COMM=sshd + _COMM=sshd-session 2>/dev/null || true)
+    if [ -z "$guards" ]; then protection="${C_YELLOW}Активные службы не обнаружены${C_RESET}"
+    elif [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then protection="${C_BLUE}${guards} запущены; журнал доступен${C_RESET}"
+    else protection="${C_YELLOW}${guards} запущены; журнал не подтверждён${C_RESET}"; fi
+    audit_human_row 'Защита от перебора:' "$protection"
+    if [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then
+        audit_human_row 'Системные журналы:' "${C_GREEN}События SSH доступны${C_RESET}"
+    else audit_human_row 'Системные журналы:' "${C_YELLOW}События SSH не найдены / нет доступа${C_RESET}"; fi
+    if systemctl is-enabled --quiet clean-logs-boot.service 2>/dev/null; then
+        audit_human_row 'Очистка логов при старте:' "${C_YELLOW}Включена — проверьте совместимость с защитой${C_RESET}"
+    else audit_human_row 'Очистка логов при старте:' "${C_BLUE}Не включена${C_RESET}"; fi
 
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
@@ -6572,6 +6606,15 @@ mod_server_audit() {
     check_param "net.ipv4.tcp_syncookies"         "1"        "Защита от флуда (SYN):     " "Включена" "Отключена"
     check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:    " "Активно" "Стандартное"
     check_param "net.core.rmem_max"               "67108864" "Расширенные буферы VPN:    " "Активны (расширенные буферы под высокие скорости)" "Стандартные"
+
+    audit_profile_state 'Профиль защиты ядра:' /etc/sysctl.d/99-zzz-server-hardening.conf
+    local ping_state
+    ping_state=$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null || true)
+    case "$ping_state" in
+        0) audit_human_row 'Ответы на ping:' "${C_BLUE}Разрешены${C_RESET}" ;;
+        1) audit_human_row 'Ответы на ping:' "${C_BLUE}Отключены${C_RESET}" ;;
+        *) audit_human_row 'Ответы на ping:' "${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
 
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
@@ -6686,17 +6729,19 @@ mod_server_audit() {
     elif is_naive_active; then
         local audit_saved_role=""
         if [[ -r /etc/default/bobarev-cascade ]]; then
-            audit_saved_role=$(sed -n 's/^CASCADE_ROLE="\([a-zA-Z0-9_]*\)"$/\1/p' /etc/default/bobarev-cascade | head -n 1)
+            audit_saved_role=$(awk -F= '$1=="CASCADE_ROLE" {v=$2;gsub(/[\042\047[:space:]]/,"",v);if(v ~ /^[a-zA-Z0-9_]+$/)print v;exit}' /etc/default/bobarev-cascade)
         fi
         local audit_out_mode=""
         if [[ -r /etc/default/bobarev-cascade ]]; then
-            audit_out_mode=$(sed -n 's/^NAIVE_OUT_MODE="\([a-zA-Z0-9_]*\)"$/\1/p' /etc/default/bobarev-cascade | head -n 1)
+            audit_out_mode=$(awk -F= '$1=="NAIVE_OUT_MODE" {v=$2;gsub(/[\042\047[:space:]]/,"",v);if(v ~ /^[a-zA-Z0-9_]+$/)print v;exit}' /etc/default/bobarev-cascade)
         fi
         case "$audit_saved_role" in
             ru_hysteria_entry) cascade_status="${C_BLUE}NaiveProxy запущен; сохранена настройка каскада Hysteria 2${C_RESET}" ;;
             ru_xray_entry) cascade_status="${C_BLUE}NaiveProxy запущен; сохранена настройка каскада Xray REALITY${C_RESET}" ;;
             standalone_naive)
-                if [ "$audit_out_mode" = "mullvad_ts" ] && systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
+                if [ "$audit_out_mode" = "direct" ]; then
+                    cascade_status="${C_BLUE}NaiveProxy — прямой выход по настройкам${C_RESET}"
+                elif [ "$audit_out_mode" = "mullvad_ts" ] && systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
                     cascade_status="${C_GREEN}Шлюз Mullvad Exit Node (NaiveProxy + VLESS-REALITY активны)${C_RESET}"
                 elif [ "$audit_out_mode" = "mullvad_ts" ]; then
                     cascade_status="${C_GREEN}Шлюз Mullvad Exit Node (NaiveProxy активен)${C_RESET}"
@@ -6847,6 +6892,7 @@ mod_server_audit() {
 
     echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и подкачки ---${C_RESET}"
     
+    audit_profile_state 'Профиль памяти:' /etc/sysctl.d/99-zzz-ram-opt.conf
     local vm_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
     local swappiness_human
     if [ "$vm_swappiness" = "1" ]; then
@@ -10815,7 +10861,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.5-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.6 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10985,16 +11031,9 @@ menu_local_router() {
 }
 
 menu_diagnostics_maintenance() {
-    local sub_choice
     while true; do
-        if ! sub_choice=$(whiptail --title "ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 7 \
-            "1" "Состояние сервера (Аудит ресурсов)" \
-            "2" "Проверка сети и каскадных пар" \
-            "3" "Системные журналы" \
-            "4" "Анализ загрузки системы" \
-            "5" "Экспорт / Импорт настроек (Бэкап)" \
-            "6" "Остановка и сброс сетевых надстроек" \
-            "0" "Назад" 3>&1 1>&2 2>&3); then return 0; fi
+        if ! sub_choice=$(whiptail --title "⚙️ ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 10             "1" "Состояние сервера (Аудит ресурсов)"             "2" "Проверка сети и каскадных пар"             "3" "Системные журналы"             "4" "Анализ загрузки системы"             "5" "Экспорт / Импорт настроек (Бэкап)"             "6" "Остановка и сброс сетевых надстроек"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
+            
         case "$sub_choice" in
             1) mod_server_audit; pause_enter ;;
             2) mod_network_cascade_audit ;;
@@ -11002,7 +11041,7 @@ menu_diagnostics_maintenance() {
             4) mod_boot_diag; pause_enter ;;
             5) mod_backup_manager; pause_enter ;;
             6) mod_network_reset ;;
-            0|"") return 0 ;;
+            0|"") return ;;
         esac
     done
 }
@@ -11137,7 +11176,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.5-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.6" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

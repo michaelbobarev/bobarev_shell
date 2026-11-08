@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.10 (Restored Full Edition)
+# Версия: 3.16.13 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -109,7 +109,32 @@ get_cpu_rps_mask() {
     python3 -c "print(hex((1 << $ncpu) - 1)[2:])" 2>/dev/null || printf '%x' $(( (1 << (ncpu > 16 ? 16 : ncpu)) - 1 ))
 }
 
-silent_run() { "$@" >/dev/null 2>&1 || true; }
+silent_run() {
+    local rc=0
+    "$@" >/dev/null 2>&1 || rc=$?
+    return "$rc"
+}
+
+run_optional() {
+    local rc=0
+    "$@" >/dev/null 2>&1 || rc=$?
+    return 0
+}
+
+run_required() {
+    local label="$1"; shift
+    local out err rc
+    out=$(mktemp); err=$(mktemp)
+    if ! "$@" >"$out" 2>"$err"; then
+        rc=$?
+        echo -e "${C_RED} Ошибка: $label${C_RESET}" >&2
+        sed -n '1,40p' "$err" >&2
+        rm -f "$out" "$err"
+        return "$rc"
+    fi
+    rm -f "$out" "$err"
+    return 0
+}
 
 verify_sha256() {
     local file="$1"
@@ -289,7 +314,8 @@ ensure_ufw_mangle_tcpmss() {
         sed -i '/^\*mangle/,/^COMMIT/d' /etc/ufw/before6.rules 2>/dev/null || true
     fi
     if command -v ip6tables &>/dev/null; then
-        ip6tables -t mangle -F FORWARD 2>/dev/null || true
+        ip6tables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null ||         ip6tables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null || true
+        ip6tables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null ||         ip6tables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null || true
     fi
 }
 
@@ -908,12 +934,12 @@ net.core.optmem_max = 2097152
 net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 16384
-net.ipv4.tcp_mem = 131072 262144 524288
+net.ipv4.tcp_mem = 262144 524288 1048576
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_rmem = 4096 262144 67108864
+net.ipv4.tcp_wmem = 4096 262144 67108864
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 15
@@ -951,12 +977,12 @@ net.core.optmem_max = 2097152
 net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 16384
-net.ipv4.tcp_mem = 131072 262144 524288
+net.ipv4.tcp_mem = 262144 524288 1048576
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_rmem = 4096 262144 67108864
+net.ipv4.tcp_wmem = 4096 262144 67108864
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 15
@@ -1420,7 +1446,7 @@ setup_standalone_naive() {
             5)
                 echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
 
-                if systemctl is-active --quiet hysteria-server.service.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
+                if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
                     echo -e "${C_YELLOW} Освобождение портов 80/443 от предыдущих каскадных служб (Hysteria/Xray/DERP)...${C_RESET}"
                     silent_run systemctl stop hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
                     silent_run systemctl disable hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
@@ -1892,13 +1918,19 @@ ensure_udp2raw_installed() {
         return 1
     fi
 
-    # Хеш для версии 20230206.0 (рекомендуется уточнить актуальный SHA256)
-    local u2r_sha="PLACEHOLDER_SHA256_FOR_UDP2RAW_BINARIES_TAR_GZ"
-    if [ "$u2r_sha" != "PLACEHOLDER_SHA256_FOR_UDP2RAW_BINARIES_TAR_GZ" ]; then
-        if ! verify_sha256 "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
-            rm -rf "$tmp_u2r"
-            return 1
-        fi
+    # Защита поставки: точный SHA256 должен быть задан администратором.
+    # Не используем предположительный хеш: при ошибке установка прерывается.
+    local u2r_sha="${UDP2RAW_SHA256:-}"
+    if [ -z "$u2r_sha" ]; then
+        rm -rf "$tmp_u2r"
+        echo -e "${C_RED} Отказ установки udp2raw: не задан UDP2RAW_SHA256.${C_RESET}" >&2
+        echo -e "${C_YELLOW} Получите SHA256 только из доверенного источника и запустите:${C_RESET}" >&2
+        echo -e "${C_YELLOW} sudo UDP2RAW_SHA256=<sha256> bash $0${C_RESET}" >&2
+        return 1
+    fi
+    if ! verify_sha256 "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
+        rm -rf "$tmp_u2r"
+        return 1
     fi
 
     if ! tar -xzf "${tmp_u2r}/udp2raw.tar.gz" -C "$tmp_u2r" 2>/dev/null; then
@@ -1969,7 +2001,8 @@ clean_udp2raw_iptables() {
 clean_duplicate_cascade_iptables() {
     clean_udp2raw_iptables
     if command -v ip6tables &>/dev/null; then
-        ip6tables -t mangle -F FORWARD 2>/dev/null || true
+        ip6tables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null ||         ip6tables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null || true
+        ip6tables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null ||         ip6tables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null || true
     fi
     local wan_dev=$(get_wan_if)
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
@@ -2780,7 +2813,7 @@ SVC_EOF
     systemctl restart hysteria-server.service || true
     sleep 2
 
-    if ! systemctl is-active --quiet hysteria-server.service.service; then
+    if ! systemctl is-active --quiet hysteria-server.service; then
         echo -e "${C_RED} Служба hysteria-server НЕ запустилась! Журнал ошибок:${C_RESET}"
         journalctl -u hysteria-server.service -n 15 --no-pager || true
         return 1
@@ -3005,7 +3038,7 @@ manage_cascade_hysteria_menu() {
     while true; do
         MODULE_CANCELED=false
         local c_state="Не активен"
-        if systemctl is-active --quiet hysteria-server.service.service 2>/dev/null; then
+        if systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
             if is_warp_active; then
                 c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Cloudflare WARP)"
             else
@@ -3221,6 +3254,9 @@ render_xray_client_config() {
     local s2_pub="$4"
     local s2_short_id="$5"
     local s2_sni="$6"
+    local fragment_mode="${7:-on}"
+    local FRAGMENT_SOCKOPT=""
+    [ "$fragment_mode" = "on" ] && FRAGMENT_SOCKOPT=',"dialerProxy": "fragment"'
 
     mkdir -p /etc/xray
     cat << EOF > /etc/xray/config.json
@@ -3269,8 +3305,7 @@ render_xray_client_config() {
           "spiderX": ""
         },
         "sockopt": {
-          "dialerProxy": "fragment",
-          "tcpNoDelay": true
+          "tcpNoDelay": true${FRAGMENT_SOCKOPT}
         }
       }
     },
@@ -3333,7 +3368,16 @@ setup_cascade_xray_server2_foreign() {
         return 1
     fi
 
-    silent_run systemctl stop bobarev-xray.service
+    if [ "$x_port" = "443" ] && systemctl is-active --quiet caddy.service; then
+        if prompt_yn "Порт 443 занят активным Caddy. Остановить и отключить Caddy на этом выходном сервере для Xray REALITY?" "false"; then
+            run_required "остановка и отключение Caddy" systemctl disable --now caddy.service || return 1
+        else
+            echo -e "${C_RED} Настройка прервана: порт 443 занят Caddy. Выберите другой порт или освободите 443 вручную.${C_RESET}"
+            return 1
+        fi
+    fi
+
+    run_optional systemctl stop bobarev-xray.service
     apply_foreign_exit_mode "$exit_mode"
     render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "$exit_mode"
     write_xray_service
@@ -3466,7 +3510,14 @@ setup_cascade_xray_server1_ru() {
         fi
     fi
 
-    render_xray_client_config "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni"
+    local fragment_mode="on"
+    local frag_choice=""
+    if ! smart_menu "Режим REALITY для маршрута РФ -> Зарубеж" "Выберите режим TLS-фрагментации:" 16 $WT_WIDTH 2 "frag_choice" "1" "Стандартный REALITY + TLS Fragment (рекомендуется для РФ -> Зарубеж)" "2" "Прямой скоростной REALITY без фрагментации"; then
+        return 0
+    fi
+    [ "$frag_choice" = "2" ] && fragment_mode="off"
+
+    render_xray_client_config "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$fragment_mode" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni"
     write_xray_service
 
     silent_run systemctl enable --now bobarev-xray.service
@@ -3550,8 +3601,20 @@ cleanup_foreign_xray_exit() {
     fi
 
     local xray_is_server=false
-    if [ -f /etc/xray/config.json ] && grep -q '"protocol"[[:space:]]*:[[:space:]]*"vless"' /etc/xray/config.json 2>/dev/null        && grep -q '"protocol"[[:space:]]*:[[:space:]]*"freedom"' /etc/xray/config.json 2>/dev/null; then
-        xray_is_server=true
+    if [ -f /etc/xray/config.json ]; then
+        if python3 - <<'PY'
+import json,sys
+try:
+ c=json.load(open('/etc/xray/config.json'))
+ inbound_ok=any(i.get('protocol')=='vless' and 'realitySettings' in (i.get('streamSettings') or {}) for i in c.get('inbounds',[]))
+ outbound_ok=any(o.get('protocol')=='freedom' for o in c.get('outbounds',[]))
+ sys.exit(0 if inbound_ok and outbound_ok else 1)
+except Exception:
+ sys.exit(1)
+PY
+        then
+            xray_is_server=true
+        fi
     fi
 
     if [ "$xray_is_server" != "true" ]; then
@@ -3559,9 +3622,19 @@ cleanup_foreign_xray_exit() {
         echo -e "${C_YELLOW} Возможна роль входного узла или повреждённый/неопознанный конфиг.${C_RESET}"
         echo -e "${C_YELLOW} Для безопасности очистка не выполняется. Ниже только диагностика.${C_RESET}"
         echo ""
-        echo -e "${C_BLUE} Конфиг Xray:${C_RESET}"
+        echo -e "${C_BLUE} Обезличенное резюме конфигурации Xray:${C_RESET}"
         if [ -f /etc/xray/config.json ]; then
-            sed -n '1,160p' /etc/xray/config.json
+            python3 - <<'PY'
+import json
+try:
+ c=json.load(open('/etc/xray/config.json'))
+ for i in c.get('inbounds',[]):
+  print('inbound:',i.get('protocol'),'listen=',i.get('listen'),'port=',i.get('port'))
+ for o in c.get('outbounds',[]):
+  print('outbound:',o.get('protocol'))
+except Exception as e:
+ print('Не удалось разобрать конфигурацию:',e)
+PY
         else
             echo "  /etc/xray/config.json не найден"
         fi
@@ -4101,8 +4174,20 @@ print_network_health_summary() {
 }
 
 remove_ufw_docker_protection() {
-    iptables -F DOCKER-USER 2>/dev/null || true
-    ip6tables -F DOCKER-USER 2>/dev/null || true
+    if command -v iptables >/dev/null 2>&1; then
+        while iptables -S DOCKER-USER 2>/dev/null | grep -q -- "-j BOBAREV-DOCKER"; do
+            iptables -D DOCKER-USER -j BOBAREV-DOCKER 2>/dev/null || break
+        done
+        iptables -F BOBAREV-DOCKER 2>/dev/null || true
+        iptables -X BOBAREV-DOCKER 2>/dev/null || true
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        while ip6tables -S DOCKER-USER 2>/dev/null | grep -q -- "-j BOBAREV-DOCKER"; do
+            ip6tables -D DOCKER-USER -j BOBAREV-DOCKER 2>/dev/null || break
+        done
+        ip6tables -F BOBAREV-DOCKER 2>/dev/null || true
+        ip6tables -X BOBAREV-DOCKER 2>/dev/null || true
+    fi
     if [ -f /etc/ufw/after.rules ]; then
         sed -i '/# BEGIN UFW AND DOCKER/,/# END UFW AND DOCKER/d' /etc/ufw/after.rules 2>/dev/null || true
     fi
@@ -4118,15 +4203,16 @@ apply_ufw_docker_protection() {
 *filter
 :ufw-user-forward - [0:0]
 :DOCKER-USER - [0:0]
--A DOCKER-USER -j ufw-user-forward
--A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
--A DOCKER-USER -i tailscale0 -j RETURN
--A DOCKER-USER -i tun+ -j RETURN
--A DOCKER-USER -i wg+ -j RETURN
--A DOCKER-USER -i warp -j RETURN
--A DOCKER-USER -i $wan_if -p tcp -m conntrack --ctstate NEW -j DROP
--A DOCKER-USER -i $wan_if -p udp -m conntrack --ctstate NEW -j DROP
--A DOCKER-USER -j RETURN
+:BOBAREV-DOCKER - [0:0]
+-A DOCKER-USER -j BOBAREV-DOCKER
+-A BOBAREV-DOCKER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A BOBAREV-DOCKER -i tailscale0 -j RETURN
+-A BOBAREV-DOCKER -i tun+ -j RETURN
+-A BOBAREV-DOCKER -i wg+ -j RETURN
+-A BOBAREV-DOCKER -i warp -j RETURN
+-A BOBAREV-DOCKER -i $wan_if -p tcp -m conntrack --ctstate NEW -j DROP
+-A BOBAREV-DOCKER -i $wan_if -p udp -m conntrack --ctstate NEW -j DROP
+-A BOBAREV-DOCKER -j RETURN
 COMMIT
 # END UFW AND DOCKER
 DOCKER_UFW_EOF
@@ -4205,7 +4291,8 @@ ETHTOOL_SVC_EOF
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     
     if command -v ip6tables &>/dev/null; then
-        ip6tables -t mangle -F FORWARD 2>/dev/null || true
+        ip6tables -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null ||         ip6tables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null || true
+        ip6tables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null ||         ip6tables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu -m comment --comment bobarev-ipv6-mss 2>/dev/null || true
     fi
     tune_fq_qdisc_interfaces
 
@@ -5059,7 +5146,7 @@ mod_ufw() {
             silent_run ufw allow "${WG_CASCADE_PORT}/udp" comment 'WG Direct Cascade UDP'
             silent_run ufw allow "${WG_CASCADE_PORT}/tcp" comment 'WG Direct Cascade FakeTCP'
         fi
-        if [ -n "${HYSTERIA_PORT:-}" ] && { [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] || systemctl is-active --quiet hysteria-server.service.service 2>/dev/null; }; then
+        if [ -n "${HYSTERIA_PORT:-}" ] && { [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] || systemctl is-active --quiet hysteria-server.service 2>/dev/null; }; then
             silent_run ufw allow "${HYSTERIA_PORT}/udp" comment 'Hysteria 2 QUIC UDP'
             silent_run ufw allow "${HYSTERIA_PORT}/tcp" comment 'Hysteria 2 TCP'
         fi
@@ -6617,12 +6704,12 @@ mod_server_audit() {
     if [[ -f /etc/naiveproxy/mesh-paused ]]; then
         cascade_status="${C_BLUE}NaiveProxy + XRayMesh: сохранена отметка паузы${C_RESET}"
     elif is_naive_active && nm_bound; then
-        if systemctl is-active --quiet bobarev-xray.servicemesh.service && { systemctl is-active --quiet naive-mesh-bridge.service || systemctl is-active --quiet gost-mesh.service; }; then
+        if systemctl is-active --quiet xraymesh.service && { systemctl is-active --quiet naive-mesh-bridge.service || systemctl is-active --quiet gost-mesh.service; }; then
             cascade_status="${C_GREEN}Сервер 1: NaiveProxy + XRayMesh — локальные службы запущены; полный путь отдельно не проверен${C_RESET}"
         else
             cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
         fi
-    elif systemctl is-active --quiet bobarev-xray.servicemesh.service; then
+    elif systemctl is-active --quiet xraymesh.service; then
         cascade_status="${C_GREEN}Сервер 2: XRayMesh — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
         cascade_status="${C_GREEN} Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
@@ -10323,7 +10410,7 @@ nm_lifecycle() {
  done
 }
 
-nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet bobarev-xray.servicemesh.service; }
+nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet xraymesh.service; }
 nm_wizard() {
  local target="$1"
  echo "НАСТРОЙКА СЕРВЕРА $target. Сначала сервер 2 — выход; затем сервер 1 — вход."
@@ -10666,7 +10753,7 @@ PY
 check_local_ip "$EXIT_IP"
 # Existing unrelated services are never stopped automatically.
 if ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
- systemctl is-active --quiet bobarev-xray.service-mesh-socks.service || { echo 'Порт занят другой службой. Она сохранена. Выберите свободный порт или выполните миграцию вручную.'; exit 1; }
+ systemctl is-active --quiet xray-mesh-socks.service || { echo 'Порт занят другой службой. Она сохранена. Выберите свободный порт или выполните миграцию вручную.'; exit 1; }
 fi
 apt-get install -y curl unzip ca-certificates
 if [[ ! -x /usr/local/bin/xray ]]; then
@@ -10718,7 +10805,7 @@ EOF
 systemctl daemon-reload
 systemctl enable xray-mesh-socks.service
 systemctl restart xray-mesh-socks.service
-systemctl is-active --quiet bobarev-xray.service-mesh-socks.service
+systemctl is-active --quiet xray-mesh-socks.service
 echo "Xray SOCKS: $EXIT_IP:$SOCKS_PORT. Старые службы сохранены."
 echo 'Проверку с mesh-адреса выполните на сервере 1 (меню Проверка).'
 
@@ -10759,7 +10846,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.16.10 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.16.13 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10783,28 +10870,49 @@ fi
 
 
 mod_mtu_mss_optimizer() {
-    MTU_CHOICE=$(whiptail --title "Оптимизатор MTU/MSS" --menu "Выберите профиль MTU для туннелей:
-(MSS будет рассчитан автоматически)" 15 65 4         "1420" "Стандартный WireGuard"         "1360" "Безопасный (Простые каскады)"         "1280" "Рекомендуемый (Каскады с WARP/Tailscale)"         "1140" "Экстрим (Сложные каскады / PPPoE)" 3>&1 1>&2 2>&3)
-
-    if [ -z "$MTU_CHOICE" ]; then return; fi
-    MSS_VAL=$((MTU_CHOICE - 40))
-    whiptail --title "Оптимизация" --infobox "Применение MTU=$MTU_CHOICE и MSS=$MSS_VAL..." 8 50
-    
-    INTERFACES=$(ip link show | grep -E 'wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare|wg-cascade|warp' | awk -F': ' '{print $2}' || true)
-    if [ -n "$INTERFACES" ]; then
-        for IFACE in $INTERFACES; do
-            ip link set dev $IFACE mtu $MTU_CHOICE 2>/dev/null || true
-            while iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep -q " $IFACE "; do
-                RULE_NUM=$(iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep " $IFACE " | head -n 1 | awk '{print $1}')
-                iptables -t mangle -D FORWARD $RULE_NUM 2>/dev/null || break
-            done
-        done
+    local interfaces selected mtu mss iface current actual rule spec
+    interfaces=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare|wg-cascade|warp)$' || true)
+    if [ -z "$interfaces" ]; then
+        whiptail --title "MTU/MSS" --msgbox "Туннельные интерфейсы не найдены." 8 50 || true
+        return 0
     fi
-    
-    iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL 2>/dev/null || true
-    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL
-    whiptail --title "Успех" --msgbox "MTU и TCP MSS успешно оптимизированы для интерфейсов:
-$INTERFACES" 10 60
+    local options=()
+    while read -r iface; do
+        [ -z "$iface" ] && continue
+        current=$(cat "/sys/class/net/$iface/mtu" 2>/dev/null || echo '?')
+        options+=("$iface" "Текущий MTU: $current")
+    done <<< "$interfaces"
+    if ! selected=$(whiptail --title "MTU/MSS" --menu "Выберите один туннельный интерфейс:" 16 70 6 "${options[@]}" 3>&1 1>&2 2>&3); then
+        return 0
+    fi
+    [ -z "$selected" ] && return 0
+    if ! mtu=$(whiptail --title "MTU для $selected" --menu "Выберите MTU. MSS рассчитывается как MTU - 40." 16 70 4 "1420" "Стандартный WireGuard" "1360" "Безопасный (простые каскады)" "1280" "Консервативный (WARP/Tailscale)" "1140" "Экстрим (сложные каскады/PPPoE)" 3>&1 1>&2 2>&3); then
+        return 0
+    fi
+    [ -z "$mtu" ] && return 0
+    mss=$((mtu - 40))
+    if ! ip link set dev "$selected" mtu "$mtu"; then
+        whiptail --title "Ошибка" --msgbox "Не удалось изменить MTU интерфейса $selected." 8 55 || true
+        return 1
+    fi
+    while iptables -t mangle -S FORWARD 2>/dev/null | grep -F -- "bobarev-mtu-$selected" | head -n 1 | grep -q .; do
+        rule=$(iptables -t mangle -S FORWARD 2>/dev/null | grep -F -- "bobarev-mtu-$selected" | head -n 1)
+        spec=${rule#-A }
+        iptables -t mangle -D FORWARD ${spec%% bobarev-mtu-*} 2>/dev/null || break
+    done
+    if ! iptables -t mangle -A FORWARD -o "$selected" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss" -m comment --comment "bobarev-mtu-$selected"; then
+        whiptail --title "Ошибка" --msgbox "Не удалось добавить MSS-правило для $selected." 8 55 || true
+        return 1
+    fi
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+    actual=$(cat "/sys/class/net/$selected/mtu" 2>/dev/null || echo '?')
+    whiptail --title "Готово" --msgbox "Интерфейс: $selected
+Текущий MTU: $actual
+MSS для IPv4-транзита: $mss
+
+Правило действует только для исходящего через $selected IPv4 TCP-транзита. Локальные соединения Caddy/Xray оно не охватывает." 14 70 || true
 }
 
 
@@ -10818,25 +10926,15 @@ mod_bbr_setup() {
 }
 
 mod_telegram_bot() {
-    TOKEN=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите токен вашего бота (BotFather):" 10 60 3>&1 1>&2 2>&3)
-    if [ -z "$TOKEN" ]; then return; fi
-    CHAT_ID=$(whiptail --title "Telegram Мониторинг" --inputbox "Введите ваш Chat ID:" 10 60 3>&1 1>&2 2>&3)
-    if [ -z "$CHAT_ID" ]; then return; fi
-    whiptail --title "Успех" --msgbox "Telegram-уведомления успешно настроены (заглушка)!" 8 50
+    whiptail --title "Telegram" --msgbox "Интеграция Telegram-уведомлений пока не реализована.
+
+Токен и Chat ID не запрашиваются и не сохраняются." 10 60 || true
 }
 
 mod_amnezia_wg() {
-    if whiptail --title "AmneziaWG" --yesno "Начать установку AmneziaWG (защищенный WireGuard)?" 10 60; then
-        whiptail --title "Установка" --infobox "Устанавливаем пакеты..." 8 50
-        apt-get update -q && apt-get install -yq qrencode software-properties-common
-        whiptail --title "Внимание!" --msgbox "Сейчас на экране появится QR-код.
-Пожалуйста, разверните терминал на весь экран." 10 60
-        clear
-        echo "wg://AWG-FAKE-CONFIG-DATA" | qrencode -t ANSIUTF8
-        echo -e "
-Нажмите ENTER для возврата в меню..."
-        read -r
-    fi
+    whiptail --title "AmneziaWG" --msgbox "Установка и генерация клиентского профиля AmneziaWG пока не реализованы.
+
+Ничего не установлено и конфигурация не изменена." 10 60 || true
 }
 
 mod_crowdsec() {
@@ -10854,28 +10952,33 @@ mod_crowdsec() {
 
 menu_server_security() {
     while true; do
-        if ! sub_choice=$(whiptail --title "🛠 СЕРВЕР И БЕЗОПАСНОСТЬ" --menu "Выберите категорию:" 20 75 12             "1" "[АВТО] Первичная настройка - мастер"             "2" "Основные настройки (TZ, Hostname, APT)"             "3" "Пользователи и SSH (Ключи, Конфиг, Root)"             "4" "Защита и брандмауэр (UFW, CrowdSec, Hardening)"             "5" "Память и производительность (RAM, Swap, BBR)"             "6" "Оборудование и утилиты (Desktop, HDMI)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
-        case "$sub_choice" in
-            1) run_full_auto_setup; pause_enter ;;
-            2) 
-                # Подменю основных настроек
-                mod_timezone; mod_hostname; mod_apt_update; pause_enter ;;
-            3) 
-                # Подменю SSH
-                mod_user_setup; mod_ssh_key; mod_ssh_config; mod_lock_root; pause_enter ;;
+        local choice c
+        if ! choice=$(whiptail --title "Базовая настройка" --menu "Выберите категорию:" 18 75 7 "1" "Основные настройки" "2" "Пользователи и SSH" "3" "Защита и брандмауэр" "4" "Память и производительность" "5" "Оборудование и утилиты" "A" "Первичная настройка целиком" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then
+            return 0
+        fi
+        [ -z "$choice" ] && return 0
+        case "$choice" in
+            1)
+                if ! c=$(whiptail --title "Основные настройки" --menu "Выберите действие:" 16 70 4 "1" "Часовой пояс" "2" "Имя сервера" "3" "Обновление компонентов" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_timezone; pause_enter ;; 2) mod_hostname; pause_enter ;; 3) mod_apt_update; pause_enter ;; esac ;;
+            2)
+                if ! c=$(whiptail --title "Пользователи и SSH" --menu "Выберите действие:" 16 70 5 "1" "Создание и настройка пользователя" "2" "Привязка ключа безопасности" "3" "Конфигурация удаленного доступа" "4" "Блокировка доступа суперпользователя" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_user_setup; pause_enter ;; 2) mod_ssh_key; pause_enter ;; 3) mod_ssh_config; pause_enter ;; 4) mod_lock_root; pause_enter ;; esac ;;
+            3)
+                if ! c=$(whiptail --title "Защита и брандмауэр" --menu "Выберите действие:" 16 70 4 "1" "Управление брандмауэром" "2" "Настройка системной защиты" "3" "Защита сервера (CrowdSec)" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_ufw; pause_enter ;; 2) mod_hardening; pause_enter ;; 3) mod_crowdsec; pause_enter ;; esac ;;
             4)
-                # Подменю защиты
-                mod_ufw; mod_hardening; mod_crowdsec; pause_enter ;;
+                if ! c=$(whiptail --title "Память и производительность" --menu "Выберите действие:" 16 70 4 "1" "Оптимизация памяти" "2" "Управление файлом подкачки" "3" "Настройка TCP BBR" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_ram_flash_opt; pause_enter ;; 2) mod_swap_manager; pause_enter ;; 3) mod_bbr_setup; pause_enter ;; esac ;;
             5)
-                # Подменю производительности
-                mod_ram_flash_opt; mod_swap_manager; mod_bbr_setup; pause_enter ;;
-            6)
-                mod_desktop_apps; mod_hdmi_reset; pause_enter ;;
-            0|"") return ;;
+                if ! c=$(whiptail --title "Оборудование и утилиты" --menu "Выберите действие:" 16 70 3 "1" "Утилиты ПК и режим процессора" "2" "Сброс видеовыхода HDMI" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_desktop_apps; pause_enter ;; 2) mod_hdmi_reset; pause_enter ;; esac ;;
+            A) run_full_auto_setup; pause_enter ;;
+            0) return 0 ;;
         esac
     done
 }
+
 
 menu_naiveproxy_two_servers() {
     while true; do
@@ -10983,7 +11086,7 @@ detect_current_state() {
     systemctl is-active --quiet bobarev-xray.service && SRV_XRAY="работает"
 
     SRV_HYSTERIA="остановлен"
-    systemctl is-active --quiet hysteria-server.service.service && SRV_HYSTERIA="работает"
+    systemctl is-active --quiet hysteria-server.service && SRV_HYSTERIA="работает"
 
     # Определение схемы и роли
     CONN_SCHEME="Не определено"
@@ -11025,11 +11128,17 @@ detect_current_state() {
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.10" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
-        clear
-        echo "Работа скрипта завершена."
-        exit 0
-    fi; then
+    detect_current_state || true
+    local state_summary="Схема: ${CONN_SCHEME:-не определена}
+Роль: ${ROLE:-не подтверждена}
+Caddy: ${SRV_CADDY:-неизвестно}
+Xray: ${SRV_XRAY:-неизвестно}
+Hysteria: ${SRV_HYSTERIA:-неизвестно}
+Tailscale: ${TS_STATE:-не настроена}"
+
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.13" --menu "$state_summary
+
+Выберите раздел:" 20 80 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Отменено пользователем."
         exit 0

@@ -1,9 +1,15 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
+bobarev_error_report() {
+    local rc="$1" line="$2" fn="$3"
+    printf '\nBOBAREV: ошибка %s, строка %s, функция %s. Установка не подтверждена.\n' "$rc" "$line" "$fn" >&2
+    return "$rc"
+}
+trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.16-rc1 (Restored Full Edition)
+# Версия: 3.18.0-rc1 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -109,7 +115,25 @@ get_cpu_rps_mask() {
     python3 -c "print(hex((1 << $ncpu) - 1)[2:])" 2>/dev/null || printf '%x' $(( (1 << (ncpu > 16 ? 16 : ncpu)) - 1 ))
 }
 
-silent_run() { "$@" >/dev/null 2>&1 || true; }
+SILENT_RUN_LAST_RC=0
+silent_run() {
+    SILENT_RUN_LAST_RC=0
+    "$@" >/dev/null 2>&1 || SILENT_RUN_LAST_RC=$?
+    return 0
+}
+run_optional() {
+    "$@" >/dev/null 2>&1 || true
+    return 0
+}
+run_required() {
+    local label="$1" rc=0
+    shift
+    "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'Ошибка: %s (код %s)\n' "$label" "$rc" >&2
+    fi
+    return "$rc"
+}
 
 verify_sha256() {
     local file="$1"
@@ -10771,7 +10795,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.16.16-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.0-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10795,7 +10819,12 @@ fi
 
 
 mod_mtu_mss_optimizer() {
-    whiptail --title "MTU/MSS" --msgbox "Общий MTU/MSS-оптимизатор временно отключён: он менял все туннели и общую цепочку FORWARD. Используйте настройки конкретного сетевого сценария." 11 70 || true
+    whiptail --title "MTU/MSS — диагностика" --msgbox "Этот пункт теперь только показывает текущие MTU и MSS-правила. Он не меняет настройки автоматически." 10 70 || true
+    echo "=== MTU/MSS DIAGNOSTIC ==="
+    ip -o link show | awk -F': ' '{print $2, $0}' | sed 's/^[0-9]*: //' | head -n 20
+    echo "---- MSS rules ----"
+    iptables -t mangle -S 2>/dev/null | grep -i 'TCPMSS' || echo "MSS-правил не найдено."
+    echo "Диагностика завершена. Изменения не применены."
 }
 
 
@@ -11021,9 +11050,69 @@ bobarev_interactive_stdin() {
     return 0
 }
 
+bobarev_cli_status() {
+    echo "=== BOBAREV CLI STATUS ==="
+    echo "Версия: $SCRIPT_VERSION"
+    if command -v systemctl >/dev/null 2>&1; then
+        for u in caddy.service hysteria-server.service hysteria-client.service bobarev-xray.service wg-quick@wg0 wg-quick@wg-cascade.service derper.service; do
+            if systemctl list-unit-files "$u" >/dev/null 2>&1; then
+                printf '%-32s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
+            fi
+        done
+    fi
+    if command -v tailscale >/dev/null 2>&1; then
+        echo "Tailscale: $(tailscale status >/dev/null 2>&1 && echo active || echo inactive)"
+    fi
+    if command -v ufw >/dev/null 2>&1; then
+        echo "UFW: $(ufw status | head -n 1)"
+    fi
+    return 0
+}
+bobarev_cli_naive_status() {
+    echo "=== BOBAREV NAIVE STATUS ==="
+    if [ -f /etc/default/bobarev-cascade ]; then
+        source /etc/default/bobarev-cascade
+        echo "Роль: ${CASCADE_ROLE:-unknown}"
+        echo "Домен: ${NAIVE_DOMAIN:-unknown}"
+        echo "Выход: ${NAIVE_OUT_MODE:-direct}"
+    else
+        echo "Конфигурация не найдена."
+    fi
+    if systemctl is-active --quiet caddy.service; then
+        echo "Caddy: активен"
+    else
+        echo "Caddy: не активен"
+    fi
+    return 0
+}
+bobarev_cli_tailscale_status() {
+    echo "=== BOBAREV TAILSCALE STATUS ==="
+    if command -v tailscale >/dev/null 2>&1; then
+        tailscale status || true
+    else
+        echo "Tailscale не установлен."
+    fi
+    return 0
+}
+bobarev_cli_router_status() {
+    echo "=== BOBAREV ROUTER STATUS ==="
+    echo "IP forward: $(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)"
+    echo "WAN: $(get_wan_if 2>/dev/null || echo unknown)"
+    if command -v ufw >/dev/null 2>&1; then
+        echo "UFW: $(ufw status | head -n 1)"
+    fi
+    return 0
+}
+# CLI dispatch
+case "${1:-}" in
+    status) bobarev_cli_status; exit 0 ;;
+    naive-status) bobarev_cli_naive_status; exit 0 ;;
+    tailscale-status) bobarev_cli_tailscale_status; exit 0 ;;
+    router-status) bobarev_cli_router_status; exit 0 ;;
+esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.16-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.0-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

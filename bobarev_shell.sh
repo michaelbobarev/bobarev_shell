@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.15.1 (Dual-Stack Mullvad VPS Gateway + VLESS-REALITY + Clean Router-v2 Edition)
+# Версия: 3.16.2 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -857,35 +857,63 @@ mod_crowdsec() {
 
 
 mod_mtu_mss_optimizer() {
-    MTU_CHOICE=$(whiptail --title "Оптимизатор MTU/MSS" --menu "Выберите профиль MTU для туннелей:
-(MSS будет рассчитан автоматически)" 15 65 4         "1420" "Стандартный WireGuard"         "1360" "Безопасный (Простые каскады)"         "1280" "Рекомендуемый (Каскады с WARP/Tailscale)"         "1140" "Экстрим (Сложные каскады / PPPoE)" 3>&1 1>&2 2>&3)
-    
-    if [ -z "$MTU_CHOICE" ]; then return; fi
-    
-    MSS_VAL=$((MTU_CHOICE - 40))
-    
-    whiptail --title "Оптимизация" --infobox "Применение MTU=$MTU_CHOICE и MSS=$MSS_VAL..." 8 50
-    
-    # Ищем туннельные интерфейсы
+    # 1. Поиск туннельных интерфейсов
     INTERFACES=$(ip link show | grep -E 'wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare' | awk -F': ' '{print $2}' || true)
     
-    if [ -n "$INTERFACES" ]; then
-        for IFACE in $INTERFACES; do
-            ip link set dev $IFACE mtu $MTU_CHOICE 2>/dev/null || true
-        done
+    if [ -z "$INTERFACES" ]; then
+        whiptail --title "Ошибка" --msgbox "Туннельные интерфейсы не найдены!" 8 50
+        return
     fi
     
-    # Применяем MSS Clamping
-    iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL 2>/dev/null || true
-    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL
+    # Формируем список для меню с текущими значениями MTU
+    MENU_OPTIONS=()
+    for IFACE in $INTERFACES; do
+        CURRENT_MTU=$(ip -j link show dev "$IFACE" 2>/dev/null | grep -o '"mtu":[^,]*' | cut -d: -f2 || echo "N/A")
+        MENU_OPTIONS+=("$IFACE" "Текущий MTU: $CURRENT_MTU")
+    done
     
-    # Сохраняем правила (упрощенно)
-    if command -v netfilter-persistent &> /dev/null; then
-        netfilter-persistent save > /dev/null 2>&1
+    SELECTED_IFACE=$(whiptail --title "Выбор интерфейса" --menu "Выберите туннель для настройки MTU/MSS:" 15 65 6 "${MENU_OPTIONS[@]}" 3>&1 1>&2 2>&3)
+    
+    if [ -z "$SELECTED_IFACE" ]; then return; fi
+    
+    MTU_CHOICE=$(whiptail --title "Настройка MTU для $SELECTED_IFACE" --menu "Выберите профиль MTU:
+(MSS будет рассчитан автоматически)" 15 65 4         "1420" "Стандартный WireGuard"         "1360" "Безопасный (Простые каскады)"         "1280" "Рекомендуемый (Каскады с WARP/Tailscale)"         "1140" "Экстрим (Сложные каскады / PPPoE)" 3>&1 1>&2 2>&3)
+
+    if [ -z "$MTU_CHOICE" ]; then return; fi
+
+    MSS_VAL=$((MTU_CHOICE - 40))
+
+    whiptail --title "Оптимизация" --infobox "Применение MTU=$MTU_CHOICE и MSS=$MSS_VAL к $SELECTED_IFACE..." 8 60
+
+    # Удаление старых правил TCPMSS для конкретного интерфейса
+    # Находим номера строк в цепочке FORWARD и удаляем их с конца
+    OLD_RULES=$(iptables -t mangle -L FORWARD --line-numbers -n | grep "TCPMSS" | grep -E "( $SELECTED_IFACE )|( $SELECTED_IFACE$)" | awk '{print $1}' | tac || true)
+    for RULE_NUM in $OLD_RULES; do
+        iptables -t mangle -D FORWARD "$RULE_NUM" 2>/dev/null || true
+    done
+
+    # Применение MTU с отловом реальных ошибок
+    if ip link set dev "$SELECTED_IFACE" mtu "$MTU_CHOICE" 2>/tmp/mtu_err.log; then
+        # Добавляем новое правило, ограниченное только этим интерфейсом (-o $SELECTED_IFACE)
+        iptables -t mangle -A FORWARD -o "$SELECTED_IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_VAL"
+        
+        # Сохранение правил
+        if command -v netfilter-persistent &> /dev/null; then
+            netfilter-persistent save > /dev/null 2>&1
+        fi
+        
+        whiptail --title "Успех" --msgbox "Интерфейс: $SELECTED_IFACE
+Новый MTU: $MTU_CHOICE
+Новый MSS: $MSS_VAL
+
+Правило MSS Clamping применено только для трафика этого туннеля." 12 60
+    else
+        ERR=$(cat /tmp/mtu_err.log)
+        whiptail --title "Ошибка" --msgbox "Не удалось изменить MTU для $SELECTED_IFACE.
+
+Детали ошибки:
+$ERR" 12 60
     fi
-    
-    whiptail --title "Успех" --msgbox "MTU и TCP MSS успешно оптимизированы для интерфейсов:
-$INTERFACES" 10 60
 }
 while true; do
         MODULE_CANCELED=false
@@ -10845,120 +10873,184 @@ fi
 # ==============================================================================
 # ===  ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
 # ==============================================================================
-while true; do
-    BOBAREV_SECTION_TITLE=''
-    ts_main_status="Отсутствует"
-    if command -v tailscale &>/dev/null; then
-        if is_derp_active; then
-            ts_main_status="Активна + Личный DERP"
-        elif is_tailscale_web_active; then
-            ts_main_status="Активна (веб-панель)"
-        else
-            ts_main_status="Активна"
+
+# ==========================================
+# НОВАЯ СИСТЕМА ИЕРАРХИЧЕСКИХ МЕНЮ (v3.16.1 - Path Navigation)
+# ==========================================
+
+menu_server_security() {
+    while true; do
+        sub_choice=$(whiptail --title "🛠 СЕРВЕР И БЕЗОПАСНОСТЬ" --menu "Выберите категорию:" 20 75 12             "1" "[АВТО] Первичная настройка - мастер"             "2" "Основные настройки (TZ, Hostname, APT)"             "3" "Пользователи и SSH (Ключи, Конфиг, Root)"             "4" "Защита и брандмауэр (UFW, CrowdSec, Hardening)"             "5" "Память и производительность (RAM, Swap, BBR)"             "6" "Оборудование и утилиты (Desktop, HDMI)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+            
+        case "$sub_choice" in
+            1) run_full_auto_setup; pause_enter ;;
+            2) 
+                # Подменю основных настроек
+                mod_timezone; mod_hostname; mod_apt_update; pause_enter ;;
+            3) 
+                # Подменю SSH
+                mod_user_setup; mod_ssh_key; mod_ssh_config; mod_lock_root; pause_enter ;;
+            4)
+                # Подменю защиты
+                mod_ufw; mod_hardening; mod_crowdsec; pause_enter ;;
+            5)
+                # Подменю производительности
+                mod_ram_flash_opt; mod_swap_manager; mod_bbr_setup; pause_enter ;;
+            6)
+                mod_desktop_apps; mod_hdmi_reset; pause_enter ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_naiveproxy_two_servers() {
+    while true; do
+        sub_choice=$(whiptail --title "NAIVEPROXY → ДВА СЕРВЕРА" --menu "Как соединить входной и выходной серверы?" 18 75 6             "1" "Xray REALITY (Рекомендуется)"             "2" "Hysteria 2"             "3" "WireGuard"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+            
+        case "$sub_choice" in
+            1) manage_cascade_xray_menu ;;
+            2) manage_cascade_hysteria_menu ;;
+            3) mod_direct_wg_cascade ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_naiveproxy_setup() {
+    while true; do
+        sub_choice=$(whiptail --title "СОЕДИНЕНИЯ → NAIVEPROXY" --menu "Выберите топологию сети:" 20 75 8             "1" "Один сервер (Автономный + WG Dual-Gateway)"             "2" "Два сервера (Каскад)"             "3" "Выход через Tailscale / Mullvad"             "4" "Выход через XRayMesh"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+            
+        case "$sub_choice" in
+            1) setup_standalone_naive ;;
+            2) menu_naiveproxy_two_servers ;;
+            3) manage_naive_mullvad_menu ;;
+            4) manage_naive_mesh_menu ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_connections_proxies() {
+    while true; do
+        sub_choice=$(whiptail --title "🌍 СОЕДИНЕНИЯ И ПРОКСИ" --menu "Сценарии и протоколы:" 20 75 8             "1" "NaiveProxy — вход для клиентов"             "2" "Xray REALITY — управление каскадом"             "3" "Hysteria 2 — управление каскадом"             "4" "WireGuard / AmneziaWG — управление"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+            
+        case "$sub_choice" in
+            1) menu_naiveproxy_setup ;;
+            2) manage_cascade_xray_menu ;;
+            3) manage_cascade_hysteria_menu ;;
+            4) mod_amnezia_wg ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_tailscale_network() {
+    while true; do
+        sub_choice=$(whiptail --title "🔒 ЗАКРЫТАЯ СЕТЬ TAILSCALE" --menu "Управление виртуальной сетью:" 15 75 6             "1" "Подключение и состояние (Установка)"             "2" "Использовать Tailscale для NaiveProxy (Переход)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+            
+        case "$sub_choice" in
+            1) mod_tailscale ;;
+            2) manage_naive_mullvad_menu ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_local_router() {
+    while true; do
+        sub_choice=$(whiptail --title "🖧 ЛОКАЛЬНЫЙ МАРШРУТИЗАТОР" --menu "Настройка сервера как LAN-роутера:" 15 75 6             "1" "Настроить LAN и выход в интернет (SBC)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+            
+        case "$sub_choice" in
+            1) mod_router_sbc ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+menu_diagnostics_maintenance() {
+    while true; do
+        sub_choice=$(whiptail --title "⚙️ ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 10             "1" "Состояние сервера (Аудит ресурсов)"             "2" "Проверка сети и каскадных пар"             "3" "Системные журналы"             "4" "Анализ загрузки системы"             "5" "Общий MTU/MSS — расширенные настройки"             "6" "Экспорт / Импорт настроек (Бэкап)"             "7" "Дополнительно: Telegram Уведомления"             "8" "Остановка и сброс сетевых надстроек"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+            
+        case "$sub_choice" in
+            1) mod_server_audit; pause_enter ;;
+            2) mod_network_cascade_audit ;;
+            3) mod_logging_manager; pause_enter ;;
+            4) mod_boot_diag; pause_enter ;;
+            5) mod_mtu_mss_optimizer ;;
+            6) mod_backup_manager; pause_enter ;;
+            7) mod_telegram_bot; pause_enter ;;
+            8) mod_network_reset ;;
+            0|"") return ;;
+        esac
+    done
+}
+
+
+detect_current_state() {
+    CURRENT_HOSTNAME=$(hostname)
+
+    # Проверка статусов служб
+    SRV_CADDY="остановлен"
+    systemctl is-active --quiet caddy && SRV_CADDY="работает"
+
+    SRV_XRAY="остановлен"
+    systemctl is-active --quiet xray && SRV_XRAY="работает"
+
+    SRV_HYSTERIA="остановлен"
+    systemctl is-active --quiet hysteria-server && SRV_HYSTERIA="работает"
+
+    # Определение схемы и роли
+    CONN_SCHEME="Не определено"
+    ROLE="Роль не подтверждена"
+
+    if [ "$SRV_CADDY" = "работает" ]; then
+        if grep -q "forward_proxy" /etc/caddy/Caddyfile 2>/dev/null; then
+            if [ "$SRV_XRAY" = "работает" ]; then
+                CONN_SCHEME="NaiveProxy → Xray REALITY"
+                if grep -q "reverse_proxy 127.0.0.1:8080" /etc/caddy/Caddyfile 2>/dev/null; then
+                    ROLE="Входной сервер (Сервер 1)"
+                else
+                    ROLE="Выходной сервер (Сервер 2)"
+                fi
+            elif [ "$SRV_HYSTERIA" = "работает" ]; then
+                CONN_SCHEME="NaiveProxy → Hysteria 2"
+                ROLE="Входной сервер (Сервер 1)"
+            else
+                CONN_SCHEME="NaiveProxy (Автономный)"
+                ROLE="Одиночный сервер"
+            fi
+        fi
+    elif [ "$SRV_XRAY" = "работает" ]; then
+         CONN_SCHEME="Xray REALITY"
+         ROLE="Выходной сервер (Сервер 2)"
+    elif [ "$SRV_HYSTERIA" = "работает" ]; then
+         CONN_SCHEME="Hysteria 2"
+         ROLE="Выходной сервер (Сервер 2)"
+    fi
+
+    # Настоящая проверка Tailscale
+    TS_STATE="не настроена"
+    if command -v tailscale >/dev/null 2>&1; then
+        if tailscale status >/dev/null 2>&1; then
+            TS_STATE="активна"
         fi
     fi
-    
-    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-        ufw_status="Активен"
-    else
-        ufw_status="Не активен"
-    fi
-    
-    tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
-    tz="${tz#Etc/}"
+}
 
-    export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
-    export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
-    export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
-    export WT_HEIGHT=$((TERM_LINES < 27 ? TERM_LINES : 27))
-    WT_MENU=$((WT_HEIGHT - 14))
-    if [ "$WT_MENU" -lt 6 ]; then WT_MENU=6; fi
+# --- ГЛАВНЫЙ ЦИКЛ ---
+while true; do
+    MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.1" --menu "Главное меню:" 18 75 6         "1" "🛠 Сервер и безопасность"         "2" "🌍 Соединения и прокси"         "3" "🔒 Закрытая сеть Tailscale"         "4" "🖧 Локальный маршрутизатор"         "5" "⚙️ Диагностика и обслуживание"         "0" "❌ Выход" 3>&1 1>&2 2>&3)
 
-    choice=""
-    if ! smart_menu " ГЛАВНОЕ МЕНЮ" \
-    "\n   Системные данные:
-   Хост: $(hostname) ($(get_system_type_short))
-   Часовой пояс: $tz
-   Статус UFW: $ufw_status
-   Сеть Tailscale: $ts_main_status
-
-   Выберите желаемый этап настройки:" $WT_HEIGHT $WT_WIDTH $WT_MENU "choice" \
-    "1" " Часовой пояс" \
-    "2" " Имя сервера" \
-    "3" " Обновление компонентов" \
-    "4" " Создание и настройка пользователя" \
-    "5" " Привязка ключа безопасности" \
-    "6" " Конфигурация удаленного доступа" \
-    "7" " Настройка системной защиты" \
-    "8" " Управление брандмауэром" \
-    "9" " Блокировка доступа суперпользователя" \
-    "10" " Настройка закрытой сети Tailscale" \
-    "11" " Управление системными журналами" \
-    "12" " Оптимизация памяти" \
-    "13" " Управление файлом подкачки" \
-    "14" " Утилиты ПК и режим процессора" \
-    "15" " Сброс видеовыхода HDMI" \
-    "16" " Анализ времени загрузки" \
-    "17" " Режим локального маршрутизатора" \
-    "18" " Экспорт / Импорт настроек" \
-    "19" " Каскад 1: NaiveProxy + WireGuard + WARP" \
-    "20" " Каскад 2: NaiveProxy + Hysteria 2 + WARP" \
-    "21" " Каскад 3: NaiveProxy + Xray REALITY + WARP" \
-    "22" " Автономный NaiveProxy (+ WG Dual-Gateway)" \
-    "23" "NaiveProxy-XRayMesh" \
-    "24" "NaiveProxy-Tailscale Mullvad Exit" \
-    "25" "Аудит системы 1" \
-    "26" "Аудит системы 2 и каскадные пары" \
-    "27" "Сброс сетевых надстроек (выборочно)" \
-    "28" " Настройка TCP BBR (Ускорение)" \
-    "29" " Настройка Telegram Уведомлений" \
-    "30" " Установка AmneziaWG (+QR)" \
-    "31" " Защита сервера (CrowdSec)" \
-    "32" " Оптимизация MTU/MSS (Каскады)" \
-    "A" " Выполнить первичную настройку целиком (Шаги 1-12)" \
-    "0" " Завершить работу" || [ "$choice" = "0" ]; then
-        clear
-        echo "Работа скрипта завершена."
-        exit 0
-    fi
-
-    MODULE_CANCELED=false
-    clear
-
-    BOBAREV_SECTION_TITLE=${BOBAREV_MENU_TITLES[$choice]:-}
-    case "$choice" in
-        1) mod_timezone; pause_enter ;;
-        2) mod_hostname; pause_enter ;;
-        3) mod_apt_update; pause_enter ;;
-        4) mod_user_setup; pause_enter ;;
-        5) mod_ssh_key; pause_enter ;;
-        6) mod_ssh_config; pause_enter ;;
-        7) mod_hardening; pause_enter ;;
-        8) mod_ufw; pause_enter ;;
-        9) mod_lock_root; pause_enter ;;
-        10) mod_tailscale ;;
-        11) mod_logging_manager; pause_enter ;;
-        12) mod_ram_flash_opt; pause_enter ;;
-        13) mod_swap_manager; pause_enter ;;
-        14) mod_desktop_apps; pause_enter ;;
-        15) mod_hdmi_reset; pause_enter ;;
-        16) mod_boot_diag; pause_enter ;;
-        17) mod_router_sbc ;;
-        18) mod_backup_manager; pause_enter ;;
-        19) mod_direct_wg_cascade ;;
-        20) manage_cascade_hysteria_menu ;;
-        21) manage_cascade_xray_menu ;;
-        22) setup_standalone_naive ;;
-        23) manage_naive_mesh_menu ;;
-        24) manage_naive_mullvad_menu ;;
-        25) mod_server_audit; pause_enter ;;
-        26) mod_network_cascade_audit ;;
-        27) mod_network_reset ;;
-        28) mod_bbr_setup ;;
-        29) mod_telegram_bot ;;
-        30) mod_amnezia_wg ;;
-        31) mod_crowdsec ;;
-        32) mod_mtu_mss_optimizer ;;
-        A) run_full_auto_setup; pause_enter ;;
+    case "$MAIN_CHOICE" in
+        1) menu_server_security ;;
+        2) menu_connections_proxies ;;
+        3) menu_tailscale_network ;;
+        4) menu_local_router ;;
+        5) menu_diagnostics_maintenance ;;
+        0|"")
+            clear
+            echo "Работа скрипта завершена."
+            exit 0
+            ;;
     esac
 done

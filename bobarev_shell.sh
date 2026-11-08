@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.4-rc1 (Restored Full Edition)
+# Версия: 3.18.5-rc1 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6451,7 +6451,7 @@ mod_server_audit() {
     if [ "$oversell_score" -eq 1 ]; then
         verdict_human="${C_YELLOW} Замечены задержки; причина не установлена${C_RESET}"
     elif [ "$oversell_score" -ge 2 ]; then
-        verdict_human="${C_RED}Высокие задержки; причина не установлена${C_RESET}"
+        verdict_human="${C_RED} Жесткий оверселлинг! (хостер урезает железо)${C_RESET}"
     fi
 
     echo -e "   Температура процессора:    $cpu_temp"
@@ -6489,65 +6489,67 @@ mod_server_audit() {
     fi
 
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
-    local ssh_port=unknown sshd_cmd ssh_eff='' ssh_root='' ssh_pass='' ssh_key=''
-    sshd_cmd=$(get_sshd_cmd)
+    local ssh_port="не определён" root_ssh="unknown" pass_auth="unknown"
+    local sshd_cmd=$(get_sshd_cmd)
+
     if [ -n "$sshd_cmd" ]; then
-        ssh_eff=$("$sshd_cmd" -T 2>/dev/null || true)
+        local conf_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "")
+        local conf_root=$($sshd_cmd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1 || echo "")
+        local conf_pass=$($sshd_cmd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1 || echo "")
+        
+        [ -n "$conf_port" ] && ssh_port="$conf_port"
+        [ -n "$conf_root" ] && root_ssh="$conf_root"
+        [ -n "$conf_pass" ] && pass_auth="$conf_pass"
     fi
-    ssh_port=$(printf '%s\n' "$ssh_eff" | awk '$1=="port"{print $2;exit}')
-    ssh_port=${ssh_port:-unknown}
-    ssh_root=$(printf '%s\n' "$ssh_eff" | awk '$1=="permitrootlogin"{print $2;exit}')
-    ssh_pass=$(printf '%s\n' "$ssh_eff" | awk '$1=="passwordauthentication"{print $2;exit}')
-    ssh_key=$(printf '%s\n' "$ssh_eff" | awk '$1=="pubkeyauthentication"{print $2;exit}')
-    local root_text pass_text key_text port_text protection_text
-    port_text="${C_BLUE}${ssh_port}${C_RESET}"
-    [ "$ssh_port" != unknown ] && port_text="${C_BLUE}${ssh_port} (по конфигурации)${C_RESET}"
-    case "$ssh_root" in
-        yes) root_text="${C_YELLOW}Разрешён настройками SSH${C_RESET}" ;;
-        no) root_text="${C_GREEN}Запрещён настройками SSH${C_RESET}" ;;
-        prohibit-password|without-password) root_text="${C_BLUE}Без парольного входа${C_RESET}" ;;
-        forced-commands-only) root_text="${C_BLUE}Только принудительные команды${C_RESET}" ;;
-        *) root_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
-    esac
-    local root_pw_state
-    root_pw_state=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
-    case "$root_pw_state" in L|LK) root_text="${root_text}; пароль root заблокирован" ;; esac
-    case "$ssh_pass" in
-        yes) pass_text="${C_YELLOW}Разрешена настройками SSH${C_RESET}" ;;
-        no) pass_text="${C_GREEN}Отключена${C_RESET}" ;;
-        *) pass_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
-    esac
-    case "$ssh_key" in
-        yes) key_text="${C_GREEN}Разрешена${C_RESET}" ;;
-        no) key_text="${C_YELLOW}Отключена${C_RESET}" ;;
-        *) key_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
-    esac
-    local guards='' journal_ssh=''
-    systemctl is-active --quiet sshguard.service 2>/dev/null && guards=sshguard
-    if systemctl is-active --quiet fail2ban.service 2>/dev/null; then
-        guards="${guards:+$guards и }fail2ban"
-    fi
-    if [ -n "$guards" ]; then
-        journal_ssh=$(journalctl -b -n 1 -o cat --no-pager _COMM=sshd + _COMM=sshd-session 2>/dev/null || true)
-        if [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then
-            protection_text="${C_BLUE}${guards} запущены; журнал SSH доступен${C_RESET}"
-        else
-            protection_text="${C_YELLOW}${guards} запущены; журнал SSH не подтверждён${C_RESET}"
-        fi
+
+    local port_status_human
+    if [ "$ssh_port" = "22" ]; then
+        port_status_human="${C_YELLOW}22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
     else
-        protection_text="${C_YELLOW}Активные службы не обнаружены${C_RESET}"
+        port_status_human="${C_GREEN}$ssh_port (Нестандартный порт)${C_RESET}"
     fi
-    audit_compact_ssh_row() {
-        local label="$1" value="$2" pad
-        pad=$((28 - ${#label})); [ "$pad" -gt 0 ] || pad=1
-        printf '   %s%*s%b\n' "$label" "$pad" '' "$value"
+
+    local root_status_human
+    case "${root_ssh,,}" in
+        no) root_status_human="${C_GREEN}Запрещен${C_RESET}" ;;
+        prohibit-password|without-password) root_status_human="${C_GREEN}Только по SSH-ключам${C_RESET}" ;;
+        yes) root_status_human="${C_RED}Разрешен${C_RESET}" ;;
+        *) root_status_human="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
+
+    local pass_status_human
+    case "${pass_auth,,}" in
+        no) pass_status_human="${C_GREEN}Отключена${C_RESET}" ;;
+        yes) pass_status_human="${C_YELLOW}Разрешена настройками SSH${C_RESET}" ;;
+        *) pass_status_human="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
+
+    local root_pw
+    root_pw=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
+    case "$root_pw" in L|LK) root_status_human="$root_status_human; пароль root заблокирован" ;; esac
+    local guard_text='' journal_text='' protection
+    systemctl is-active --quiet sshguard.service 2>/dev/null && guard_text=sshguard
+    if systemctl is-active --quiet fail2ban.service 2>/dev/null; then
+        guard_text="${guard_text:+$guard_text и }fail2ban"
+    fi
+    journal_text=$(journalctl -b -n 1 -o cat --no-pager _COMM=sshd + _COMM=sshd-session 2>/dev/null || true)
+    if [ -z "$guard_text" ]; then
+        protection="${C_YELLOW}Активные службы не обнаружены${C_RESET}"
+    elif [ -z "$journal_text" ] || [ "$journal_text" = '-- No entries --' ]; then
+        protection="${C_YELLOW}$guard_text запущены; журнал SSH не подтверждён${C_RESET}"
+    else
+        protection="${C_BLUE}$guard_text запущены; журнал SSH доступен${C_RESET}"
+    fi
+    audit_short_row() {
+        local label="$1" value="$2" gap
+        gap=$((28-${#label})); [ "$gap" -gt 0 ] || gap=1
+        printf '   %s%*s%b\n' "$label" "$gap" '' "$value"
     }
-    audit_compact_ssh_row 'Используемый порт SSH:' "$port_text"
-    audit_compact_ssh_row 'Вход для root по SSH:' "$root_text"
-    audit_compact_ssh_row 'Авторизация по паролю:' "$pass_text"
-    audit_compact_ssh_row 'Авторизация по ключу:' "$key_text"
-    audit_compact_ssh_row 'Защита от перебора:' "$protection_text"
-    unset -f audit_compact_ssh_row
+    audit_short_row 'Используемый порт SSH:' "$port_status_human"
+    audit_short_row 'Вход для root по SSH:' "$root_status_human"
+    audit_short_row 'Авторизация по паролю:' "$pass_status_human"
+    audit_short_row 'Защита от перебора:' "$protection"
+    unset -f audit_short_row
 
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
@@ -6702,12 +6704,7 @@ mod_server_audit() {
                     cascade_status="${C_BLUE}NaiveProxy запущен в автономной конфигурации; фактический внешний IP не проверен${C_RESET}"
                 fi
                 ;;
-            standalone_naive)
-                case "$audit_out_mode" in
-                    direct) cascade_status="${C_BLUE}NaiveProxy — прямой выход по настройкам${C_RESET}" ;;
-                    *) cascade_status="${C_BLUE}NaiveProxy — выход ${audit_out_mode:-не определён} по настройкам${C_RESET}" ;;
-                esac ;;
-            *) cascade_status="${C_BLUE}NaiveProxy запущен; выход не определён${C_RESET}" ;;
+            *) cascade_status="${C_BLUE}NaiveProxy запущен; направление выхода по этой проверке не определено${C_RESET}" ;;
         esac
     elif is_wg_cascade_active && is_warp_active; then
         cascade_status="${C_GREEN} Сервер 2 (Прямой скоростной выход: WG-Мост -> WARP активен)${C_RESET}"
@@ -6835,13 +6832,12 @@ mod_server_audit() {
     if [ "$mss_active" = true ]; then
         echo -e "   Выравнивание пакетов (MSS): ${C_GREEN} Правила настроены${C_RESET}"
     else
-        echo -e "   Выравнивание пакетов (MSS): ${C_YELLOW}  Правила не обнаружены${C_RESET}"
+        echo -e "   Выравнивание пакетов (MSS): ${C_YELLOW}  Выключено (возможны зависания сайтов в VPN)${C_RESET}"
     fi
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_ports_list
-        ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '$2=="ALLOW" && $3=="IN" {print $1}' | sort -u | paste -sd ', ' - || true)
-        [ -z "$ufw_ports_list" ] && ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '$2=="ALLOW" {print $1}' | sort -u | paste -sd ',' - || true)
+        ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '$2=="ALLOW" {print $1}' | sort -u | paste -sd ',' - || true)
         [ -z "$ufw_ports_list" ] && ufw_ports_list="Все входящие порты закрыты"
         echo -e "   Открытые порты (по UFW):    ${C_BLUE}${ufw_ports_list}${C_RESET}"
     elif command -v ss &>/dev/null; then
@@ -10819,7 +10815,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.4-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.5-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10989,19 +10985,24 @@ menu_local_router() {
 }
 
 menu_diagnostics_maintenance() {
+    local sub_choice
     while true; do
-        if ! sub_choice=$(whiptail --title "⚙️ ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 10             "1" "Состояние сервера (Аудит ресурсов)"             "2" "Проверка сети и каскадных пар"             "3" "Системные журналы"             "4" "Анализ загрузки системы"             "5" "Общий MTU/MSS — расширенные настройки"             "6" "Экспорт / Импорт настроек (Бэкап)"             "7" "Дополнительно: Telegram Уведомления"             "8" "Остановка и сброс сетевых надстроек"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
+        if ! sub_choice=$(whiptail --title "ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 7 \
+            "1" "Состояние сервера (Аудит ресурсов)" \
+            "2" "Проверка сети и каскадных пар" \
+            "3" "Системные журналы" \
+            "4" "Анализ загрузки системы" \
+            "5" "Экспорт / Импорт настроек (Бэкап)" \
+            "6" "Остановка и сброс сетевых надстроек" \
+            "0" "Назад" 3>&1 1>&2 2>&3); then return 0; fi
         case "$sub_choice" in
             1) mod_server_audit; pause_enter ;;
             2) mod_network_cascade_audit ;;
             3) mod_logging_manager; pause_enter ;;
             4) mod_boot_diag; pause_enter ;;
-            5) mod_mtu_mss_optimizer ;;
-            6) mod_backup_manager; pause_enter ;;
-            7) mod_telegram_bot; pause_enter ;;
-            8) mod_network_reset ;;
-            0|"") return ;;
+            5) mod_backup_manager; pause_enter ;;
+            6) mod_network_reset ;;
+            0|"") return 0 ;;
         esac
     done
 }
@@ -11136,7 +11137,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.4-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.5-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

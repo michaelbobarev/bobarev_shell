@@ -1,15 +1,9 @@
 #!/bin/bash
-set -Eeuo pipefail
-bobarev_error_report() {
-    local rc="$1" line="$2" fn="$3"
-    printf '\nBOBAREV: ошибка %s, строка %s, функция %s. Установка не подтверждена.\n' "$rc" "$line" "$fn" >&2
-    return "$rc"
-}
-trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
+set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.15-rc1 (Restored Full Edition)
+# Версия: 3.16.16-rc1 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -115,21 +109,7 @@ get_cpu_rps_mask() {
     python3 -c "print(hex((1 << $ncpu) - 1)[2:])" 2>/dev/null || printf '%x' $(( (1 << (ncpu > 16 ? 16 : ncpu)) - 1 ))
 }
 
-SILENT_RUN_LAST_RC=0
-silent_run() {
-    SILENT_RUN_LAST_RC=0
-    "$@" >/dev/null 2>&1 || SILENT_RUN_LAST_RC=$?
-    return 0
-}
-run_required() {
-    local label="$1" rc=0
-    shift
-    "$@" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        printf 'Ошибка: %s (код %s)\n' "$label" "$rc" >&2
-    fi
-    return "$rc"
-}
+silent_run() { "$@" >/dev/null 2>&1 || true; }
 
 verify_sha256() {
     local file="$1"
@@ -1012,35 +992,41 @@ print_naive_shadowrocket_links() {
         echo -e "${C_YELLOW} Пользователи NaiveProxy еще не созданы или Сервер 1 не настроен.${C_RESET}"
         return 0
     fi
-    # shellcheck disable=SC1091
     source /etc/default/bobarev-cascade
     local dom="${NAIVE_DOMAIN:-$(hostname)}"
-
     local show_real=false
-    if prompt_yn "Показать реальные пароли в ссылках для копирования в Shadowrocket?\n\n Да: готовые рабочие ссылки.\n Нет: скрыть пароли звездочками (безопасно для скриншотов)." "true"; then
+    if prompt_yn "Показать рабочие ссылки с паролем?
+Внимание: ссылки будут содержать пароль. Не отправляйте их в чат и не делайте скриншот." "false"; then
         show_real=true
     fi
-
-    echo -e "\n${C_CYAN} === ГОТОВЫЕ ССЫЛКИ ДЛЯ SHADOWROCKET ===${C_RESET}"
+    echo -e "\n${C_CYAN} === ССЫЛКИ ДЛЯ SHADOWROCKET ===${C_RESET}"
     while IFS=: read -r u p; do
         [ -z "$u" ] || [ -z "$p" ] && continue
-        local disp_p="********"
-        local b64_str="Скрыто_для_скриншота"
+        local safe_b64="Скрыто_для_скриншота"
+        local safe_https="https://${u}:********@${dom}:443?padding=true#${dom}-${u}"
+        local real_b64="" real_https=""
         if [ "$show_real" = true ]; then
-            disp_p="$p"
-            b64_str=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64)
+            real_b64=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64)
+            real_https="https://${u}:${p}@${dom}:443?padding=true#${dom}-${u}"
         fi
-        echo -e "\n Пользователь: ${C_BOLD}${u}${C_RESET} (Сервер: ${C_GREEN}${dom}${C_RESET}, Порт: ${C_GREEN}443${C_RESET})"
-        echo -e "   ${C_GREEN} ОСНОВНАЯ ССЫЛКА HTTP/2 (Мультиплексирование в 1 клик, рекомендуется для YouTube и стриминга):${C_RESET}"
-        echo -e "    ${C_BOLD}${C_GREEN}http2://${b64_str}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
-        echo -e "   ${C_BLUE}Резервная ссылка HTTPS + Padding (классический формат, требует ручного включения HTTP2 в TLS):${C_RESET}"
-        echo -e "    ${C_BLUE}https://${u}:${disp_p}@${dom}:443?padding=true#${dom}-${u}${C_RESET}"
+        echo -e "\n Пользователь: ${C_BOLD}${u}${C_RESET}"
+        echo -e " Сервер: ${C_GREEN}${dom}${C_RESET}   Порт: ${C_GREEN}443${C_RESET}"
+        echo -e " ${C_GREEN}Основная ссылка HTTP/2:${C_RESET}"
+        if [ "$show_real" = true ]; then
+            echo -e " ${C_BOLD}${C_GREEN}http2://${real_b64}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
+        else
+            echo -e " ${C_BOLD}${C_GREEN}http2://${safe_b64}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
+        fi
+        echo -e " ${C_BLUE}Резервная ссылка HTTPS + Padding:${C_RESET}"
+        if [ "$show_real" = true ]; then
+            echo -e " ${C_BLUE}${real_https}${C_RESET}"
+        else
+            echo -e " ${C_BLUE}${safe_https}${C_RESET}"
+        fi
     done < "$NAIVE_PASS_FILE"
-
-    echo -e "\n${C_BLUE} Почему основная ссылка http2:// работает быстрее и стабильнее чем https://:${C_RESET}"
-    echo -e "   Схема ${C_BOLD}http2://${C_RESET} выбирает HTTP/2 в ссылке. Фактический протокол и стабильность зависят от клиента, сети и сайта."
-    echo -e "   HTTP/2 может мультиплексировать несколько запросов в одном TLS-соединении, но не гарантирует отсутствие пауз или лучшую скорость."
+    echo -e "\n${C_BLUE}HTTP/2 может улучшить производительность при множестве параллельных запросов, но не гарантирует более высокую скорость или стабильность. Фактический результат зависит от сети, клиента и удалённого сайта.${C_RESET}"
 }
+
 
 write_bobarev_cascade_ru_script() {
     cat << 'RU_SH_EOF' > /usr/local/bin/bobarev-cascade-ru.sh
@@ -1473,7 +1459,6 @@ setup_standalone_naive() {
                 if ! prompt_yn "Применить автономный NaiveProxy для $n_dom? Конфиг Caddy будет заменён; выход wg0, если выбран, сохраняется. Другие каскады автоматически не отключаются." "false"; then
                     continue
                 fi
-                # Existing unrelated services are not stopped to make room.
                 if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
                     echo "Обнаружены службы другого каскада. Автономная настройка не будет их останавливать. Сначала явно выберите нужную схему."; pause_enter; continue
                 fi
@@ -1498,7 +1483,6 @@ setup_standalone_naive() {
                     fi
                     old_caddy=true
                 fi
-                # Do not change routes, GRO or MSS as a side effect of this wizard.
                 if ! ensure_go_and_build_caddy_naive; then
                     echo "Ошибка подготовки Caddy. Настройка не подтверждена. Бэкап: $backup_dir"; pause_enter; continue
                 fi
@@ -10787,7 +10771,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.16.15-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.16.16-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10847,28 +10831,33 @@ mod_crowdsec() {
 
 menu_server_security() {
     while true; do
-        if ! sub_choice=$(whiptail --title "🛠 СЕРВЕР И БЕЗОПАСНОСТЬ" --menu "Выберите категорию:" 20 75 12             "1" "[АВТО] Первичная настройка - мастер"             "2" "Основные настройки (TZ, Hostname, APT)"             "3" "Пользователи и SSH (Ключи, Конфиг, Root)"             "4" "Защита и брандмауэр (UFW, CrowdSec, Hardening)"             "5" "Память и производительность (RAM, Swap, BBR)"             "6" "Оборудование и утилиты (Desktop, HDMI)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
-        case "$sub_choice" in
-            1) run_full_auto_setup; pause_enter ;;
-            2) 
-                # Подменю основных настроек
-                mod_timezone; mod_hostname; mod_apt_update; pause_enter ;;
-            3) 
-                # Подменю SSH
-                mod_user_setup; mod_ssh_key; mod_ssh_config; mod_lock_root; pause_enter ;;
+        local choice c
+        if ! choice=$(whiptail --title "Базовая настройка" --menu "Выберите категорию:" 18 75 7 "1" "Основные настройки" "2" "Пользователи и SSH" "3" "Защита и брандмауэр" "4" "Память и производительность" "5" "Оборудование и утилиты" "A" "Первичная настройка целиком" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then
+            return 0
+        fi
+        [ -z "$choice" ] && return 0
+        case "$choice" in
+            1)
+                if ! c=$(whiptail --title "Основные настройки" --menu "Выберите действие:" 16 70 4 "1" "Часовой пояс" "2" "Имя сервера" "3" "Обновление компонентов" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_timezone; pause_enter ;; 2) mod_hostname; pause_enter ;; 3) mod_apt_update; pause_enter ;; esac ;;
+            2)
+                if ! c=$(whiptail --title "Пользователи и SSH" --menu "Выберите действие:" 16 70 5 "1" "Создание и настройка пользователя" "2" "Привязка ключа безопасности" "3" "Конфигурация удаленного доступа" "4" "Блокировка доступа суперпользователя" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_user_setup; pause_enter ;; 2) mod_ssh_key; pause_enter ;; 3) mod_ssh_config; pause_enter ;; 4) mod_lock_root; pause_enter ;; esac ;;
+            3)
+                if ! c=$(whiptail --title "Защита и брандмауэр" --menu "Выберите действие:" 16 70 4 "1" "Управление брандмауэром" "2" "Настройка системной защиты" "3" "Защита сервера (CrowdSec)" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_ufw; pause_enter ;; 2) mod_hardening; pause_enter ;; 3) mod_crowdsec; pause_enter ;; esac ;;
             4)
-                # Подменю защиты
-                mod_ufw; mod_hardening; mod_crowdsec; pause_enter ;;
+                if ! c=$(whiptail --title "Память и производительность" --menu "Выберите действие:" 16 70 4 "1" "Оптимизация памяти" "2" "Управление файлом подкачки" "3" "Настройка TCP BBR" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_ram_flash_opt; pause_enter ;; 2) mod_swap_manager; pause_enter ;; 3) mod_bbr_setup; pause_enter ;; esac ;;
             5)
-                # Подменю производительности
-                mod_ram_flash_opt; mod_swap_manager; mod_bbr_setup; pause_enter ;;
-            6)
-                mod_desktop_apps; mod_hdmi_reset; pause_enter ;;
-            0|"") return ;;
+                if ! c=$(whiptail --title "Оборудование и утилиты" --menu "Выберите действие:" 16 70 3 "1" "Утилиты ПК и режим процессора" "2" "Сброс видеовыхода HDMI" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
+                case "$c" in 1) mod_desktop_apps; pause_enter ;; 2) mod_hdmi_reset; pause_enter ;; esac ;;
+            A) run_full_auto_setup; pause_enter ;;
+            0) return 0 ;;
         esac
     done
 }
+
 
 menu_naiveproxy_two_servers() {
     while true; do
@@ -11016,11 +11005,10 @@ detect_current_state() {
     fi
 }
 
-
 bobarev_interactive_stdin() {
     if [ ! -t 0 ]; then
         if [ "${BASH_SOURCE[0]:-}" = /dev/stdin ] || [ "${BASH_SOURCE[0]:-}" = /dev/fd/0 ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
-            echo "Не запускайте интерактивную настройку через curl | bash. Сохраните файл и выполните bash файл.sh." >&2
+            echo "Не запускайте интерактивную настройку через curl | bash. Сохраните файл и выполните: bash файл.sh" >&2
             return 1
         fi
         if { true </dev/tty; } 2>/dev/null; then
@@ -11033,10 +11021,9 @@ bobarev_interactive_stdin() {
     return 0
 }
 
-bobarev_interactive_stdin || exit 1
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.15-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.16-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

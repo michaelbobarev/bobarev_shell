@@ -353,7 +353,6 @@ ensure_ufw_nat_rule() {
     fi
 }
 
-# --- BOBAREV WAN NAT: after.init hook для идемпотентного перехода ---
 ensure_ufw_wan_nat_afterinit() {
     local wandev="$1"
     local chain="$2"
@@ -1418,9 +1417,11 @@ EOF
         echo -e "${C_YELLOW} Повторная инициализация интерфейса wg0...${C_RESET}"
         ip link del dev wg0 2>/dev/null || true
         systemctl restart wg-quick@wg0
-        # Предупреждение: порты, открытые наружу (Anywhere)
+        # Предупреждение: порты, открытые наружу (Anywhere, без ограничения интерфейсом)
         local open_anywhere
-        open_anywhere=$(echo "$ufw_out" | awk '/^[0-9]+\/(tcp|udp)[[:space:]]+ALLOW IN[[:space:]]+Anywhere$/ {print $1}' | tr '\n' ' ')
+        open_anywhere=$(echo "$ufw_out" | awk '
+            /^[0-9]+\/(tcp|udp)[[:space:]]+ALLOW IN[[:space:]]+Anywhere([[:space:]]|$)/ { print $1 }
+        ' | tr '\n' ' ')
         open_anywhere="${open_anywhere% }"
         if [ -n "$open_anywhere" ]; then
             echo -e "   ${C_YELLOW}ВНИМАНИЕ: открыты наружу (Anywhere): $open_anywhere${C_RESET}"

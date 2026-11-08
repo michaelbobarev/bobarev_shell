@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.9 (Restored Full Edition)
+# Версия: 3.18.10 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -302,19 +302,37 @@ disable_ufw_strict_rpfilter() {
 }
 
 ensure_ufw_mangle_tcpmss() {
-    if [ -f /etc/ufw/before.rules ]; then
-        if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
-            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-F FORWARD\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
-        elif ! grep -q "^-F FORWARD" /etc/ufw/before.rules; then
-            sed -i '/^:FORWARD ACCEPT/a -F FORWARD' /etc/ufw/before.rules 2>/dev/null || true
-        fi
-    fi
-    if [ -f /etc/ufw/before6.rules ]; then
-        sed -i '/^\*mangle/,/^COMMIT/d' /etc/ufw/before6.rules 2>/dev/null || true
-    fi
-    if command -v ip6tables &>/dev/null; then
-        ip6tables -t mangle -F FORWARD 2>/dev/null || true
-    fi
+    command -v python3 >/dev/null 2>&1 || { echo 'Для безопасной настройки MSS нужен Python 3.' >&2; return 1; }
+    python3 - <<'BOBAREV_SAFE_MSS'
+from pathlib import Path
+import tempfile, subprocess, shutil, os, time
+p=Path('/etc/ufw/before.rules')
+if not p.is_file() or p.is_symlink():
+    raise SystemExit('Обычный файл UFW before.rules не найден; изменения отменены.')
+old=p.read_text();lines=old.splitlines(keepends=True);out=[];table=None
+for line in lines:
+    t=line.strip()
+    if t.startswith('*'):table=t
+    if not (table=='*mangle' and t=='-F FORWARD'):out.append(line)
+    if t=='COMMIT':table=None
+new=''.join(out)
+# Existing MSS profiles are not overwritten or broadened.
+if not any('TCPMSS' in l and not l.lstrip().startswith('#') for l in new.splitlines()):
+    raise SystemExit('MSS-правила не найдены: общий профиль автоматически не добавляется. Выберите сетевой сценарий.')
+if new!=old:
+    backup=Path(tempfile.mkdtemp(prefix='bobarev-mss-backup-',dir='/root'))
+    os.chmod(backup,0o700);shutil.copy2(p,backup/p.name)
+    fd,tmp=tempfile.mkstemp(prefix='.bobarev-mss-',dir=p.parent)
+    try:
+        with os.fdopen(fd,'w') as f:f.write(new)
+        st=p.stat();os.chown(tmp,st.st_uid,st.st_gid);os.chmod(tmp,st.st_mode & 0o777)
+        with open(tmp) as f:subprocess.run(['iptables-restore','--test','--noflush'],stdin=f,check=True)
+        os.replace(tmp,p)
+        print('Убрана очистка общей цепочки. Бэкап:',backup)
+    finally:
+        if os.path.exists(tmp):os.unlink(tmp)
+print('Существующие MSS-профили сохранены. IPv6 и работающий firewall не изменены.')
+BOBAREV_SAFE_MSS
 }
 
 ensure_ufw_nat_rule() {
@@ -330,52 +348,95 @@ ensure_ufw_nat_rule() {
             sed -i '/^\*nat/a :POSTROUTING ACCEPT [0:0]' /etc/ufw/before.rules
         fi
     fi
-    if ! grep -qF -- "$rule" /etc/ufw/before.rules; then
+    if ! grep -qxF -- "$rule" /etc/ufw/before.rules; then
         sed -i "/^:POSTROUTING/a $rule" /etc/ufw/before.rules
     fi
 }
 
 apply_wan_exit_nat() {
-    local wan_dev="$1"
-    local quiet="${2:-false}"
-    [ -z "$wan_dev" ] && return 0
-
-    local iface_ip_info=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null || echo "")
-    local pub_ip=$(echo "$iface_ip_info" | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
-    local is_mask_32=$(echo "$iface_ip_info" | grep -qw "/32" && echo "yes" || echo "no")
-
-    for r_if in $(ip -br link show 2>/dev/null | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' | grep -vE "^(lo|${wan_dev}|docker.*|veth.*|br-.*)$" || true); do
-        iptables -C FORWARD -i "$r_if" -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$r_if" -o "$wan_dev" -j ACCEPT 2>/dev/null || true
-        iptables -C FORWARD -i "$wan_dev" -o "$r_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o "$r_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-    done
-
-    iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -s 10.144.144.0/24 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
-    while iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null; do :; done
-    if [ -n "$pub_ip" ]; then
-        iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
-        while iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null; do :; done
-    fi
-
-    if [ -f /etc/ufw/before.rules ]; then
-        sed -i "/-o ${wan_dev} -j MASQUERADE/d" /etc/ufw/before.rules 2>/dev/null || true
-        sed -i "/-o ${wan_dev} -j SNAT/d" /etc/ufw/before.rules 2>/dev/null || true
-    fi
-
-    if [ "$is_mask_32" = "yes" ] && [ -n "$pub_ip" ]; then
-        iptables -t nat -A POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip"
-        ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j SNAT --to-source $pub_ip"
-        if [ "$quiet" != "true" ]; then
-            echo -e "${C_BLUE} Обнаружена маска /32 на интерфейсе $wan_dev: закреплена постоянная привязка SNAT ($pub_ip).${C_RESET}"
-        fi
-    else
-        iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
-        ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j MASQUERADE"
-        if [ "$quiet" != "true" ]; then
-            echo -e "${C_BLUE} Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
-        fi
-    fi
-    return 0
+    local wan_dev="$1" quiet="${2:-false}"
+    [[ "$wan_dev" =~ ^[a-zA-Z0-9_.:-]+$ ]] || { echo 'Не указан корректный выходной интерфейс.' >&2; return 1; }
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$wan_dev" "$quiet" <<'BOBAREV_SAFE_WAN_NAT'
+import sys, subprocess, shlex, json, hashlib, tempfile, shutil, os
+from pathlib import Path
+iface,quiet=sys.argv[1:]
+def run(args,check=True,**kw):
+    return subprocess.run(args,text=True,capture_output=True,check=check,**kw)
+# Serialize script-managed NAT writes. Other firewall managers must not be run concurrently.
+import fcntl
+lock=open('/run/bobarev-wan-nat.lock','a');fcntl.flock(lock,fcntl.LOCK_EX)
+p=Path('/etc/ufw/before.rules')
+if not p.is_file() or p.is_symlink():raise SystemExit('Файл UFW не найден; NAT не изменён.')
+addresses=json.loads(run(['ip','-j','-4','address','show','dev',iface]).stdout)
+addr=[a for link in addresses for a in link.get('addr_info',[]) if a.get('scope')=='global' and a.get('family')=='inet']
+if not addr:raise SystemExit('На выходном интерфейсе нет адреса IPv4; NAT не изменён.')
+a=addr[0];target=['-j','SNAT','--to-source',a['local']] if a['prefixlen']==32 else ['-j','MASQUERADE']
+chain='BBR_WAN_'+hashlib.sha256(iface.encode()).hexdigest()[:10]
+legacy=['-A','POSTROUTING','-o',iface]+target
+old=p.read_text()
+legacy_line=' '.join(legacy)
+saved_legacy=any(shlex.split(l)==legacy for l in old.splitlines() if l.strip() and not l.lstrip().startswith('#'))
+runtime=run(['iptables','-w','5','-t','nat','-S','POSTROUTING']).stdout
+legacy_count=sum(shlex.split(l)==legacy for l in runtime.splitlines())
+if legacy_count>1:raise SystemExit('Есть старые копии NAT. Сначала удалите подтверждённый повтор; автоматическая очистка отменена.')
+if legacy_count and not saved_legacy:
+    raise SystemExit('Найдено правило неизвестного владельца. Автоматическая миграция отменена.')
+# Refuse to replace a different legacy SNAT/MASQUERADE selection.
+for line in runtime.splitlines():
+    t=shlex.split(line)
+    if '-o' in t and t[t.index('-o')+1]==iface and '-j' in t and t[t.index('-j')+1] in ('SNAT','MASQUERADE') and t!=legacy:
+        raise SystemExit('Для интерфейса есть другой NAT-профиль. Автоматическая замена отменена.')
+start='# BOBAREV WAN NAT '+iface+' BEGIN';end='# BOBAREV WAN NAT '+iface+' END'
+# Marked block contains only the script-owned chain and jump.
+block='\n'.join([start,':'+chain+' - [0:0]','-F '+chain,'-A '+chain+' '+ ' '.join(target),'-A POSTROUTING -o '+iface+' -j '+chain,end])+'\n'
+lines=old.splitlines(keepends=True);out=[];inside=False;nat=False;inserted=False;blocks=0
+for line in lines:
+    t=line.strip()
+    if t==start:inside=True;blocks+=1;continue
+    if inside:
+        if t==end:inside=False
+        continue
+    if t=='*nat':nat=True
+    if nat and t==legacy_line:continue
+    if nat and t=='COMMIT' and not inserted:out.append(block);inserted=True
+    out.append(line)
+    if t=='COMMIT':nat=False
+if inside or blocks>1:raise SystemExit('Неоднозначный блок NAT; изменение отменено.')
+new=''.join(out)
+if not inserted:new='*nat\n:POSTROUTING ACCEPT [0:0]\n'+block+'COMMIT\n\n'+new
+backup=Path(tempfile.mkdtemp(prefix='bobarev-wan-nat-',dir='/root'));os.chmod(backup,0o700)
+shutil.copy2(p,backup/p.name)
+(backup/'iptables.v4').write_text(run(['iptables-save']).stdout);os.chmod(backup/'iptables.v4',0o600)
+fd,tmp=tempfile.mkstemp(prefix='.bobarev-nat-',dir=p.parent)
+try:
+    with os.fdopen(fd,'w') as f:f.write(new)
+    st=p.stat();os.chown(tmp,st.st_uid,st.st_gid);os.chmod(tmp,st.st_mode & 0o777)
+    with open(tmp) as f:
+        test=subprocess.run(['iptables-restore','--test','--noflush'],stdin=f,text=True,capture_output=True)
+    if test.returncode:raise SystemExit('Проверка NAT не пройдена. '+test.stderr)
+    current=run(['iptables','-w','5','-t','nat','-S',chain],check=False)
+    expected=['-A',chain]+target
+    if current.returncode==0:
+        rules=[shlex.split(l) for l in current.stdout.splitlines() if l.startswith('-A ')]
+        if rules not in ([],[expected]):raise SystemExit('Цепочка занята другим профилем; NAT не изменён.')
+    else:run(['iptables','-w','5','-t','nat','-N',chain])
+    if run(['iptables','-w','5','-t','nat','-C',chain]+target,check=False).returncode:
+        run(['iptables','-w','5','-t','nat','-A',chain]+target)
+    jump=['POSTROUTING','-o',iface,'-j',chain]
+    if run(['iptables','-w','5','-t','nat','-C']+jump,check=False).returncode:
+        run(['iptables','-w','5','-t','nat','-A']+jump)
+    os.replace(tmp,p)
+    # Only migrate one exact rule also present in saved UFW configuration.
+    if saved_legacy and legacy_count==1:
+        run(['iptables','-w','5','-t','nat','-D']+legacy[1:])
+    if quiet!='true':print('NAT для '+iface+' настроен без повторного добавления. Бэкап: '+str(backup))
+except BaseException:
+    print('Ошибка. Бэкап: '+str(backup)+'. Проверьте правила; автоматический откат всего firewall не выполняется.',file=sys.stderr)
+    raise
+finally:
+    if os.path.exists(tmp):os.unlink(tmp)
+BOBAREV_SAFE_WAN_NAT
 }
 
 select_and_apply_routed_interfaces() {
@@ -1103,7 +1164,7 @@ if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     fi
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
-    iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
     # Для связки NaiveProxy -> Tailscale (MTU 1280 + Disco) -> WARP (MTU 1280) фиксируем MSS 1140
     iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     iptables -t mangle -I OUTPUT 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
@@ -1120,7 +1181,7 @@ elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
     ip route replace default dev wg-cascade table 51888 2>/dev/null || true
     ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
-    iptables -t nat -I POSTROUTING 1 -o wg-cascade -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wg-cascade -j MASQUERADE
     iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
     iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
     iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
@@ -2005,7 +2066,7 @@ clean_udp2raw_iptables() {
 clean_duplicate_cascade_iptables() {
     clean_udp2raw_iptables
     if command -v ip6tables &>/dev/null; then
-        ip6tables -t mangle -F FORWARD 2>/dev/null || true
+        : # Общая IPv6-цепочка не принадлежит скрипту; не очищаем.
     fi
     local wan_dev=$(get_wan_if)
     while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
@@ -4241,7 +4302,7 @@ ETHTOOL_SVC_EOF
     iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     
     if command -v ip6tables &>/dev/null; then
-        ip6tables -t mangle -F FORWARD 2>/dev/null || true
+        : # Общая IPv6-цепочка не принадлежит скрипту; не очищаем.
     fi
     tune_fq_qdisc_interfaces
 
@@ -10965,7 +11026,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.9 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.10 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11280,7 +11341,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.9" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.10" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

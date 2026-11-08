@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.6 (Restored Full Edition)
+# Версия: 3.18.7 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6300,6 +6300,118 @@ audit_profile_state() {
     fi
 }
 
+bobarev_network_human_audit() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "   ${C_YELLOW}Параметры сети: проверка недоступна без Python 3${C_RESET}"
+        return 0
+    fi
+    python3 - "$1" <<'BOBAREV_NETWORK_HUMAN'
+import sys, subprocess, json, shlex, re, time
+from pathlib import Path
+mode=sys.argv[1]
+def run(args):
+    try:
+        p=subprocess.run(args,capture_output=True,text=True,timeout=5)
+        return p.returncode,p.stdout.strip()
+    except (OSError,subprocess.TimeoutExpired):return 127,''
+def row(k,v,warn=False):
+    v=re.sub(r'[\x00-\x1f\x7f]',' ',str(v))
+    print('   '+k+' '*max(1,28-len(k))+('\033[0;33m' if warn else '\033[0;34m')+v+'\033[0m')
+def readconf():
+    d={}
+    try:
+        for line in Path('/etc/default/bobarev-cascade').read_text().splitlines():
+            k,sep,v=line.partition('=')
+            if k in ('CASCADE_ROLE','NAIVE_OUT_MODE') and sep:
+                try:
+                    t=shlex.split(v,comments=True)
+                    if len(t)==1 and re.fullmatch('[A-Za-z0-9_-]+',t[0]):d[k]=t[0]
+                except ValueError:pass
+    except OSError:pass
+    return d
+def rules(text,family):
+    result=[]
+    for line in text.splitlines():
+        try:t=shlex.split(line)
+        except ValueError:continue
+        if '-A' not in t or '-j' not in t:continue
+        if t[t.index('-j')+1]!='TCPMSS':continue
+        chain=t[t.index('-A')+1]
+        scope={'OUTPUT':'запросы сервера','FORWARD':'пересылаемый трафик','POSTROUTING':'исходящий трафик'}.get(chain,'цепочка '+chain)
+        for flag,label in [('-i','вход'),('-o','выход')]:
+            if flag in t:
+                n=t.index(flag);scope+='; '+label+' '+('не ' if n>0 and t[n-1]=='!' else '')+t[n+1]
+        limited=any(x in t for x in ('-s','-d','--dport','--sport','-m'))
+        if limited:scope+='; с условиями отбора'
+        if '--clamp-mss-to-pmtu' in t:value='Автоматически по маршруту'
+        elif '--set-mss' in t:value='Ограничение '+t[t.index('--set-mss')+1]+' байт'
+        else:value='Правило с неизвестным значением'
+        result.append((value,family+'; '+scope))
+    return list(dict.fromkeys(result))
+if mode=='kernel':
+    rc,q=run(['sysctl','-n','net.core.default_qdisc']);row('Очередь по умолчанию:',q if rc==0 else 'Не удалось определить',rc!=0)
+    rc,v=run(['sysctl','-n','net.ipv4.tcp_mtu_probing'])
+    row('Восстановление MTU TCP:',{'0':'Отключено','1':'При обнаружении проблемы','2':'Включено постоянно'}.get(v,'Не удалось определить'),rc!=0)
+elif mode=='scheme':
+    d=readconf();role=d.get('CASCADE_ROLE','');out=d.get('NAIVE_OUT_MODE','')
+    if role=='standalone_naive':
+        row('Выход по настройкам:',{'direct':'Напрямую','wg0':'Через WireGuard wg0','mullvad_ts':'Через Tailscale / Mullvad'}.get(out,'Не удалось определить'))
+    elif role in ('ru_hysteria_entry','ru_xray_entry','ru_wg_entry','ru_entry'):
+        row('Выход по настройкам:',{'ru_hysteria_entry':'Через Hysteria 2','ru_xray_entry':'Через Xray REALITY','ru_wg_entry':'Через WireGuard','ru_entry':'Через Tailscale'}[role])
+    rc,t=run(['ip','-j','link','show'])
+    try:links=json.loads(t) if rc==0 else []
+    except ValueError:links=[]
+    for link in links:
+        name=link.get('ifname','')
+        if name not in ('wg0','wg-cascade','warp','tailscale0'):continue
+        up='UP' in link.get('flags',[])
+        row('Туннель '+name+':','MTU '+str(link.get('mtu','?'))+'; '+('поднят' if up else 'выключен'),not up)
+        if name in ('wg0','wg-cascade','warp'):
+            rc,t=run(['wg','show',name,'latest-handshakes']);ages=[]
+            if rc==0:
+                for line in t.splitlines():
+                    try:
+                        ts=int(line.split()[-1])
+                        if ts>0:ages.append(max(0,int(time.time())-ts))
+                    except (ValueError,IndexError):pass
+                row('  Последний обмен:',str(min(ages))+' сек. назад' if ages else 'Ещё не зарегистрирован',not ages)
+            else:row('  Последний обмен:','Не удалось проверить',True)
+        if name=='tailscale0':
+            rc,t=run(['tailscale','status','--json'])
+            try:
+                data=json.loads(t) if rc==0 else {};ex=data.get('ExitNodeStatus') or {}
+                row('Узел выхода Tailscale:',('Выбран; '+('доступен' if ex.get('Online') else 'доступность не подтверждена')) if ex else 'Не выбран / не определён')
+            except ValueError:row('Узел выхода Tailscale:','Не удалось проверить',True)
+    for unit,title in [('hysteria-client.service','Hysteria 2'),('bobarev-xray.service','Xray REALITY'),('xraymesh.service','XRayMesh')]:
+        if run(['systemctl','is-active','--quiet',unit])[0]==0:row(title+':','Служба запущена')
+elif mode=='network':
+    rc,t=run(['ip','-j','-4','route','get','1.1.1.1'])
+    try:iface=json.loads(t)[0].get('dev','') if rc==0 else ''
+    except (ValueError,IndexError,TypeError):iface=''
+    row('Маршрут самого сервера:',iface or 'Не удалось определить',not iface)
+    if iface:
+        try:row('MTU этого интерфейса:',Path('/sys/class/net',iface,'mtu').read_text().strip()+' байт')
+        except OSError:row('MTU этого интерфейса:','Не удалось прочитать',True)
+        rc,t=run(['tc','-j','qdisc','show','dev',iface])
+        try:
+            kinds=sorted({q['kind'] for q in json.loads(t) if q.get('root') and q.get('kind')}) if rc==0 else []
+            if kinds:row('Очередь этого интерфейса:',', '.join(kinds))
+        except (ValueError,TypeError):pass
+    found=[];readok=0
+    for command,family in [('iptables','IPv4'),('ip6tables','IPv6')]:
+        rc,t=run([command,'-t','mangle','-S'])
+        if rc==0:readok+=1;found.extend(rules(t,family))
+    if found:
+        for n,(value,scope) in enumerate(found[:4]):
+            row('Ограничение MSS:' if n==0 else 'Ещё правило MSS:',value)
+            row('  Применение:',scope)
+        if len(found)>4:row('Другие правила MSS:',str(len(found)-4)+'; см. сетевую диагностику')
+    else:row('Ограничение MSS:','В прочитанных правилах не найдено' if readok else 'Не удалось прочитать правила',not readok)
+    if readok<2:row('Проверка MSS:','Часть правил недоступна',True)
+
+BOBAREV_NETWORK_HUMAN
+}
+
 mod_server_audit() {
     clear
     echo -e "${C_CYAN}=================================================================${C_RESET}"
@@ -6616,6 +6728,8 @@ mod_server_audit() {
         *) audit_human_row 'Ответы на ping:' "${C_YELLOW}Не удалось определить${C_RESET}" ;;
     esac
 
+    bobarev_network_human_audit kernel
+
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_out=$(LC_ALL=C ufw status 2>/dev/null || echo "")
@@ -6837,6 +6951,8 @@ mod_server_audit() {
         echo -e "   Служба Tailscale:          ${C_YELLOW}  Не установлена${C_RESET}"
     fi
 
+    bobarev_network_human_audit scheme
+
     echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Открытые порты ---${C_RESET}"
     local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' || echo "")
     for iface in $active_ifs; do
@@ -6870,15 +6986,7 @@ mod_server_audit() {
     done
 
     echo -e ""
-    local mss_active=false
-    if command -v ufw &>/dev/null && [ -f /etc/ufw/before.rules ] && grep -q "TCPMSS" /etc/ufw/before.rules; then mss_active=true; fi
-    if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then mss_active=true; fi
-    
-    if [ "$mss_active" = true ]; then
-        echo -e "   Выравнивание пакетов (MSS): ${C_GREEN} Правила настроены${C_RESET}"
-    else
-        echo -e "   Выравнивание пакетов (MSS): ${C_YELLOW}  Выключено (возможны зависания сайтов в VPN)${C_RESET}"
-    fi
+    bobarev_network_human_audit network
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_ports_list
@@ -10861,7 +10969,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.6 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.7 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11176,7 +11284,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.6" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.7" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

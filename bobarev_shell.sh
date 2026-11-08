@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.8 (Restored Full Edition)
+# Версия: 3.18.9 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6232,31 +6232,68 @@ mod_boot_diag() {
 
 # Audit-only: inspect direct POSTROUTING rules; never alter firewall.
 audit_nat_output() {
-    local iface="$1" rules stats total unique repeated
-    if ! rules=$(iptables -t nat -S POSTROUTING 2>/dev/null); then
-        audit_human_row 'NAT на выходе (IPv4):' "${C_YELLOW}Не удалось прочитать правила${C_RESET}"
+    if ! command -v python3 >/dev/null 2>&1; then
+        audit_human_row 'Подмена адреса (NAT):' "${C_YELLOW}Не удалось проверить: нужен Python 3${C_RESET}"
         return 0
     fi
-    stats=$(printf '%s\n' "$rules" | awk -v iface="$iface" '
-      $1=="-A" && $2=="POSTROUTING" {
-        out="";jump="";neg=0
-        for(i=3;i<=NF;i++) {
-          if($i=="-o"){out=$(i+1);if($(i-1)=="!")neg=1}
-          if($i=="-j")jump=$(i+1)
-        }
-        if(!neg && out==iface && (jump=="MASQUERADE" || jump=="SNAT")){
-          total++;if(++seen[$0]==1)unique++
-        }
-      } END{printf "%d %d %d",total+0,unique+0,total-unique}')
-    read -r total unique repeated <<< "$stats"
-    if [ "$total" -eq 0 ]; then
-        audit_human_row 'NAT на выходе (IPv4):' "${C_BLUE}$iface — прямых правил не найдено${C_RESET}"
-    elif [ "$repeated" -gt 0 ]; then
-        audit_human_row 'NAT на выходе (IPv4):' "${C_YELLOW}$iface — правил: $total, повторов: $repeated${C_RESET}"
-        audit_human_row '' "${C_BLUE}Есть одинаковые правила; это не означает сбой связи.${C_RESET}"
-    else
-        audit_human_row 'NAT на выходе (IPv4):' "${C_BLUE}$iface — правил: $total, повторов нет${C_RESET}"
-    fi
+    python3 -c 'import subprocess,json,shlex,re
+import sys
+iface=sys.argv[1]
+def run(args):
+    try:
+        p=subprocess.run(args,text=True,capture_output=True,timeout=5)
+        return p.returncode,p.stdout
+    except (OSError,subprocess.TimeoutExpired):return 127,'"'"''"'"'
+def row(label,value,warn=False):
+    value=re.sub(r'"'"'[\x00-\x1f\x7f]'"'"','"'"' '"'"',value)
+    print('"'"'   '"'"'+label+'"'"' '"'"'*max(1,28-len(label))+('"'"'\033[0;33m'"'"' if warn else '"'"'\033[0;34m'"'"')+value+'"'"'\033[0m'"'"')
+def inspect(text,dev):
+    seen={};kinds=set();restricted=False
+    for line in text.splitlines():
+        try:t=shlex.split(line)
+        except ValueError:continue
+        if len(t)<3 or t[:2]!=['"'"'-A'"'"','"'"'POSTROUTING'"'"']:continue
+        if '"'"'-o'"'"' not in t or '"'"'-j'"'"' not in t:continue
+        oi=t.index('"'"'-o'"'"');ji=t.index('"'"'-j'"'"')
+        if oi+1>=len(t) or ji+1>=len(t):continue
+        if t[oi+1]!=dev or (oi>0 and t[oi-1]=='"'"'!'"'"'):continue
+        kind=t[ji+1]
+        if kind not in ('"'"'SNAT'"'"','"'"'MASQUERADE'"'"'):continue
+        key=tuple(t);seen[key]=seen.get(key,0)+1;kinds.add(kind)
+        if any(x in t for x in ('"'"'-s'"'"','"'"'-d'"'"','"'"'-p'"'"','"'"'--sport'"'"','"'"'--dport'"'"','"'"'-m'"'"','"'"'--mark'"'"','"'"'--ctstate'"'"')):restricted=True
+    return seen,kinds,restricted
+def show(family,dev,command):
+    rc,text=run([command,'"'"'-t'"'"','"'"'nat'"'"','"'"'-S'"'"','"'"'POSTROUTING'"'"'])
+    label='"'"'Подмена адреса (NAT '"'"'+family+'"'"'):'"'"'
+    if rc!=0:row(label,'"'"'Не удалось проверить'"'"',True);return
+    seen,kinds,restricted=inspect(text,dev)
+    if not seen:row(label,'"'"'Прямые правила для '"'"'+dev+'"'"' не найдены'"'"');return
+    if kinds=={'"'"'MASQUERADE'"'"'}:value='"'"'Адрес интерфейса '"'"'+dev
+    elif kinds=={'"'"'SNAT'"'"'}:value='"'"'Заданный адрес через '"'"'+dev
+    else:value='"'"'Несколько способов через '"'"'+dev
+    if restricted:value+='"'"' (по условиям правил)'"'"'
+    repeats=sum(n-1 for n in seen.values())
+    if not repeats:value+='"'"'; повторов нет'"'"'
+    row(label,value)
+    if repeats:row('"'"'Повторы правил NAT '"'"'+family+'"'"':'"'"',str(repeats)+'"'"' — лишние копии'"'"',True)
+show('"'"'IPv4'"'"',iface,'"'"'iptables'"'"')
+rc,text=run(['"'"'ip'"'"','"'"'-j'"'"','"'"'-6'"'"','"'"'address'"'"','"'"'show'"'"','"'"'scope'"'"','"'"'global'"'"'])
+if rc!=0:row('"'"'Подмена адреса (NAT IPv6):'"'"','"'"'Не удалось проверить наличие IPv6'"'"',True)
+else:
+    try:
+        links=json.loads(text);devices=[]
+        for link in links:
+            if '"'"'UP'"'"' not in link.get('"'"'flags'"'"',[]):continue
+            addresses=[x for x in link.get('"'"'addr_info'"'"',[]) if x.get('"'"'family'"'"')=='"'"'inet6'"'"' and x.get('"'"'scope'"'"')=='"'"'global'"'"' and not any(f in x.get('"'"'flags'"'"',[]) for f in ('"'"'tentative'"'"','"'"'dadfailed'"'"')) and not x.get('"'"'tentative'"'"',False) and not x.get('"'"'dadfailed'"'"',False)]
+            if addresses and link.get('"'"'ifname'"'"'):devices.append(link['"'"'ifname'"'"'])
+        if devices:
+            rc,routes=run(['"'"'ip'"'"','"'"'-j'"'"','"'"'-6'"'"','"'"'route'"'"','"'"'show'"'"','"'"'default'"'"'])
+            try:preferred=[x.get('"'"'dev'"'"') for x in json.loads(routes)] if rc==0 else []
+            except ValueError:preferred=[]
+            selected=next((d for d in preferred if d in devices),iface if iface in devices else devices[0])
+            show('"'"'IPv6'"'"',selected,'"'"'ip6tables'"'"')
+    except (ValueError,TypeError,KeyError):row('"'"'Подмена адреса (NAT IPv6):'"'"','"'"'Не удалось прочитать состояние IPv6'"'"',True)
+' "$1"
 }
 
 audit_human_row() {
@@ -10928,7 +10965,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.8 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.9 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11243,7 +11280,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.8" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.9" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

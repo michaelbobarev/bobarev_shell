@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.11 (Restored Full Edition)
+# Версия: 3.18.12 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -449,6 +449,7 @@ for line in runtime.splitlines():
         raise SystemExit('Для интерфейса есть другой NAT-профиль. Автоматическая замена отменена.')
 start='# BOBAREV WAN NAT '+iface+' BEGIN';end='# BOBAREV WAN NAT '+iface+' END'
 # Marked block contains only the script-owned chain and jump.
+block='\n'.join([start,':'+chain+' - [0:0]','-F '+chain,'-A '+chain+' '+ ' '.join(target),end])+'\n'
 lines=old.splitlines(keepends=True);out=[];inside=False;nat=False;inserted=False;blocks=0
 for line in lines:
     t=line.strip()
@@ -6852,6 +6853,14 @@ mod_server_audit() {
     echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_out=$(LC_ALL=C ufw status 2>/dev/null || echo "")
+
+        # Предупреждение: порты, открытые наружу (Anywhere, без ограничения на tailscale0)
+        local exposed_ports
+        exposed_ports=$(echo "$ufw_out" | grep 'ALLOW IN' | grep 'Anywhere' | grep -v 'on tailscale0' | grep -v 'on lo' | awk '{print $1}' | sort -u | tr '\n' ' ')
+        if [ -n "$exposed_ports" ]; then
+            echo -e "   ${C_YELLOW}ВНИМАНИЕ: открыты наружу (Anywhere): ${exposed_ports}${C_RESET}"
+        fi
+
         echo -e "   Статус брандмауэра:        ${C_GREEN} Включен и защищает сервер${C_RESET}"
         
         local fwd_policy=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")
@@ -11087,7 +11096,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.11 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.12 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11402,7 +11411,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.11" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.12" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

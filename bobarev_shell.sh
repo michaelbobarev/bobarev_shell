@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.14 (Restored Full Edition)
+# Версия: 3.18.15 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6862,48 +6862,50 @@ mod_server_audit() {
             echo -e "   Пересылка трафика (Шлюз):  ${C_YELLOW}  Запрещена (только локальные подключения)${C_RESET}"
         fi
 
-        # BOBAREV SSH AUDIT BEGIN — read-only UFW status analysis.
-        local ssh_public ssh_via_ts open_anywhere
-        local audit_port_rules
-        audit_port_rules=$(printf '%s\n' "$ufw_out" | awk '
-            /^[0-9]+(:[0-9]+)?(\/(tcp|udp))?[[:space:]]+/ {
-                port=$1
+        # BOBAREV AUDIT BEGIN: describes UFW permissions, not external reachability or ACLs.
+        local audit_rules ssh_public ssh_via_ts open_anywhere ts_ports ts_all
+        audit_rules=$(printf '%s\n' "$ufw_out" | awk '
+            {
                 sub(/[[:space:]]*#.*/, "")
+                port=$1
+                if (port !~ /^[0-9]+(:[0-9]+)?(\/(tcp|udp))?$/ && port != "Anywhere") next
                 sub(/^[^[:space:]]+[[:space:]]+/, "")
                 sub(/^\(v6\)[[:space:]]+/, "")
                 if ($0 ~ /^ALLOW[[:space:]]+(IN[[:space:]]+)?Anywhere([[:space:]]|$)/)
-                    print "public", port
+                    print "public",port
                 if ($0 ~ /^on[[:space:]]+tailscale0[[:space:]]+ALLOW[[:space:]]+(IN[[:space:]]+)?Anywhere([[:space:]]|$)/)
-                    print "tailscale", port
+                    print "tailscale",port
             }
         ')
-        ssh_public=$(printf '%s\n' "$audit_port_rules" | awk -v p="$ssh_port" '$1=="public" && ($2==p "/tcp" || $2==p) {print "yes"}')
-        ssh_via_ts=$(printf '%s\n' "$audit_port_rules" | awk -v p="$ssh_port" '$1=="tailscale" && ($2==p "/tcp" || $2==p) {print "yes"}')
-        open_anywhere=$(printf '%s\n' "$audit_port_rules" | awk '$1=="public" {print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
+        ssh_public=$(printf '%s\n' "$audit_rules" | awk -v p="$ssh_port" '$1=="public" && ($2==p "/tcp" || $2==p || $2=="Anywhere") {print "yes"}')
+        ssh_via_ts=$(printf '%s\n' "$audit_rules" | awk -v p="$ssh_port" '$1=="tailscale" && ($2==p "/tcp" || $2==p) {print "yes"}')
+        open_anywhere=$(printf '%s\n' "$audit_rules" | awk '$1=="public" {print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
         open_anywhere="${open_anywhere% }"
         if [ -n "$ssh_public" ]; then
-            echo -e "   Доступ к порту SSH:         ${C_YELLOW}Разрешён извне по UFW ($ssh_port/tcp, Anywhere)${C_RESET}"
+            echo -e "   Доступ к порту SSH:        ${C_YELLOW}Открыт снаружи ($ssh_port/tcp)${C_RESET}"
         elif [ -n "$ssh_via_ts" ]; then
-            echo -e "   Доступ к порту SSH:         ${C_BLUE}Есть разрешение через Tailscale; публичного правила Anywhere не найдено${C_RESET}"
+            echo -e "   Доступ к порту SSH:        ${C_BLUE}Разрешён через Tailscale ($ssh_port/tcp)${C_RESET}"
         else
-            echo -e "   Доступ к порту SSH:         ${C_YELLOW}Требуется проверка правил UFW${C_RESET}"
+            echo -e "   Доступ к порту SSH:        ${C_YELLOW}Требует проверки${C_RESET}"
         fi
         if [ -n "$open_anywhere" ]; then
-            echo -e "   ${C_YELLOW}ВНИМАНИЕ: разрешены извне по UFW (Anywhere): $open_anywhere${C_RESET}"
+            echo -e "   ${C_YELLOW}ВНИМАНИЕ: открыты наружу:  $open_anywhere${C_RESET}"
         fi
-        # BOBAREV SSH AUDIT END
-
         if command -v tailscale &>/dev/null; then
-            if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^Anywhere[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
-                echo -e "   Изоляция сети Tailscale:   ${C_YELLOW}  Отключена (открыты все порты на tailscale0)${C_RESET}"
+            ts_all=$(printf '%s\n' "$audit_rules" | awk '$1=="tailscale" && $2=="Anywhere" {print "yes"}')
+            ts_ports=$(printf '%s\n' "$audit_rules" | awk '$1=="tailscale" && $2!="Anywhere" {print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
+            ts_ports="${ts_ports% }"
+            if [ -n "$ts_all" ]; then
+                echo -e "   Доступ через Tailscale:    ${C_YELLOW}Разрешён ко всем портам${C_RESET}"
+            elif [ "$ts_ports" = "$ssh_port/tcp" ]; then
+                echo -e "   Доступ через Tailscale:    ${C_BLUE}Разрешён для SSH ($ssh_port/tcp)${C_RESET}"
+            elif [ -n "$ts_ports" ]; then
+                echo -e "   Доступ через Tailscale:    ${C_BLUE}Разрешён к портам: $ts_ports${C_RESET}"
             else
-                local open_ts_ports="только SSH $ssh_port/tcp"
-                if echo "$ufw_out" | awk '!/ALLOW FWD/ && /^5252\/tcp[[:space:]]+on[[:space:]]+tailscale0[[:space:]]+ALLOW/' | grep -q .; then
-                    open_ts_ports="SSH $ssh_port/tcp и Веб-панель 5252/tcp"
-                fi
-                echo -e "   Изоляция сети Tailscale:   ${C_BLUE}Общего IPv4-разрешения всех портов на tailscale0 не найдено; ACL/Share не проверены${C_RESET}"
+                echo -e "   Доступ через Tailscale:    ${C_BLUE}Отдельные разрешения UFW не найдены${C_RESET}"
             fi
         fi
+        # BOBAREV AUDIT END
 
         if [ -n "$wan_if" ]; then
             audit_nat_output "$wan_if"
@@ -11113,7 +11115,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.14 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.15 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11428,7 +11430,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.14" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.15" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.8 (Restored Full Edition)
+# Версия: 3.16.9 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -856,64 +856,7 @@ mod_crowdsec() {
 }
 
 
-mod_mtu_mss_optimizer() {
-    # 1. Поиск туннельных интерфейсов
-    INTERFACES=$(ip link show | grep -E 'wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare|wg-cascade|warp' | awk -F': ' '{print $2}' || true)
-    
-    if [ -z "$INTERFACES" ]; then
-        whiptail --title "Ошибка" --msgbox "Туннельные интерфейсы не найдены!" 8 50
-        return
-    fi
-    
-    # Формируем список для меню с текущими значениями MTU
-    MENU_OPTIONS=()
-    for IFACE in $INTERFACES; do
-        CURRENT_MTU=$(ip -j link show dev "$IFACE" 2>/dev/null | grep -o '"mtu":[^,]*' | cut -d: -f2 || echo "N/A")
-        MENU_OPTIONS+=("$IFACE" "Текущий MTU: $CURRENT_MTU")
-    done
-    
-    SELECTED_IFACE=$(whiptail --title "Выбор интерфейса" --menu "Выберите туннель для настройки MTU/MSS:" 15 65 6 "${MENU_OPTIONS[@]}" 3>&1 1>&2 2>&3)
-    
-    if [ -z "$SELECTED_IFACE" ]; then return; fi
-    
-    MTU_CHOICE=$(whiptail --title "Настройка MTU для $SELECTED_IFACE" --menu "Выберите профиль MTU:
-(MSS будет рассчитан автоматически)" 15 65 4         "1420" "Стандартный WireGuard"         "1360" "Безопасный (Простые каскады)"         "1280" "Рекомендуемый (Каскады с WARP/Tailscale)"         "1140" "Экстрим (Сложные каскады / PPPoE)" 3>&1 1>&2 2>&3)
 
-    if [ -z "$MTU_CHOICE" ]; then return; fi
-
-    MSS_VAL=$((MTU_CHOICE - 40))
-
-    whiptail --title "Оптимизация" --infobox "Применение MTU=$MTU_CHOICE и MSS=$MSS_VAL к $SELECTED_IFACE..." 8 60
-
-    # Надежное удаление всех старых правил TCPMSS для этого интерфейса
-    while iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep -q " $SELECTED_IFACE "; do
-        RULE_NUM=$(iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep " $SELECTED_IFACE " | head -n 1 | awk '{print $1}')
-        iptables -t mangle -D FORWARD $RULE_NUM 2>/dev/null || break
-    done
-
-    # Применение MTU с отловом реальных ошибок
-    if ip link set dev "$SELECTED_IFACE" mtu "$MTU_CHOICE" 2>/tmp/mtu_err.log; then
-        # Добавляем новое правило, ограниченное только этим интерфейсом (-o $SELECTED_IFACE)
-        iptables -t mangle -A FORWARD -o "$SELECTED_IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$MSS_VAL"
-        
-        # Сохранение правил
-        if command -v netfilter-persistent &> /dev/null; then
-            netfilter-persistent save > /dev/null 2>&1
-        fi
-        
-        whiptail --title "Успех" --msgbox "Интерфейс: $SELECTED_IFACE
-Новый MTU: $MTU_CHOICE
-Новый MSS: $MSS_VAL
-
-Правило MSS Clamping применено только для трафика этого туннеля." 12 60
-    else
-        ERR=$(cat /tmp/mtu_err.log)
-        whiptail --title "Ошибка" --msgbox "Не удалось изменить MTU для $SELECTED_IFACE.
-
-Детали ошибки:
-$ERR" 12 60
-    fi
-}
 while true; do
         MODULE_CANCELED=false
         local u_cnt=0
@@ -10851,7 +10794,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.16.8 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.16.9 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10872,6 +10815,32 @@ fi
 # ==============================================================================
 # ===  ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
 # ==============================================================================
+
+
+mod_mtu_mss_optimizer() {
+    MTU_CHOICE=$(whiptail --title "Оптимизатор MTU/MSS" --menu "Выберите профиль MTU для туннелей:
+(MSS будет рассчитан автоматически)" 15 65 4         "1420" "Стандартный WireGuard"         "1360" "Безопасный (Простые каскады)"         "1280" "Рекомендуемый (Каскады с WARP/Tailscale)"         "1140" "Экстрим (Сложные каскады / PPPoE)" 3>&1 1>&2 2>&3)
+
+    if [ -z "$MTU_CHOICE" ]; then return; fi
+    MSS_VAL=$((MTU_CHOICE - 40))
+    whiptail --title "Оптимизация" --infobox "Применение MTU=$MTU_CHOICE и MSS=$MSS_VAL..." 8 50
+    
+    INTERFACES=$(ip link show | grep -E 'wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare|wg-cascade|warp' | awk -F': ' '{print $2}' || true)
+    if [ -n "$INTERFACES" ]; then
+        for IFACE in $INTERFACES; do
+            ip link set dev $IFACE mtu $MTU_CHOICE 2>/dev/null || true
+            while iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep -q " $IFACE "; do
+                RULE_NUM=$(iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep " $IFACE " | head -n 1 | awk '{print $1}')
+                iptables -t mangle -D FORWARD $RULE_NUM 2>/dev/null || break
+            done
+        done
+    fi
+    
+    iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL 2>/dev/null || true
+    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VAL
+    whiptail --title "Успех" --msgbox "MTU и TCP MSS успешно оптимизированы для интерфейсов:
+$INTERFACES" 10 60
+}
 
 # ==========================================
 # НОВАЯ СИСТЕМА ИЕРАРХИЧЕСКИХ МЕНЮ (v3.16.3 - Path Navigation)
@@ -11050,7 +11019,7 @@ detect_current_state() {
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.8" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.9" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

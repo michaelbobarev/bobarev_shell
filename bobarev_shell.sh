@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.5 (Restored Full Edition)
+# Версия: 3.16.7 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -1512,7 +1512,7 @@ setup_standalone_naive() {
             5)
                 echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО NAIVEPROXY ===${C_RESET}"
 
-                if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
+                if systemctl is-active --quiet hysteria-server.service.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
                     echo -e "${C_YELLOW} Освобождение портов 80/443 от предыдущих каскадных служб (Hysteria/Xray/DERP)...${C_RESET}"
                     silent_run systemctl stop hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
                     silent_run systemctl disable hysteria-server.service hysteria-client.service bobarev-xray.service derper.service
@@ -2872,7 +2872,7 @@ SVC_EOF
     systemctl restart hysteria-server.service || true
     sleep 2
 
-    if ! systemctl is-active --quiet hysteria-server.service; then
+    if ! systemctl is-active --quiet hysteria-server.service.service; then
         echo -e "${C_RED} Служба hysteria-server НЕ запустилась! Журнал ошибок:${C_RESET}"
         journalctl -u hysteria-server.service -n 15 --no-pager || true
         return 1
@@ -3097,7 +3097,7 @@ manage_cascade_hysteria_menu() {
     while true; do
         MODULE_CANCELED=false
         local c_state="Не активен"
-        if systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
+        if systemctl is-active --quiet hysteria-server.service.service 2>/dev/null; then
             if is_warp_active; then
                 c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Cloudflare WARP)"
             else
@@ -5151,7 +5151,7 @@ mod_ufw() {
             silent_run ufw allow "${WG_CASCADE_PORT}/udp" comment 'WG Direct Cascade UDP'
             silent_run ufw allow "${WG_CASCADE_PORT}/tcp" comment 'WG Direct Cascade FakeTCP'
         fi
-        if [ -n "${HYSTERIA_PORT:-}" ] && { [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] || systemctl is-active --quiet hysteria-server.service 2>/dev/null; }; then
+        if [ -n "${HYSTERIA_PORT:-}" ] && { [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] || systemctl is-active --quiet hysteria-server.service.service 2>/dev/null; }; then
             silent_run ufw allow "${HYSTERIA_PORT}/udp" comment 'Hysteria 2 QUIC UDP'
             silent_run ufw allow "${HYSTERIA_PORT}/tcp" comment 'Hysteria 2 TCP'
         fi
@@ -6709,12 +6709,12 @@ mod_server_audit() {
     if [[ -f /etc/naiveproxy/mesh-paused ]]; then
         cascade_status="${C_BLUE}NaiveProxy + XRayMesh: сохранена отметка паузы${C_RESET}"
     elif is_naive_active && nm_bound; then
-        if systemctl is-active --quiet xraymesh.service && { systemctl is-active --quiet naive-mesh-bridge.service || systemctl is-active --quiet gost-mesh.service; }; then
+        if systemctl is-active --quiet bobarev-xray.servicemesh.service && { systemctl is-active --quiet naive-mesh-bridge.service || systemctl is-active --quiet gost-mesh.service; }; then
             cascade_status="${C_GREEN}Сервер 1: NaiveProxy + XRayMesh — локальные службы запущены; полный путь отдельно не проверен${C_RESET}"
         else
             cascade_status="${C_BLUE}NaiveProxy привязан к mesh-каскаду; часть ожидаемых локальных служб не запущена${C_RESET}"
         fi
-    elif systemctl is-active --quiet xraymesh.service; then
+    elif systemctl is-active --quiet bobarev-xray.servicemesh.service; then
         cascade_status="${C_GREEN}Сервер 2: XRayMesh — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
         cascade_status="${C_GREEN} Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
@@ -10415,7 +10415,7 @@ nm_lifecycle() {
  done
 }
 
-nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet xraymesh.service; }
+nm_ready() { [[ -f /etc/xraymesh/config.env ]] && systemctl is-active --quiet bobarev-xray.servicemesh.service; }
 nm_wizard() {
  local target="$1"
  echo "НАСТРОЙКА СЕРВЕРА $target. Сначала сервер 2 — выход; затем сервер 1 — вход."
@@ -10758,7 +10758,7 @@ PY
 check_local_ip "$EXIT_IP"
 # Existing unrelated services are never stopped automatically.
 if ss -H -ltn "sport = :$SOCKS_PORT" | grep -q .; then
- systemctl is-active --quiet xray-mesh-socks.service || { echo 'Порт занят другой службой. Она сохранена. Выберите свободный порт или выполните миграцию вручную.'; exit 1; }
+ systemctl is-active --quiet bobarev-xray.service-mesh-socks.service || { echo 'Порт занят другой службой. Она сохранена. Выберите свободный порт или выполните миграцию вручную.'; exit 1; }
 fi
 apt-get install -y curl unzip ca-certificates
 if [[ ! -x /usr/local/bin/xray ]]; then
@@ -10810,7 +10810,7 @@ EOF
 systemctl daemon-reload
 systemctl enable xray-mesh-socks.service
 systemctl restart xray-mesh-socks.service
-systemctl is-active --quiet xray-mesh-socks.service
+systemctl is-active --quiet bobarev-xray.service-mesh-socks.service
 echo "Xray SOCKS: $EXIT_IP:$SOCKS_PORT. Старые службы сохранены."
 echo 'Проверку с mesh-адреса выполните на сервере 1 (меню Проверка).'
 
@@ -10851,7 +10851,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.16.3 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.16.7 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11008,7 +11008,7 @@ detect_current_state() {
     systemctl is-active --quiet bobarev-xray.service && SRV_XRAY="работает"
 
     SRV_HYSTERIA="остановлен"
-    systemctl is-active --quiet hysteria-server && SRV_HYSTERIA="работает"
+    systemctl is-active --quiet hysteria-server.service.service && SRV_HYSTERIA="работает"
 
     # Определение схемы и роли
     CONN_SCHEME="Не определено"
@@ -11050,7 +11050,11 @@ detect_current_state() {
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.3" --menu "Главное меню:" 18 75 6         "1" "🛠 Сервер и безопасность"         "2" "🌍 Соединения и прокси"         "3" "🔒 Закрытая сеть Tailscale"         "4" "🖧 Локальный маршрутизатор"         "5" "⚙️ Диагностика и обслуживание"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.7" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+        clear
+        echo "Работа скрипта завершена."
+        exit 0
+    fi; then
         clear
         echo "Отменено пользователем."
         exit 0

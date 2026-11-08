@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.0-rc1 (Restored Full Edition)
+# Версия: 3.18.1-rc1 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6489,49 +6489,75 @@ mod_server_audit() {
     fi
 
     echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
-    local ssh_port="22" root_ssh="yes" pass_auth="yes"
-    local sshd_cmd=$(get_sshd_cmd)
-
+    local ssh_port="22" root_ssh="" pass_auth="" pubkey_auth="" sshd_ok=false
+    local sshguard_state="не установлен" listen_ok=false ufw_ssh="нет данных"
+    local sshd_cmd eff
+    sshd_cmd=$(get_sshd_cmd)
     if [ -n "$sshd_cmd" ]; then
-        local conf_port=$($sshd_cmd -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "")
-        local conf_root=$($sshd_cmd -T 2>/dev/null | grep -i "^permitrootlogin " | awk '{print $2}' | head -n 1 || echo "")
-        local conf_pass=$($sshd_cmd -T 2>/dev/null | grep -i "^passwordauthentication " | awk '{print $2}' | head -n 1 || echo "")
-        
-        [ -n "$conf_port" ] && ssh_port="$conf_port"
-        [ -n "$conf_root" ] && root_ssh="$conf_root"
-        [ -n "$conf_pass" ] && pass_auth="$conf_pass"
+        if "$sshd_cmd" -t >/dev/null 2>&1; then
+            sshd_ok=true
+        else
+            echo -e "   ${C_RED}Конфигурация sshd содержит ошибки: sshd -t${C_RESET}"
+        fi
+        if eff=$("$sshd_cmd" -T 2>/dev/null); then
+            ssh_port=$(printf '%s\n' "$eff" | awk '$1=="port"{print $2; exit}')
+            root_ssh=$(printf '%s\n' "$eff" | awk '$1=="permitrootlogin"{print $2; exit}')
+            pass_auth=$(printf '%s\n' "$eff" | awk '$1=="passwordauthentication"{print $2; exit}')
+            pubkey_auth=$(printf '%s\n' "$eff" | awk '$1=="pubkeyauthentication"{print $2; exit}')
+        fi
     fi
-
-    local port_status_human
+    [ -z "$ssh_port" ] && ssh_port="22"
+    if command -v ss >/dev/null 2>&1; then
+        if ss -H -ltn 2>/dev/null | grep -qE "[:.]${ssh_port}[[:space:]]"; then
+            listen_ok=true
+        fi
+    fi
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status 2>/dev/null | grep -qE "(^|[[:space:]])${ssh_port}/tcp([[:space:]]|$)"; then
+            ufw_ssh="разрешён"
+        else
+            ufw_ssh="не найдено правило"
+        fi
+    fi
+    if command -v sshguard >/dev/null 2>&1; then
+        if systemctl is-active --quiet sshguard 2>/dev/null; then
+            sshguard_state="активен"
+        else
+            sshguard_state="установлен, но не активен"
+        fi
+    elif systemctl list-unit-files sshguard.service >/dev/null 2>&1; then
+        sshguard_state="юнит есть, бинарник не найден"
+    fi
+    local port_status_human root_status_human pass_status_human pubkeystatushuman
     if [ "$ssh_port" = "22" ]; then
         port_status_human="${C_YELLOW}  22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
     else
         port_status_human="${C_GREEN} $ssh_port (Нестандартный порт)${C_RESET}"
     fi
-
-    local root_status_human
     case "${root_ssh,,}" in
         no) root_status_human="${C_GREEN} Запрещен${C_RESET}" ;;
         prohibit-password|without-password) root_status_human="${C_GREEN} Только по SSH-ключам${C_RESET}" ;;
-        yes|*) root_status_human="${C_RED} Разрешен${C_RESET}" ;;
+        yes) root_status_human="${C_RED} Разрешен${C_RESET}" ;;
+        *) root_status_human="${C_YELLOW} Неизвестно (${root_ssh:-нет данных})${C_RESET}" ;;
     esac
-
-    local pass_status_human
     case "${pass_auth,,}" in
         no) pass_status_human="${C_GREEN} Отключен (вход только по SSH-ключам)${C_RESET}" ;;
-        yes|*) pass_status_human="${C_YELLOW}  Разрешен вход по паролю${C_RESET}" ;;
+        yes) pass_status_human="${C_YELLOW}  Разрешен вход по паролю${C_RESET}" ;;
+        *) pass_status_human="${C_YELLOW} Неизвестно (${pass_auth:-нет данных})${C_RESET}" ;;
     esac
-
+    case "${pubkey_auth,,}" in
+        yes) pubkeystatushuman="${C_GREEN} Разрешена${C_RESET}" ;;
+        no) pubkeystatushuman="${C_YELLOW} Запрещена${C_RESET}" ;;
+        *) pubkeystatushuman="${C_YELLOW} Неизвестно (${pubkey_auth:-нет данных})${C_RESET}" ;;
+    esac
     echo -e "   Используемый порт SSH:     $port_status_human"
+    echo -e "   Порт слушается:            $([ "$listen_ok" = true ] && echo -e "${C_GREEN} Да${C_RESET}" || echo -e "${C_RED} Нет${C_RESET}")"
+    echo -e "   UFW для SSH:               ${ufw_ssh}"
     echo -e "   Вход для root по SSH:      $root_status_human"
     echo -e "   Авторизация по паролю:     $pass_status_human"
-
-    if systemctl is-active --quiet sshguard 2>/dev/null; then
-        echo -e "   Защита от перебора пароля: ${C_GREEN} Работает (легковесный демон sshguard)${C_RESET}"
-    elif systemctl is-active --quiet fail2ban 2>/dev/null; then
-        echo -e "   Защита от перебора пароля: ${C_GREEN} Работает (служба fail2ban)${C_RESET}"
-    fi
-
+    echo -e "   Авторизация по ключу:      $pubkeystatushuman"
+    echo -e "   Конфигурация sshd:         $([ "$sshd_ok" = true ] && echo -e "${C_GREEN} Валидна${C_RESET}" || echo -e "${C_RED} Ошибки${C_RESET}")"
+    echo -e "   Защита от перебора:        ${sshguard_state}"
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
         local param="$1" expected="$2" label="$3" ok_msg="$4" err_msg="$5"
@@ -10795,7 +10821,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.0-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.1-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11112,7 +11138,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.0-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.1-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

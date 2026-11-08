@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.1-rc1 (Restored Full Edition)
+# Версия: 3.18.2-rc1 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6530,34 +6530,43 @@ mod_server_audit() {
     fi
     local port_status_human root_status_human pass_status_human pubkeystatushuman
     if [ "$ssh_port" = "22" ]; then
-        port_status_human="${C_YELLOW}  22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
+        port_status_human="${C_YELLOW}22 (Стандартный порт, рекомендуется сменить)${C_RESET}"
     else
-        port_status_human="${C_GREEN} $ssh_port (Нестандартный порт)${C_RESET}"
+        port_status_human="${C_GREEN}$ssh_port (Нестандартный порт)${C_RESET}"
     fi
     case "${root_ssh,,}" in
-        no) root_status_human="${C_GREEN} Запрещен${C_RESET}" ;;
-        prohibit-password|without-password) root_status_human="${C_GREEN} Только по SSH-ключам${C_RESET}" ;;
-        yes) root_status_human="${C_RED} Разрешен${C_RESET}" ;;
-        *) root_status_human="${C_YELLOW} Неизвестно (${root_ssh:-нет данных})${C_RESET}" ;;
+        no) root_status_human="${C_GREEN}Запрещен${C_RESET}" ;;
+        prohibit-password|without-password) root_status_human="${C_GREEN}Только по SSH-ключам${C_RESET}" ;;
+        yes) root_status_human="${C_RED}Разрешен${C_RESET}" ;;
+        *) root_status_human="${C_YELLOW}Неизвестно (${root_ssh:-нет данных})${C_RESET}" ;;
     esac
     case "${pass_auth,,}" in
-        no) pass_status_human="${C_GREEN} Отключен (вход только по SSH-ключам)${C_RESET}" ;;
-        yes) pass_status_human="${C_YELLOW}  Разрешен вход по паролю${C_RESET}" ;;
-        *) pass_status_human="${C_YELLOW} Неизвестно (${pass_auth:-нет данных})${C_RESET}" ;;
+        no) pass_status_human="${C_GREEN}Отключен (вход только по SSH-ключам)${C_RESET}" ;;
+        yes) pass_status_human="${C_YELLOW}Разрешен вход по паролю${C_RESET}" ;;
+        *) pass_status_human="${C_YELLOW}Неизвестно (${pass_auth:-нет данных})${C_RESET}" ;;
     esac
     case "${pubkey_auth,,}" in
-        yes) pubkeystatushuman="${C_GREEN} Разрешена${C_RESET}" ;;
-        no) pubkeystatushuman="${C_YELLOW} Запрещена${C_RESET}" ;;
-        *) pubkeystatushuman="${C_YELLOW} Неизвестно (${pubkey_auth:-нет данных})${C_RESET}" ;;
+        yes) pubkeystatushuman="${C_GREEN}Разрешена${C_RESET}" ;;
+        no) pubkeystatushuman="${C_YELLOW}Запрещена${C_RESET}" ;;
+        *) pubkeystatushuman="${C_YELLOW}Неизвестно (${pubkey_auth:-нет данных})${C_RESET}" ;;
     esac
-    echo -e "   Используемый порт SSH:     $port_status_human"
-    echo -e "   Порт слушается:            $([ "$listen_ok" = true ] && echo -e "${C_GREEN} Да${C_RESET}" || echo -e "${C_RED} Нет${C_RESET}")"
-    echo -e "   UFW для SSH:               ${ufw_ssh}"
-    echo -e "   Вход для root по SSH:      $root_status_human"
-    echo -e "   Авторизация по паролю:     $pass_status_human"
-    echo -e "   Авторизация по ключу:      $pubkeystatushuman"
-    echo -e "   Конфигурация sshd:         $([ "$sshd_ok" = true ] && echo -e "${C_GREEN} Валидна${C_RESET}" || echo -e "${C_RED} Ошибки${C_RESET}")"
-    echo -e "   Защита от перебора:        ${sshguard_state}"
+    local audit_label audit_gap
+    audit_ssh_row() {
+        local label="$1" value="$2" gap
+        gap=$((28 - ${#label}))
+        [ "$gap" -ge 1 ] || gap=1
+        printf '   %s%*s%b\n' "$label" "$gap" '' "$value"
+    }
+    audit_ssh_row "Используемый порт SSH:" "$port_status_human"
+    audit_ssh_row "Порт слушается:" "$([ "$listen_ok" = true ] && echo -e "${C_GREEN}Да${C_RESET}" || echo -e "${C_RED}Нет${C_RESET}")"
+    audit_ssh_row "UFW для SSH:" "$ufw_ssh"
+    audit_ssh_row "Вход для root по SSH:" "$root_status_human"
+    audit_ssh_row "Авторизация по паролю:" "$pass_status_human"
+    audit_ssh_row "Авторизация по ключу:" "$pubkeystatushuman"
+    audit_ssh_row "Конфигурация sshd:" "$([ "$sshd_ok" = true ] && echo -e "${C_GREEN}Валидна${C_RESET}" || echo -e "${C_RED}Ошибки${C_RESET}")"
+    audit_ssh_row "Защита от перебора:" "$sshguard_state"
+    unset -f audit_ssh_row
+
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
         local param="$1" expected="$2" label="$3" ok_msg="$4" err_msg="$5"
@@ -10821,7 +10830,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.1-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.2-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11138,7 +11147,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.1-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.2-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

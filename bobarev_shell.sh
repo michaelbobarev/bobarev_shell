@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.16.2 (Restored Full Edition)
+# Версия: 3.16.5 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -858,7 +858,7 @@ mod_crowdsec() {
 
 mod_mtu_mss_optimizer() {
     # 1. Поиск туннельных интерфейсов
-    INTERFACES=$(ip link show | grep -E 'wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare' | awk -F': ' '{print $2}' || true)
+    INTERFACES=$(ip link show | grep -E 'wg[0-9]+|tailscale[0-9]+|tun[0-9]+|Cloudflare|wg-cascade|warp' | awk -F': ' '{print $2}' || true)
     
     if [ -z "$INTERFACES" ]; then
         whiptail --title "Ошибка" --msgbox "Туннельные интерфейсы не найдены!" 8 50
@@ -885,11 +885,10 @@ mod_mtu_mss_optimizer() {
 
     whiptail --title "Оптимизация" --infobox "Применение MTU=$MTU_CHOICE и MSS=$MSS_VAL к $SELECTED_IFACE..." 8 60
 
-    # Удаление старых правил TCPMSS для конкретного интерфейса
-    # Находим номера строк в цепочке FORWARD и удаляем их с конца
-    OLD_RULES=$(iptables -t mangle -L FORWARD --line-numbers -n | grep "TCPMSS" | grep -E "( $SELECTED_IFACE )|( $SELECTED_IFACE$)" | awk '{print $1}' | tac || true)
-    for RULE_NUM in $OLD_RULES; do
-        iptables -t mangle -D FORWARD "$RULE_NUM" 2>/dev/null || true
+    # Надежное удаление всех старых правил TCPMSS для этого интерфейса
+    while iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep -q " $SELECTED_IFACE "; do
+        RULE_NUM=$(iptables -t mangle -L FORWARD -v -n --line-numbers | grep "TCPMSS" | grep " $SELECTED_IFACE " | head -n 1 | awk '{print $1}')
+        iptables -t mangle -D FORWARD $RULE_NUM 2>/dev/null || break
     done
 
     # Применение MTU с отловом реальных ошибок
@@ -978,7 +977,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.69: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.16.3: Aggressive Anti-HoL Blocking & Low-Latency Profile
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -1021,7 +1020,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.14.69: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.16.3: Zero-Bufferbloat High-Throughput Balanced Profile
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -10852,7 +10851,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.14.69 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.16.3 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -10875,12 +10874,12 @@ fi
 # ==============================================================================
 
 # ==========================================
-# НОВАЯ СИСТЕМА ИЕРАРХИЧЕСКИХ МЕНЮ (v3.16.1 - Path Navigation)
+# НОВАЯ СИСТЕМА ИЕРАРХИЧЕСКИХ МЕНЮ (v3.16.3 - Path Navigation)
 # ==========================================
 
 menu_server_security() {
     while true; do
-        sub_choice=$(whiptail --title "🛠 СЕРВЕР И БЕЗОПАСНОСТЬ" --menu "Выберите категорию:" 20 75 12             "1" "[АВТО] Первичная настройка - мастер"             "2" "Основные настройки (TZ, Hostname, APT)"             "3" "Пользователи и SSH (Ключи, Конфиг, Root)"             "4" "Защита и брандмауэр (UFW, CrowdSec, Hardening)"             "5" "Память и производительность (RAM, Swap, BBR)"             "6" "Оборудование и утилиты (Desktop, HDMI)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+        if ! sub_choice=$(whiptail --title "🛠 СЕРВЕР И БЕЗОПАСНОСТЬ" --menu "Выберите категорию:" 20 75 12             "1" "[АВТО] Первичная настройка - мастер"             "2" "Основные настройки (TZ, Hostname, APT)"             "3" "Пользователи и SSH (Ключи, Конфиг, Root)"             "4" "Защита и брандмауэр (UFW, CrowdSec, Hardening)"             "5" "Память и производительность (RAM, Swap, BBR)"             "6" "Оборудование и утилиты (Desktop, HDMI)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
             
         case "$sub_choice" in
             1) run_full_auto_setup; pause_enter ;;
@@ -10905,7 +10904,7 @@ menu_server_security() {
 
 menu_naiveproxy_two_servers() {
     while true; do
-        sub_choice=$(whiptail --title "NAIVEPROXY → ДВА СЕРВЕРА" --menu "Как соединить входной и выходной серверы?" 18 75 6             "1" "Xray REALITY (Рекомендуется)"             "2" "Hysteria 2"             "3" "WireGuard"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+        if ! sub_choice=$(whiptail --title "NAIVEPROXY → ДВА СЕРВЕРА" --menu "Как соединить входной и выходной серверы?" 18 75 6             "1" "Xray REALITY (Рекомендуется)"             "2" "Hysteria 2"             "3" "WireGuard"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
             
         case "$sub_choice" in
             1) manage_cascade_xray_menu ;;
@@ -10918,7 +10917,7 @@ menu_naiveproxy_two_servers() {
 
 menu_naiveproxy_setup() {
     while true; do
-        sub_choice=$(whiptail --title "СОЕДИНЕНИЯ → NAIVEPROXY" --menu "Выберите топологию сети:" 20 75 8             "1" "Один сервер (Автономный + WG Dual-Gateway)"             "2" "Два сервера (Каскад)"             "3" "Выход через Tailscale / Mullvad"             "4" "Выход через XRayMesh"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+        if ! sub_choice=$(whiptail --title "СОЕДИНЕНИЯ → NAIVEPROXY" --menu "Выберите топологию сети:" 20 75 8             "1" "Один сервер (Автономный + WG Dual-Gateway)"             "2" "Два сервера (Каскад)"             "3" "Выход через Tailscale / Mullvad"             "4" "Выход через XRayMesh"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
             
         case "$sub_choice" in
             1) setup_standalone_naive ;;
@@ -10930,15 +10929,27 @@ menu_naiveproxy_setup() {
     done
 }
 
+menu_wg_amnezia() {
+    while true; do
+        if ! sub_choice=$(whiptail --title "🔒 WIREGUARD / AMNEZIAWG" --menu "Выберите тип VPN:" 15 75 6             "1" "Классический WireGuard (Каскад)"             "2" "AmneziaWG (Установка / QR)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
+
+        case "$sub_choice" in
+            1) mod_direct_wg_cascade ;;
+            2) mod_amnezia_wg ;;
+            0|"") return ;;
+        esac
+    done
+}
+
 menu_connections_proxies() {
     while true; do
-        sub_choice=$(whiptail --title "🌍 СОЕДИНЕНИЯ И ПРОКСИ" --menu "Сценарии и протоколы:" 20 75 8             "1" "NaiveProxy — вход для клиентов"             "2" "Xray REALITY — управление каскадом"             "3" "Hysteria 2 — управление каскадом"             "4" "WireGuard / AmneziaWG — управление"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+        if ! sub_choice=$(whiptail --title "🌍 СОЕДИНЕНИЯ И ПРОКСИ" --menu "Сценарии и протоколы:" 20 75 8             "1" "NaiveProxy — вход для клиентов"             "2" "Xray REALITY — управление каскадом"             "3" "Hysteria 2 — управление каскадом"             "4" "WireGuard / AmneziaWG — управление"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
             
         case "$sub_choice" in
             1) menu_naiveproxy_setup ;;
             2) manage_cascade_xray_menu ;;
             3) manage_cascade_hysteria_menu ;;
-            4) mod_amnezia_wg ;;
+            4) menu_wg_amnezia ;;
             0|"") return ;;
         esac
     done
@@ -10946,7 +10957,7 @@ menu_connections_proxies() {
 
 menu_tailscale_network() {
     while true; do
-        sub_choice=$(whiptail --title "🔒 ЗАКРЫТАЯ СЕТЬ TAILSCALE" --menu "Управление виртуальной сетью:" 15 75 6             "1" "Подключение и состояние (Установка)"             "2" "Использовать Tailscale для NaiveProxy (Переход)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+        if ! sub_choice=$(whiptail --title "🔒 ЗАКРЫТАЯ СЕТЬ TAILSCALE" --menu "Управление виртуальной сетью:" 15 75 6             "1" "Подключение и состояние (Установка)"             "2" "Использовать Tailscale для NaiveProxy (Переход)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
             
         case "$sub_choice" in
             1) mod_tailscale ;;
@@ -10958,7 +10969,7 @@ menu_tailscale_network() {
 
 menu_local_router() {
     while true; do
-        sub_choice=$(whiptail --title "🖧 ЛОКАЛЬНЫЙ МАРШРУТИЗАТОР" --menu "Настройка сервера как LAN-роутера:" 15 75 6             "1" "Настроить LAN и выход в интернет (SBC)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+        if ! sub_choice=$(whiptail --title "🖧 ЛОКАЛЬНЫЙ МАРШРУТИЗАТОР" --menu "Настройка сервера как LAN-роутера:" 15 75 6             "1" "Настроить LAN и выход в интернет (SBC)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
             
         case "$sub_choice" in
             1) mod_router_sbc ;;
@@ -10969,7 +10980,7 @@ menu_local_router() {
 
 menu_diagnostics_maintenance() {
     while true; do
-        sub_choice=$(whiptail --title "⚙️ ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 10             "1" "Состояние сервера (Аудит ресурсов)"             "2" "Проверка сети и каскадных пар"             "3" "Системные журналы"             "4" "Анализ загрузки системы"             "5" "Общий MTU/MSS — расширенные настройки"             "6" "Экспорт / Импорт настроек (Бэкап)"             "7" "Дополнительно: Telegram Уведомления"             "8" "Остановка и сброс сетевых надстроек"             "0" "⬅ Назад" 3>&1 1>&2 2>&3)
+        if ! sub_choice=$(whiptail --title "⚙️ ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 10             "1" "Состояние сервера (Аудит ресурсов)"             "2" "Проверка сети и каскадных пар"             "3" "Системные журналы"             "4" "Анализ загрузки системы"             "5" "Общий MTU/MSS — расширенные настройки"             "6" "Экспорт / Импорт настроек (Бэкап)"             "7" "Дополнительно: Telegram Уведомления"             "8" "Остановка и сброс сетевых надстроек"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
             
         case "$sub_choice" in
             1) mod_server_audit; pause_enter ;;
@@ -10994,7 +11005,7 @@ detect_current_state() {
     systemctl is-active --quiet caddy && SRV_CADDY="работает"
 
     SRV_XRAY="остановлен"
-    systemctl is-active --quiet xray && SRV_XRAY="работает"
+    systemctl is-active --quiet bobarev-xray.service && SRV_XRAY="работает"
 
     SRV_HYSTERIA="остановлен"
     systemctl is-active --quiet hysteria-server && SRV_HYSTERIA="работает"
@@ -11039,7 +11050,11 @@ detect_current_state() {
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.1" --menu "Главное меню:" 18 75 6         "1" "🛠 Сервер и безопасность"         "2" "🌍 Соединения и прокси"         "3" "🔒 Закрытая сеть Tailscale"         "4" "🖧 Локальный маршрутизатор"         "5" "⚙️ Диагностика и обслуживание"         "0" "❌ Выход" 3>&1 1>&2 2>&3)
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.16.3" --menu "Главное меню:" 18 75 6         "1" "🛠 Сервер и безопасность"         "2" "🌍 Соединения и прокси"         "3" "🔒 Закрытая сеть Tailscale"         "4" "🖧 Локальный маршрутизатор"         "5" "⚙️ Диагностика и обслуживание"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+        clear
+        echo "Отменено пользователем."
+        exit 0
+    fi
 
     case "$MAIN_CHOICE" in
         1) menu_server_security ;;

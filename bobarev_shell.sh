@@ -9,7 +9,7 @@ trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.3-rc1 (Restored Full Edition)
+# Версия: 3.18.4-rc1 (Restored Full Edition)
 # ==============================================================================
 
 # Menu headers use the exact selected main-menu label.
@@ -6364,7 +6364,7 @@ mod_server_audit() {
 
     local cpu_bench_ms=$(LC_ALL=C awk -v t1="$t_cpu1" -v t2="$t_cpu2" 'BEGIN {d=(t2-t1)*1000; if(d<1) d=1; printf "%d", d}')
     if [ "$cpu_bench_ms" -lt 150 ]; then
-        cpu_speed_status="${C_GREEN} Быстрый (${cpu_bench_ms} мс — без троттлинга)${C_RESET}"
+        cpu_speed_status="${C_GREEN} Быстрый (${cpu_bench_ms} мс — короткий тест)${C_RESET}"
     elif [ "$cpu_bench_ms" -lt 350 ]; then
         cpu_speed_status="${C_GREEN} Нормальный (${cpu_bench_ms} мс — стандартное ядро)${C_RESET}"
     else
@@ -6389,9 +6389,9 @@ mod_server_audit() {
         local io_lat_int=$(echo "$io_parsed" | cut -d'|' -f3)
 
         if [ "$io_lat_int" -lt 3 ]; then
-            disk_io_status="${C_GREEN} Быстрый NVMe/SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
+            disk_io_status="${C_GREEN} Быстрый (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
         elif [ "$io_lat_int" -lt 12 ]; then
-            disk_io_status="${C_GREEN} Нормальный SSD (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
+            disk_io_status="${C_GREEN} Нормальный (отклик ${io_lat} мс, ~${io_iops} IOPS)${C_RESET}"
         else
             disk_io_status="${C_YELLOW}  Медленный отклик (${io_lat} мс, ~${io_iops} IOPS — диск занят!)${C_RESET}"
             oversell_score=$((oversell_score + 1))
@@ -6421,7 +6421,7 @@ mod_server_audit() {
         local steal_int="${parsed_stat#*|}"
 
         if [ "$steal_int" -eq 0 ]; then
-            steal_status="${C_GREEN} 0.0% под нагрузкой (хостер честно отдает ядро)${C_RESET}"
+            steal_status="${C_GREEN} 0.0% под нагрузкой (за время проверки)${C_RESET}"
         elif [ "$steal_int" -lt 5 ]; then
             steal_status="${C_GREEN} Низкий (${steal_pct}% — минимальное влияние соседей)${C_RESET}"
         elif [ "$steal_int" -lt 15 ]; then
@@ -6447,11 +6447,11 @@ mod_server_audit() {
         fi
     fi
 
-    local verdict_human="${C_GREEN} Честные ресурсы (оверселлинг не обнаружен)${C_RESET}"
+    local verdict_human="${C_GREEN} По короткому тесту не определяется${C_RESET}"
     if [ "$oversell_score" -eq 1 ]; then
-        verdict_human="${C_YELLOW} Умеренный оверселлинг (ресурсы делятся с соседями)${C_RESET}"
+        verdict_human="${C_YELLOW} Замечены задержки; причина не установлена${C_RESET}"
     elif [ "$oversell_score" -ge 2 ]; then
-        verdict_human="${C_RED} Жесткий оверселлинг! (хостер урезает железо)${C_RESET}"
+        verdict_human="${C_RED}Высокие задержки; причина не установлена${C_RESET}"
     fi
 
     echo -e "   Температура процессора:    $cpu_temp"
@@ -6488,132 +6488,66 @@ mod_server_audit() {
         echo -e "   Пароль суперпользователя:  ${C_RED} Активен (разрешен прямой вход root)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 4. SSH, защита и учёт сессий ---${C_RESET}"
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo '   Расширенный SSH-аудит: недоступен (нужен python3). Настройки не изменены.'
-    else
-        python3 - <<'BOBAREV_SSH_AUDIT'
-import subprocess, shutil, re, tempfile, os, json, datetime
-
-def run(args, timeout=12):
-    try:
-        p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           text=True, timeout=timeout, env={**os.environ, 'LC_ALL':'C.UTF-8'})
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return 127, '', str(e)
-
-def row(label, value):
-    value = re.sub(r'[\x00-\x1f\x7f]', ' ', str(value))
-    print('   ' + label + ' ' * max(1, 29-len(label)) + value)
-
-def active(unit):
-    return run(['systemctl','is-active','--quiet',unit])[0] == 0
-
-sshd = shutil.which('sshd') or '/usr/sbin/sshd'
-rc, _, _ = run([sshd,'-t'])
-row('Конфигурация sshd:', 'валидна на диске' if rc == 0 else 'не проверена / ошибка sshd -t')
-rc, text, _ = run([sshd,'-T'])
-conf = {}
-if rc == 0:
-    for line in text.splitlines():
-        k, _, v = line.partition(' ')
-        conf.setdefault(k, []).append(v)
-ports = sorted(set(conf.get('port', [])), key=lambda x: int(x) if x.isdigit() else 0)
-row('Порты в конфигурации:', ', '.join(ports) or 'не определены')
-rc, sockets, _ = run(['ss','-Hltnp'])
-listeners = []
-if rc == 0:
-    for line in sockets.splitlines():
-        if '"sshd"' in line or '"sshd-session"' in line:
-            fields=line.split()
-            if len(fields)>3: listeners.append(fields[3])
-row('Сокеты процесса SSH:', ', '.join(sorted(set(listeners))) or 'не подтверждены (возможны ограничения прав/socket activation)')
-rootpolicy=conf.get('permitrootlogin',['неизвестно'])[0]
-row('Root: политика SSH:', rootpolicy + ' (базовая конфигурация, без Match-контекста)')
-rc, status, _ = run(['passwd','-S','root'])
-parts=status.split()
-password={'L':'заблокирован','LK':'заблокирован','P':'задан','PS':'задан','NP':'нет пароля'}.get(parts[1], 'неизвестно') if rc==0 and len(parts)>1 else 'не проверен'
-row('Пароль root:', password)
-row('PasswordAuthentication:', conf.get('passwordauthentication',['неизвестно'])[0])
-row('PubkeyAuthentication:', conf.get('pubkeyauthentication',['неизвестно'])[0])
-row('AuthenticationMethods:', conf.get('authenticationmethods',['неизвестно'])[0])
-row('Ограничения вывода:', 'sshd -T читает файлы; загруженное состояние и все Match не проверены')
-
-rc, journal, _ = run(['journalctl','-b','--since','24 hours ago','-n','500','-o','json','--no-pager',
-                        '_SYSTEMD_UNIT=ssh.service','+','_COMM=sshd','+','_COMM=sshd-session'])
-events=[]
-if rc==0:
-    for line in journal.splitlines():
-        try: events.append(json.loads(line))
-        except ValueError: pass
-ssh_events=[e for e in events if e.get('_COMM') in ('sshd','sshd-session','sshd-auth') or str(e.get('SYSLOG_IDENTIFIER','')).startswith('sshd')]
-row('Журнал SSH:', 'события доступны (текущая загрузка, последние 500)' if ssh_events else 'события не найдены / чтение недоступно')
-keys=[]
-for e in ssh_events:
-    m=re.search(r'Accepted publickey for (\S+)',str(e.get('MESSAGE','')))
-    if m: keys.append(m.group(1))
-row('Вход по ключу:', 'подтверждён журналом: '+', '.join(sorted(set(keys))) if keys else 'нет подтверждения в выбранном журнале')
-row('sshguard: служба:', 'активна' if active('sshguard.service') else 'не активна / отсутствует')
-backs=[]
-for family in ('ip','ip6'):
-    r,t,_=run(['nft','list','table',family,'sshguard'])
-    if r==0 and 'hook input' in t and '@attackers' in t and 'drop' in t: backs.append(family)
-row('sshguard: nft backend:', ', '.join(backs)+' — hook/drop найдены' if backs else 'не подтверждён (иной backend/нет прав/нет правил)')
-row('sshguard: обнаружение:', 'парсер и реальный бан этим аудитом не тестируются')
-row('fail2ban: служба:', 'активна' if active('fail2ban.service') else 'не активна / отсутствует')
-for jail in ('sshd','sshd-ddos'):
-    r,t,_=run(['fail2ban-client','status',jail])
-    row('fail2ban '+jail+':', 'jail отвечает' if r==0 else 'не подтверждён')
-    if r==0:
-        q,match,_=run(['fail2ban-client','get',jail,'journalmatch'])
-        if q==0: row('  journalmatch:', match.replace('\n',' '))
-
-if shutil.which('fail2ban-regex') and os.path.isfile('/etc/fail2ban/filter.d/sshd.conf'):
-    stamp=datetime.datetime.now().strftime('%b %d %H:%M:%S')
-    fd,path=tempfile.mkstemp(prefix='bobarev-audit-regex-')
-    try:
-        with os.fdopen(fd,'w') as f:
-            for proc in ('sshd','sshd-session'):
-                f.write(f'{stamp} testhost {proc}[12345]: Failed password for invalid user audit_test from 192.0.2.123 port 54321 ssh2\n')
-        r,t,_=run(['fail2ban-regex',path,'/etc/fail2ban/filter.d/sshd.conf'],30)
-        passed=bool(re.search(r'2 lines,\s*0 ignored,\s*2 matched,\s*0 missed',t))
-        row('Фильтр sshd на диске:', '2/2 теста пройдены' if passed else 'тест не подтверждён; нужен fail2ban-regex вручную')
-    finally:
-        os.unlink(path)
-else:
-    row('Фильтр sshd на диске:', 'не проверен — отсутствует инструмент/фильтр')
-row('Выполнение блокировки:', 'не проверялось; firewall не изменялся')
-
-rc, sessions, _ = run(['loginctl','list-sessions','--no-legend','--no-pager'])
-ssh_sessions=[]
-if rc==0:
-    for line in sessions.splitlines():
-        if not line.split(): continue
-        sid=line.split()[0]
-        r,t,_=run(['loginctl','show-session',sid,'-p','Service','-p','Class','-p','Name','-p','State','-p','Leader'])
-        d=dict(l.split('=',1) for l in t.splitlines() if '=' in l)
-        if r==0 and d.get('Service') in ('sshd','ssh'):
-            ssh_sessions.append(f"{sid}:{d.get('Name','?')} ({d.get('State','?')})")
-row('SSH-сессии logind:', ', '.join(ssh_sessions) if ssh_sessions else ('нет' if rc==0 else 'недоступно'))
-rc,procs,_=run(['ps','-eo','pid,ppid,comm'])
-count=sum(1 for l in procs.splitlines() if l.split() and l.split()[-1]=='sshd-session') if rc==0 else None
-row('Процессы sshd-session:', str(count)+' (не число подключений)' if count is not None else 'недоступно')
-r,history,_=run(['wtmpdb','last','-n','30'])
-if r==0:
-    unclosed=sum('still logged in' in l for l in history.splitlines())
-    row('История wtmpdb:', f'незакрытых записей в последних 30: {unclosed}')
-    if any('syslogin_perform_logout' in str(e.get('MESSAGE','')) for e in ssh_events):
-        row('Учёт выхода:', 'в журнале есть ошибки logout(); история требует сопоставления')
-    row('Важно:', 'still logged in не доказывает живое подключение; используются logind и процессы')
-else:
-    row('История wtmpdb:', 'недоступна / не установлена')
-BOBAREV_SSH_AUDIT
+    echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
+    local ssh_port=unknown sshd_cmd ssh_eff='' ssh_root='' ssh_pass='' ssh_key=''
+    sshd_cmd=$(get_sshd_cmd)
+    if [ -n "$sshd_cmd" ]; then
+        ssh_eff=$("$sshd_cmd" -T 2>/dev/null || true)
     fi
-    # Preserve variable used by later UFW audit; do not assume port 22 on failure.
-    local ssh_port
-    ssh_port=$(get_sshd_cmd | xargs -r -I{} sh -c '"$1" -T 2>/dev/null' sh '{}' | awk '$1=="port" {print $2; exit}' || true)
+    ssh_port=$(printf '%s\n' "$ssh_eff" | awk '$1=="port"{print $2;exit}')
     ssh_port=${ssh_port:-unknown}
+    ssh_root=$(printf '%s\n' "$ssh_eff" | awk '$1=="permitrootlogin"{print $2;exit}')
+    ssh_pass=$(printf '%s\n' "$ssh_eff" | awk '$1=="passwordauthentication"{print $2;exit}')
+    ssh_key=$(printf '%s\n' "$ssh_eff" | awk '$1=="pubkeyauthentication"{print $2;exit}')
+    local root_text pass_text key_text port_text protection_text
+    port_text="${C_BLUE}${ssh_port}${C_RESET}"
+    [ "$ssh_port" != unknown ] && port_text="${C_BLUE}${ssh_port} (по конфигурации)${C_RESET}"
+    case "$ssh_root" in
+        yes) root_text="${C_YELLOW}Разрешён настройками SSH${C_RESET}" ;;
+        no) root_text="${C_GREEN}Запрещён настройками SSH${C_RESET}" ;;
+        prohibit-password|without-password) root_text="${C_BLUE}Без парольного входа${C_RESET}" ;;
+        forced-commands-only) root_text="${C_BLUE}Только принудительные команды${C_RESET}" ;;
+        *) root_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
+    local root_pw_state
+    root_pw_state=$(passwd -S root 2>/dev/null | awk '{print $2}' || true)
+    case "$root_pw_state" in L|LK) root_text="${root_text}; пароль root заблокирован" ;; esac
+    case "$ssh_pass" in
+        yes) pass_text="${C_YELLOW}Разрешена настройками SSH${C_RESET}" ;;
+        no) pass_text="${C_GREEN}Отключена${C_RESET}" ;;
+        *) pass_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
+    case "$ssh_key" in
+        yes) key_text="${C_GREEN}Разрешена${C_RESET}" ;;
+        no) key_text="${C_YELLOW}Отключена${C_RESET}" ;;
+        *) key_text="${C_YELLOW}Не удалось определить${C_RESET}" ;;
+    esac
+    local guards='' journal_ssh=''
+    systemctl is-active --quiet sshguard.service 2>/dev/null && guards=sshguard
+    if systemctl is-active --quiet fail2ban.service 2>/dev/null; then
+        guards="${guards:+$guards и }fail2ban"
+    fi
+    if [ -n "$guards" ]; then
+        journal_ssh=$(journalctl -b -n 1 -o cat --no-pager _COMM=sshd + _COMM=sshd-session 2>/dev/null || true)
+        if [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then
+            protection_text="${C_BLUE}${guards} запущены; журнал SSH доступен${C_RESET}"
+        else
+            protection_text="${C_YELLOW}${guards} запущены; журнал SSH не подтверждён${C_RESET}"
+        fi
+    else
+        protection_text="${C_YELLOW}Активные службы не обнаружены${C_RESET}"
+    fi
+    audit_compact_ssh_row() {
+        local label="$1" value="$2" pad
+        pad=$((28 - ${#label})); [ "$pad" -gt 0 ] || pad=1
+        printf '   %s%*s%b\n' "$label" "$pad" '' "$value"
+    }
+    audit_compact_ssh_row 'Используемый порт SSH:' "$port_text"
+    audit_compact_ssh_row 'Вход для root по SSH:' "$root_text"
+    audit_compact_ssh_row 'Авторизация по паролю:' "$pass_text"
+    audit_compact_ssh_row 'Авторизация по ключу:' "$key_text"
+    audit_compact_ssh_row 'Защита от перебора:' "$protection_text"
+    unset -f audit_compact_ssh_row
 
     echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
     check_param() {
@@ -6768,7 +6702,12 @@ BOBAREV_SSH_AUDIT
                     cascade_status="${C_BLUE}NaiveProxy запущен в автономной конфигурации; фактический внешний IP не проверен${C_RESET}"
                 fi
                 ;;
-            *) cascade_status="${C_BLUE}NaiveProxy запущен; направление выхода по этой проверке не определено${C_RESET}" ;;
+            standalone_naive)
+                case "$audit_out_mode" in
+                    direct) cascade_status="${C_BLUE}NaiveProxy — прямой выход по настройкам${C_RESET}" ;;
+                    *) cascade_status="${C_BLUE}NaiveProxy — выход ${audit_out_mode:-не определён} по настройкам${C_RESET}" ;;
+                esac ;;
+            *) cascade_status="${C_BLUE}NaiveProxy запущен; выход не определён${C_RESET}" ;;
         esac
     elif is_wg_cascade_active && is_warp_active; then
         cascade_status="${C_GREEN} Сервер 2 (Прямой скоростной выход: WG-Мост -> WARP активен)${C_RESET}"
@@ -6894,15 +6833,17 @@ BOBAREV_SSH_AUDIT
     if command -v iptables &>/dev/null && iptables -t mangle -L FORWARD -n 2>/dev/null | grep -q "TCPMSS"; then mss_active=true; fi
     
     if [ "$mss_active" = true ]; then
-        echo -e "   Выравнивание пакетов (MSS): ${C_GREEN} Включено (сайты открываются без зависаний в VPN)${C_RESET}"
+        echo -e "   Выравнивание пакетов (MSS): ${C_GREEN} Правила настроены${C_RESET}"
     else
-        echo -e "   Выравнивание пакетов (MSS): ${C_YELLOW}  Выключено (возможны зависания сайтов в VPN)${C_RESET}"
+        echo -e "   Выравнивание пакетов (MSS): ${C_YELLOW}  Правила не обнаружены${C_RESET}"
     fi
 
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
-        local ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null || echo "")
+        local ufw_ports_list
+        ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '$2=="ALLOW" && $3=="IN" {print $1}' | sort -u | paste -sd ', ' - || true)
+        [ -z "$ufw_ports_list" ] && ufw_ports_list=$(LC_ALL=C ufw status 2>/dev/null | awk '$2=="ALLOW" {print $1}' | sort -u | paste -sd ',' - || true)
         [ -z "$ufw_ports_list" ] && ufw_ports_list="Все входящие порты закрыты"
-        echo -e "   Открытые порты (по UFW):    ${C_BLUE}активны${C_RESET}"
+        echo -e "   Открытые порты (по UFW):    ${C_BLUE}${ufw_ports_list}${C_RESET}"
     elif command -v ss &>/dev/null; then
         local listen_ports=$(ss -tlnH 2>/dev/null | awk '$4 !~ /^127\./ && $4 !~ /^\[::1\]/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
         [ -n "$listen_ports" ] && echo -e "   Открытые порты (без UFW):   ${C_YELLOW}$listen_ports${C_RESET}"
@@ -10878,7 +10819,7 @@ if [ "${1:-}" != "" ]; then
             exit 0
             ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.3-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v3.18.4-rc1 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
             echo "Использование: $0 [опция]"
             echo "  (без опций)   Запуск интерактивного меню"
             echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
@@ -11195,7 +11136,7 @@ case "${1:-}" in
 esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.3-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.4-rc1" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

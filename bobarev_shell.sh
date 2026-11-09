@@ -1992,45 +1992,37 @@ manage_cascade_naive_ts_warp() {
 # МОДУЛЬ 20: ПРЯМОЙ СКОРОСТНОЙ КАСКАД (NAIVEPROXY -> WG + UDP2RAW -> WARP)
 # ==============================================================================
 check_required_ports_free() {
-    # Проверяет, не заняты ли целевые порты СТОРОННИМИ процессами (игнорируя наши собственные caddy, udp2raw и ядерный интерфейс wg-cascade)
-    local role="$1" # ru | foreign
-    shift
-    local ports=("$@")
-    local conflict_found=false
-
-    # Определяем текущий порт нашего собственного интерфейса wg-cascade (если он уже запущен в ядре),
-    # так как ядерный модуль WireGuard в ss -tulpn не имеет поля users:(...)
-    local own_wg_port=""
-    if ip link show wg-cascade >/dev/null 2>&1; then
-        own_wg_port=$(wg show wg-cascade listen-port 2>/dev/null | tr -d '[:space:]' || echo "")
+ local role="${1:-}" spec port proto family addr output failed=0
+ shift || return 2
+ command -v ss >/dev/null && [[ $EUID -eq 0 ]] || { echo 'Проверка портов не выполнена: нужны root и ss.' >&2; return 2; }
+ for spec in "$@"; do
+  # Legacy integer requests conservatively check both protocols and families.
+  port="$spec"
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || { echo "Некорректный порт: $spec" >&2; return 2; }
+  for proto in t u; do
+   for family in 4 6; do
+    if ! output=$(ss -"$family" -"$proto" -lnpH "sport = :$port" 2>&1); then
+     printf 'Проверка не выполнена: %s\n' "$output" >&2; return 2
     fi
-
-    for p in "${ports[@]}"; do
-        [ -z "$p" ] && continue
-        # Если этот порт занят нашим же ядерным интерфейсом wg-cascade — пропускаем (он будет штатно перезапущен)
-        if [ -n "$own_wg_port" ] && [ "$p" = "$own_wg_port" ]; then
-            continue
-        fi
-        local line=""
-        line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|udp2raw|hysteria|xray|derper)"' | head -n 1 || echo "")
-        if [ -n "$line" ]; then
-            # Если на порту 51889 или порту из /etc/wireguard/wg-cascade.conf висит ядерный сокет без users:(...), это наш wg-cascade
-            if ! echo "$line" | grep -q "users:(" && { [ "$p" = "51889" ] || grep -qE "^ListenPort[[:space:]]*=[[:space:]]*${p}\b" /etc/wireguard/wg-cascade.conf 2>/dev/null; }; then
-                continue
-            fi
-            local proto=$(echo "$line" | awk '{print $1}')
-            local proc_info=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "ядерный модуль / неизвестный процесс")
-            local pid_info=$(echo "$line" | grep -oP 'pid=\K[0-9]+' || echo "-")
-            echo -e "${C_RED} Внимание: Порт ${p}/${proto} уже занят сторонним процессом '${proc_info}' (PID: ${pid_info})!${C_RESET}"
-            conflict_found=true
-        fi
-    done
-
-    if [ "$conflict_found" = true ]; then
-        echo -e "${C_YELLOW} Пожалуйста, освободите указанные порты (остановите/удалите конфликтующий процесс) и запустите настройку заново.${C_RESET}"
-        return 1
+    if [[ -n "$output" ]]; then
+     printf 'Занятые привязки: порт %s, протокол %s, IPv%s\n%s\n' "$port" "$proto" "$family" "$output" >&2
+     failed=1
     fi
-    return 0
+   done
+  done
+ done
+ ((failed == 0)) || { echo 'Конфликт: автоматическое освобождение и исключения по имени запрещены.' >&2; return 1; }
+ echo 'На момент проверки занятых привязок не обнаружено; это не гарантия последующего запуска.'
+}
+
+
+bobarev_verify_download() {
+ local file="$1" expected="$2" actual
+ [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Нет доверенной ожидаемой SHA256: установка запрещена.' >&2; return 1; }
+ actual=$(sha256sum -- "$file") || return 1
+ actual=${actual%% *}
+ [[ "${actual,,}" == "${expected,,}" ]] || { echo 'SHA256 не совпадает: установка запрещена.' >&2; return 1; }
+ echo 'SHA256 скачанного артефакта подтверждена.'
 }
 
 ensure_udp2raw_installed() {
@@ -2042,7 +2034,10 @@ ensure_udp2raw_installed() {
     apt-get update -qq
     apt-get install -yq curl wget tar iptables
 
-    local tmp_u2r=$(mktemp -d /root/.udp2raw-XXXXXX)
+    local u2r_sha="${BOBAREV_UDP2RAW_SHA256:-}"
+    [[ "$u2r_sha" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Задайте доверенную BOBAREV_UDP2RAW_SHA256 для архива 20230206.0.' >&2; return 1; }
+    local tmp_u2r
+    tmp_u2r=$(mktemp -d /root/.udp2raw-XXXXXX) || return 1
     local u2r_url="https://github.com/wangyu-/udp2raw/releases/download/20230206.0/udp2raw_binaries.tar.gz"
 
     if ! wget -q --tries=3 --timeout=30 "$u2r_url" -O "${tmp_u2r}/udp2raw.tar.gz"; then
@@ -2051,13 +2046,9 @@ ensure_udp2raw_installed() {
         return 1
     fi
 
-    # Хеш для версии 20230206.0 (рекомендуется уточнить актуальный SHA256)
-    local u2r_sha="PLACEHOLDER_SHA256_FOR_UDP2RAW_BINARIES_TAR_GZ"
-    if [ "$u2r_sha" != "PLACEHOLDER_SHA256_FOR_UDP2RAW_BINARIES_TAR_GZ" ]; then
-        if ! verify_sha256 "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
-            rm -rf "$tmp_u2r"
-            return 1
-        fi
+    if ! bobarev_verify_download "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
+        rm -rf "$tmp_u2r"
+        return 1
     fi
 
     if ! tar -xzf "${tmp_u2r}/udp2raw.tar.gz" -C "$tmp_u2r" 2>/dev/null; then
@@ -2076,7 +2067,9 @@ ensure_udp2raw_installed() {
     fi
 
     if [ -f "${tmp_u2r}/${bin_name}" ]; then
-        install -m 755 "${tmp_u2r}/${bin_name}" "$UDP2RAW_BIN"
+        if ! install -m 755 "${tmp_u2r}/${bin_name}" "$UDP2RAW_BIN"; then
+            rm -rf "$tmp_u2r"; return 1
+        fi
     else
         rm -rf "$tmp_u2r"
         echo -e "${C_RED} Не найден подходящий бинарник udp2raw (${bin_name}) для архитектуры ${arch}!${C_RESET}"
@@ -2088,24 +2081,24 @@ ensure_udp2raw_installed() {
 }
 
 ensure_hysteria_installed() {
-    if [ -x "/usr/local/bin/hysteria" ]; then
-        return 0
-    fi
-    echo -e "${C_BLUE} Скачивание и установка Hysteria 2...${C_RESET}"
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    local h_arch="amd64"
-    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
-        h_arch="arm64"
-    fi
-
-    local h_url="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${h_arch}"
-    if ! curl -fsSL "$h_url" -o /usr/local/bin/hysteria; then
-        echo -e "${C_RED} Ошибка скачивания Hysteria!${C_RESET}"
-        return 1
-    fi
-    chmod +x /usr/local/bin/hysteria
-    echo -e "${C_GREEN} Hysteria 2 успешно установлена.${C_RESET}"
-    return 0
+ if [[ -x /usr/local/bin/hysteria ]]; then
+  echo 'Hysteria уже существует; эта операция не подтверждает происхождение существующего файла.'
+  return 0
+ fi
+ local arch h_arch=amd64 tmp expected="${BOBAREV_HYSTERIA_SHA256:-}"
+ [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Задайте доверенную BOBAREV_HYSTERIA_SHA256 для скачиваемого бинарника и архитектуры.' >&2; return 1; }
+ arch=$(dpkg --print-architecture 2>/dev/null) || return 1
+ if [[ "$arch" == arm64 || "$arch" == aarch64 ]]; then h_arch=arm64; fi
+ tmp=$(mktemp -d /usr/local/bin/.bobarev-hysteria.XXXXXX) || return 1
+ if ! curl -fsSL "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${h_arch}" -o "$tmp/hysteria" ||
+    ! bobarev_verify_download "$tmp/hysteria" "$expected"; then
+  rm -rf "$tmp"; return 1
+ fi
+ if ! chmod 755 "$tmp/hysteria" || ! mv -T -- "$tmp/hysteria" /usr/local/bin/hysteria; then
+  rm -rf "$tmp"; return 1
+ fi
+ rm -rf "$tmp"
+ echo 'Hysteria установлена после проверки SHA256; работоспособность службы проверяется отдельно.'
 }
 
 clean_udp2raw_iptables() {
@@ -9262,78 +9255,60 @@ manage_naive_mullvad_menu() {
 }
 
 mod_network_reset() {
- local selected='' item='' unit='' ts_exit='' ts_adv=''
- local -a items=()
- echo 'Сканирование сетевых настроек...'
- echo '--- Интерфейсы ---'
- ip -br address || true
- echo '--- IPv4 policy routing ---'
- ip -4 rule || true
- echo '--- NAT / MASQUERADE ---'
- iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
- echo '--- Активные сетевые службы ---'
- for unit in bobarev-router-v2 bobarev-router-dhcp bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
-  [[ -f "/etc/systemd/system/$unit.service" ]] || continue
-  printf '%-32s %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
+ local selected item action unit path expected actual choice
+ local registry=/etc/bobarev-shell/owned-units.sha256
+ local -a items=() units=() actions=()
+ echo 'Адресное отключение компонентов. Доступ SSH может прерваться из-за изменения сети.'
+ echo 'Полный сброс, удаление конфигураций и запуск альтернативного DHCP не выполняются.'
+ # Only explicitly registered exact unit contents are eligible. Never infer ownership from names.
+ for unit in bobarev-router-dhcp bobarev-router-v2 bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh bobarev-tailscale-exit-restore; do
+  path="/etc/systemd/system/$unit.service"
+  [[ -f "$path" && ! -L "$path" && -f "$registry" && ! -L "$registry" ]] || continue
+  [[ $(stat -c '%u' "$registry") == 0 ]] || continue
+  [[ $(stat -c '%a' "$registry") == 600 ]] || continue
+  expected=$(awk -v p="$path" '$2==p {print $1}' "$registry")
+  actual=$(sha256sum "$path") || return 1
+  [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$expected" == "${actual%% *}" ]] || continue
+  # Drop-ins change effective behavior and require a separate ownership review.
+  [[ -z $(systemctl show "$unit.service" -p DropInPaths --value) ]] || continue
+  items+=("$unit" 'Подтверждённый экземпляр; остановка или автозапуск отдельно' OFF)
  done
  if command -v tailscale >/dev/null; then
-  ts_exit="$(tailscale get exit-node 2>/dev/null || echo '')"
-  ts_adv="$(tailscale get advertise-exit-node 2>/dev/null || echo false)"
-  echo "--- Tailscale exit node: ${ts_exit:-не выбран} ---"
-  echo "--- Анонсирование exit node: $ts_adv ---"
+  items+=(TS_EXIT 'Убрать exit node; восстановление не отключается автоматически' OFF TS_ADV 'Прекратить анонс exit node' OFF)
  fi
- echo ''
- echo 'Базовая ОС, SSH, пользователи, ключи и авторизация VPN сохраняются.'
- echo 'Это не заводской сброс. Неизвестные старые правила показываются, но автоматически не удаляются.'
- echo ''
- if [[ -f /etc/systemd/system/bobarev-router-v2.service ]]; then
-  items+=('LAN_ROUTER' 'Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
- fi
- if command -v tailscale >/dev/null; then
-  if [[ -n "$ts_exit" && "$ts_exit" != "none" && "$ts_exit" != "false" ]]; then
-   items+=('TS_EXIT' 'Отключить выбранный Tailscale exit node' OFF)
-  fi
-  if [[ "$ts_adv" == "true" ]]; then
-   items+=('TS_ADV' 'Отключить анонсирование сервера как exit node' OFF)
-  fi
- fi
- for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
-  [[ -f "/etc/systemd/system/$unit.service" ]] || continue
-  local state
-  state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
-  items+=("$unit" "Остановить службу [$state]" OFF)
- done
- ((${#items[@]})) || { echo 'Нет распознанных компонентов для безопасного отключения.'; return 0; }
- selected=$(whiptail --title 'Сброс сетевых настроек' --checklist \
-  'Пробел — выбрать. Отключаются только выбранные маршрутизация, NAT/MASQUERADE и службы. Конфиги, пакеты, SSH и авторизация VPN сохраняются.' \
-  24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
+ ((${#items[@]})) || { echo 'Нет подтверждённых экземпляров. Автоматическое присвоение принадлежности запрещено.'; return 0; }
+ selected=$(whiptail --title 'Адресное отключение' --checklist 'Выберите компоненты. Все действия подтверждаются общим планом.' 24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
  [[ -n "$selected" ]] || return 0
- echo 'Будут отключены:'
- for item in $selected; do echo "  ${item//\"/}"; done
- nm_yes 'Подтвердить выбранный сброс?' || return 0
- br_snapshot || return 1
  for item in $selected; do
   item=${item//\"/}
   case "$item" in
-   LAN_ROUTER)
-    systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || true
-    if [[ -f /etc/bobarev-router-dnsmasq-was-active ]]; then
-     systemctl start dnsmasq.service || true
-     rm -f /etc/bobarev-router-dnsmasq-was-active
-    fi
-    echo 'LAN-маршрутизатор, DHCP и его NAT/MASQUERADE отключены.' ;;
-   TS_EXIT)
-    tailscale set --exit-node="" || true
-    echo 'Tailscale exit node отключён.' ;;
-   TS_ADV)
-    tailscale set --advertise-exit-node=false || true
-    echo 'Анонсирование exit node отключено.' ;;
+   TS_EXIT|TS_ADV) units+=("$item"); actions+=(role);;
    *)
-    systemctl disable --now "$item.service" || true
-    echo "Служба $item остановлена и отключена." ;;
+    choice=$(whiptail --menu "$item: выберите одно действие" 15 "$WT_WIDTH" 3 stop 'Только остановить' disable 'Только отключить автозапуск' 3>&1 1>&2 2>&3) || return 0
+    units+=("$item"); actions+=("$choice")
+    systemctl cat "$item.service" || return 1
+    systemctl list-dependencies --reverse "$item.service" --no-pager || return 1
+    ;;
   esac
  done
- echo 'Сброс завершён. Конфигурации сохранены для повторного включения.'
+ echo 'План (ExecStop и зависимости показаны выше; снимок не гарантирует откат):'
+ for item in "${!units[@]}"; do printf '%s: %s\n' "${units[$item]}" "${actions[$item]}"; done
+ echo 'При TS_EXIT сохранённый механизм восстановления может повторно выбрать exit node. Отключите его автозапуск отдельным выбранным действием.'
+ nm_yes 'Выполнить именно этот план с риском потери сетевого доступа?' || return 0
+ br_snapshot || return 1
+ for item in "${!units[@]}"; do
+  unit=${units[$item]}; action=${actions[$item]}
+  case "$unit" in
+   TS_EXIT) if ! tailscale set --exit-node=""; then echo 'Частичный результат: ошибка exit node.' >&2; return 1; fi;;
+   TS_ADV) if ! tailscale set --advertise-exit-node=false; then echo 'Частичный результат: ошибка анонса.' >&2; return 1; fi;;
+   *)
+    if ! systemctl "$action" "$unit.service"; then echo "Частичный результат: ошибка $unit/$action" >&2; return 1; fi
+    if [[ "$action" == stop ]] && systemctl is-active --quiet "$unit.service"; then echo "Служба остаётся активной: $unit" >&2; return 1; fi
+    if [[ "$action" == disable ]] && systemctl is-enabled --quiet "$unit.service"; then echo "Автозапуск остаётся включён: $unit" >&2; return 1; fi;;
+  esac
+  printf 'Выполнено: %s / %s\n' "$unit" "$action"
+ done
+ echo 'Выбранные действия выполнены. Автоматический откат и восстановление исходной сети не заявляются.'
 }
 
 

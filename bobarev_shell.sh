@@ -3737,7 +3737,7 @@ render_xray_client_config() {
     local wan_dev=$(get_wan_if)
     local frag_iface_line=""
     if [ -n "$wan_dev" ] && [ -d "/sys/class/net/$wan_dev" ]; then
-        frag_iface_line=""interface": "${wan_dev}","
+        frag_iface_line="\"interface\": \"${wan_dev}\","
     fi
 
     mkdir -p /etc/xray

@@ -3,8 +3,23 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.21 (Universal Simplified Menu Edition)
+# Версия: 3.18.22 (Universal Simplified Menu Edition)
 # ------------------------------------------------------------------------------
+# Изменения 3.18.22:
+#   * Защита от перебора паролей SSH вынесена в отдельный наглядный пункт меню
+#     «7. Защита от перебора паролей SSH (SSHGuard / Fail2Ban)» в разделе 1
+#     (поддержка быстрой установки SSHGuard или Fail2Ban с systemd-backend,
+#     просмотра журнала атак и заблокированных IP), а также предлагается в п. 6
+#     независимо от выбранного режима Tailscale.
+#   * Переработан раздел 10 аудита («Профиль Bobarev Shell — что настроено скриптом»):
+#     две строки роутера объединены в единый понятный статус «Роутер SBC (раздача в LAN)»,
+#     добавлены индикаторы «Защита SSH от перебора» и «Cloudflare MASQUE (Usque)»,
+#     обновлена ссылка на разделы главного меню (разделы 1–5).
+#   * Добавлен новый режим «2. Автономный NaiveProxy (Один сервер + Cloudflare MASQUE)»
+#     в разделе 2 (на базе клиента Diniboy1123/usque по протоколу HTTP/3 QUIC MASQUE):
+#     маскировка входящего трафика под Chrome (защита от DPI) + выход в интернет
+#     через CDN Cloudflare (чистая репутация IP без капч, блокировок ChatGPT/OpenAI
+#     и ограничений стриминговых сервисов).
 # Изменения 3.18.21:
 #   * Исправлена ошибка синтаксиса awk в модуле аудита (раздел 8, открытые порты),
 #     приводившая к обрыву аудита ("awk: line 2: missing } near end of file")
@@ -31,7 +46,7 @@ set -euo pipefail
 #   * Аудит: итоговая сводка — список пунктов, отмеченных жёлтым/красным.
 # ==============================================================================
 
-SCRIPT_VERSION="3.18.21"
+SCRIPT_VERSION="3.18.22"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -674,6 +689,7 @@ ${auth_lines}        }
             hide_ip
             hide_via
 $( [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ] && echo "            upstream socks5://127.0.0.1:1080" )
+$( [ "${CASCADE_ROLE:-}" = "standalone_naive" ] && [ "${NAIVE_OUT_MODE:-}" = "masque" ] && echo "            upstream socks5://127.0.0.1:1080" )
 $( [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && echo "            upstream socks5://127.0.0.1:10808" )
 $( if [ -f /etc/naiveproxy/mesh-upstream.port ] && [ "${CASCADE_ROLE:-}" = standalone_naive ]; then read -r nm_port < /etc/naiveproxy/mesh-upstream.port; if [[ "$nm_port" =~ ^[0-9]{4,5}$ ]] && ((10#$nm_port >= 1024 && 10#$nm_port <= 65535)); then echo "            upstream socks5://127.0.0.1:$nm_port"; else echo "            upstream socks5://127.0.0.1:1"; fi; fi )
         }
@@ -1362,6 +1378,8 @@ setup_standalone_naive() {
                 local out_human="Прямой выход"
                 if [ "$cur_out" = "wg0" ] || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
                     out_human="Гибридный шлюз (wg0 + Tailscale Exit Node)"
+                elif [ "$cur_out" = "masque" ] || systemctl is-active --quiet usque.service 2>/dev/null; then
+                    out_human="Cloudflare MASQUE (Usque 127.0.0.1:1080)"
                 fi
                 c_state="Активен (Домен: ${NAIVE_DOMAIN:-N/A} | ${out_human})"
             fi
@@ -1515,12 +1533,480 @@ setup_standalone_naive() {
             6)
                 if prompt_yn "Остановить и удалить службы NaiveProxy (Caddy) и туннель wg0 на этом сервере?" "false"; then
                     disable_hybrid_wg_routing
+                    silent_run systemctl stop usque.service
+                    silent_run systemctl disable usque.service
                     silent_run systemctl stop caddy.service
                     silent_run systemctl disable caddy.service
                     rm -f /etc/caddy/Caddyfile /etc/default/bobarev-cascade
                     rm -rf "$NAIVE_DIR" "$WEBROOT" "$LOG_DIR"
                     silent_run systemctl daemon-reload
                     echo -e "${C_GREEN} Служба NaiveProxy полностью остановлена и удалена.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# АВТОНОМНЫЙ NAIVEPROXY + CLOUDFLARE MASQUE (USQUE)
+# ==============================================================================
+is_usque_active() {
+    systemctl is-active --quiet usque.service 2>/dev/null
+}
+
+install_and_setup_usque() {
+    local proxy_mode="${1:-l4-socks}"
+    local force_re_reg="${2:-false}"
+
+    echo -e "${C_BLUE} Проверка системных зависимостей (curl, jq, unzip, qrencode)...${C_RESET}"
+    export DEBIAN_FRONTEND=noninteractive
+    if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1 || ! command -v qrencode >/dev/null 2>&1; then
+        silent_run apt-get update
+        silent_run apt-get install -yq curl jq unzip qrencode
+    fi
+
+    local arch usque_search
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64) usque_search="linux_amd64" ;;
+        aarch64|arm64) usque_search="linux_arm64" ;;
+        *)
+            echo -e "${C_RED} Архитектура $arch не поддерживается бинарными сборками Usque.${C_RESET}"
+            return 1
+            ;;
+    esac
+
+    if [ ! -x /usr/local/bin/usque ] || [ "$force_re_reg" = "update_bin" ]; then
+        echo -e "${C_BLUE} Поиск актуального релиза Usque ($usque_search) на GitHub...${C_RESET}"
+        local usque_url=""
+        usque_url=$(curl -fsSL --max-time 15 https://api.github.com/repos/Diniboy1123/usque/releases/latest 2>/dev/null             | jq -r --arg a "$usque_search" '.assets[] | select(.name | contains($a) and endswith(".zip")) | .browser_download_url' 2>/dev/null | head -n 1 || true)
+
+        if [ -z "$usque_url" ] || [ "$usque_url" = "null" ]; then
+            echo -e "${C_RED} Не удалось получить ссылку на релиз Usque с GitHub API.${C_RESET}"
+            return 1
+        fi
+
+        echo -e "${C_BLUE} Загрузка и распаковка Usque...${C_RESET}"
+        if ! curl -fsSL --max-time 60 -o /tmp/usque.zip "$usque_url"; then
+            echo -e "${C_RED} Ошибка скачивания архива Usque.${C_RESET}"
+            rm -f /tmp/usque.zip
+            return 1
+        fi
+        unzip -o -q /tmp/usque.zip usque -d /usr/local/bin/
+        chmod +x /usr/local/bin/usque
+        rm -f /tmp/usque.zip
+        echo -e "${C_GREEN} Клиент Usque установлен: $(/usr/local/bin/usque version 2>/dev/null || echo '/usr/local/bin/usque')${C_RESET}"
+    fi
+
+    mkdir -p /etc/usque
+    chmod 700 /etc/usque
+
+    if [ "$force_re_reg" = "true" ]; then
+        silent_run systemctl stop usque.service
+        rm -f /etc/usque/config.json
+    fi
+
+    if [ ! -s /etc/usque/config.json ]; then
+        echo -e "${C_CYAN} Регистрация нового устройства в Cloudflare WARP (MASQUE)...${C_RESET}"
+        echo -e "${C_BLUE} При запросе подтверждения условий Cloudflare (ToS) введите 'y' или нажмите Enter.${C_RESET}"
+        (
+            cd /etc/usque || exit 1
+            if /usr/local/bin/usque register --help 2>&1 | grep -q -- "--accept-tos"; then
+                /usr/local/bin/usque register --accept-tos -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
+            else
+                printf 'y
+
+' | /usr/local/bin/usque register -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
+            fi
+        )
+        if [ ! -s /etc/usque/config.json ]; then
+            echo -e "${C_RED} Ошибка: файл /etc/usque/config.json не был создан при регистрации.${C_RESET}"
+            return 1
+        fi
+        chmod 600 /etc/usque/config.json
+        echo -e "${C_GREEN} Учетная запись Cloudflare MASQUE успешно зарегистрирована!${C_RESET}"
+    fi
+
+    [ "$proxy_mode" != "socks" ] && proxy_mode="l4-socks"
+
+    echo -e "${C_BLUE} Настройка системной службы usque.service (режим: ${proxy_mode}, 127.0.0.1:1080)...${C_RESET}"
+    cat << USQUE_SVC_EOF > /etc/systemd/system/usque.service
+[Unit]
+Description=Usque MASQUE Cloudflare WARP SOCKS5 Proxy (${proxy_mode} on 127.0.0.1:1080)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/usque
+Environment="GOMEMLIMIT=256MiB"
+ExecStart=/usr/local/bin/usque ${proxy_mode} -b 127.0.0.1 -p 1080 -c /etc/usque/config.json
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+USQUE_SVC_EOF
+
+    systemctl daemon-reload
+    systemctl enable --now usque.service
+    systemctl restart usque.service
+
+    echo -e "${C_BLUE} Ожидание инициализации QUIC/MASQUE-туннеля на 127.0.0.1:1080...${C_RESET}"
+    local wait_i=0
+    while [ "$wait_i" -lt 8 ]; do
+        if ss -Hltn 2>/dev/null | awk '$4 ~ /:1080$/ {found=1} END{exit !found}'; then
+            break
+        fi
+        sleep 1
+        wait_i=$((wait_i + 1))
+    done
+
+    if ! systemctl is-active --quiet usque.service; then
+        echo -e "${C_RED} Служба usque.service не запустилась! Проверьте: journalctl -u usque -n 30${C_RESET}"
+        return 1
+    fi
+
+    return 0
+}
+
+verify_usque_masque_ip() {
+    echo -e "${C_BLUE} Проверка выходного IP и трассировки Cloudflare через локальный порт Usque (127.0.0.1:1080)...${C_RESET}"
+    local cf_trace="" cf_ip="" cf_warp="" cf_loc=""
+    cf_trace=$(curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+    if [ -n "$cf_trace" ]; then
+        cf_ip=$(printf '%s
+' "$cf_trace" | awk -F= '$1=="ip"{print $2;exit}')
+        cf_warp=$(printf '%s
+' "$cf_trace" | awk -F= '$1=="warp"{print $2;exit}')
+        cf_loc=$(printf '%s
+' "$cf_trace" | awk -F= '$1=="loc"{print $2;exit}')
+    fi
+    if [ -z "$cf_ip" ]; then
+        cf_ip=$(curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)
+    fi
+
+    local wan_dev pub_ip
+    wan_dev=$(get_wan_if)
+    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
+
+    echo -e "   Прямой IP вашего VPS:        ${C_BLUE}${pub_ip:-не определен}${C_RESET}"
+    if [ -n "$cf_ip" ]; then
+        echo -e "   Выходной IP через MASQUE:    ${C_GREEN}${cf_ip}${C_RESET} ${cf_loc:+(Локация CDN: $cf_loc)}${cf_warp:+ | WARP: $cf_warp}"
+        if [ "$cf_warp" = "on" ] || [ "$cf_warp" = "plus" ] || [ "$cf_ip" != "$pub_ip" ]; then
+            echo -e "${C_GREEN} ✔ Трафик успешно выходит через сеть Cloudflare MASQUE!${C_RESET}"
+        fi
+    else
+        echo -e "   Выходной IP через MASQUE:    ${C_YELLOW}Не удалось получить ответ (возможно, туннель еще устанавливает соединение)${C_RESET}"
+    fi
+}
+
+enable_masque_for_existing_naive() {
+    local proxy_mode="${1:-l4-socks}"
+    local force_re_reg="${2:-false}"
+
+    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+        echo -e "${C_BLUE} Отключение маршрутизации wg0 для перехода на выход через Cloudflare MASQUE...${C_RESET}"
+        disable_hybrid_wg_routing
+    fi
+
+    if ! install_and_setup_usque "$proxy_mode" "$force_re_reg"; then
+        return 1
+    fi
+
+    if [ -f /etc/default/bobarev-cascade ]; then
+        if grep -q "^NAIVE_OUT_MODE=" /etc/default/bobarev-cascade; then
+            sed -i 's/^NAIVE_OUT_MODE=.*/NAIVE_OUT_MODE="masque"/' /etc/default/bobarev-cascade
+        else
+            echo 'NAIVE_OUT_MODE="masque"' >> /etc/default/bobarev-cascade
+        fi
+        if grep -q "^USQUE_MODE=" /etc/default/bobarev-cascade; then
+            sed -i "s/^USQUE_MODE=.*/USQUE_MODE="${proxy_mode}"/" /etc/default/bobarev-cascade
+        else
+            echo "USQUE_MODE="${proxy_mode}"" >> /etc/default/bobarev-cascade
+        fi
+    fi
+
+    if [ -f "$CADDYFILE" ]; then
+        if ! render_naive_caddyfile; then
+            echo -e "${C_RED} Ошибка обновления Caddyfile для MASQUE.${C_RESET}"
+            return 1
+        fi
+        systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service 2>/dev/null || true
+    fi
+
+    echo -e "${C_GREEN} Выход NaiveProxy переключен на Cloudflare MASQUE (127.0.0.1:1080 -> CDN Cloudflare).${C_RESET}"
+    verify_usque_masque_ip
+    return 0
+}
+
+disable_usque_masque_routing() {
+    echo -e "${C_BLUE} Отключение Cloudflare MASQUE (Usque) и перевод NaiveProxy на прямой выход с VPS...${C_RESET}"
+    silent_run systemctl stop usque.service
+    silent_run systemctl disable usque.service
+
+    if [ -f /etc/default/bobarev-cascade ]; then
+        sed -i 's/^NAIVE_OUT_MODE=.*/NAIVE_OUT_MODE="direct"/' /etc/default/bobarev-cascade
+    fi
+
+    if [ -f "$CADDYFILE" ]; then
+        render_naive_caddyfile || true
+        systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service 2>/dev/null || true
+    fi
+    echo -e "${C_GREEN} Служба Usque остановлена. NaiveProxy переведен на прямой выход с этого VPS.${C_RESET}"
+}
+
+setup_standalone_naive_masque() {
+    if nm_bound; then
+        echo "NaiveProxy сейчас связан с mesh-каскадом или приостановлен."
+        echo "Для автономной настройки сначала нужно переключить выход на этот сервер."
+        nm_direct || { pause_enter; return 0; }
+    fi
+    while true; do
+        MODULE_CANCELED=false
+        local is_configured=false
+        local c_state="Не настроен"
+        local cur_out="masque"
+        local cur_usque_mode="l4-socks"
+        local usque_srv_state="остановлен"
+
+        if is_usque_active; then
+            usque_srv_state="активен на 127.0.0.1:1080"
+        elif [ -f /etc/usque/config.json ]; then
+            usque_srv_state="зарегистрирован (остановлен)"
+        fi
+
+        if [ -f "$CADDYFILE" ] && [ -f /etc/default/bobarev-cascade ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            if [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
+                is_configured=true
+                cur_out="${NAIVE_OUT_MODE:-direct}"
+                cur_usque_mode="${USQUE_MODE:-l4-socks}"
+                local out_human="Прямой выход с VPS"
+                if [ "$cur_out" = "masque" ] && is_usque_active; then
+                    out_human="Cloudflare MASQUE (${cur_usque_mode} -> CDN Cloudflare)"
+                elif [ "$cur_out" = "masque" ]; then
+                    out_human="Cloudflare MASQUE (внимание: служба usque не активна!)"
+                elif [ "$cur_out" = "wg0" ] || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+                    out_human="WireGuard wg0 (Dual-Gateway)"
+                fi
+                c_state="Активен (Домен: ${NAIVE_DOMAIN:-N/A} | ${out_human})"
+            fi
+        fi
+
+        local u_cnt=0
+        [ -f "$NAIVE_PASS_FILE" ] && u_cnt=$(grep -c ":" "$NAIVE_PASS_FILE" 2>/dev/null || true); u_cnt="${u_cnt:-0}"
+
+        local sc_choice=""
+        if [ "$is_configured" = true ]; then
+            if ! smart_menu " Автономный NaiveProxy (+ Cloudflare MASQUE)" "
+Статус NaiveProxy: $c_state
+Клиент Usque (MASQUE): $usque_srv_state | Пользователей: $u_cnt
+
+Плюсы связки:
+  • Максимальная защита от DPI (маскировка под браузер Chrome к вашему сайту)
+  • Чистая репутация IP через CDN Cloudflare (без капч и блокировок ChatGPT)
+
+Выберите действие:" 22 "$WT_WIDTH" 8 "sc_choice"                 "1" " Показать ссылки и QR-коды для Shadowrocket"                 "2" " Управление пользователями NaiveProxy"                 "3" " Включить / Обновить выход через Cloudflare MASQUE (Usque)"                 "4" " Проверить выходной IP Cloudflare или перерегистрировать ключ WARP"                 "5" " Переключить режим Usque: l4-socks (быстрый TCP) / socks (TCP+UDP)"                 "6" " Переключить на прямой выход с VPS (временно отключить MASQUE)"                 "7" " Перенастроить домен и связку NaiveProxy + Cloudflare MASQUE"                 "8" " Остановить и удалить NaiveProxy + Cloudflare MASQUE"                 "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+                break
+            fi
+        else
+            if ! smart_menu " Автономный NaiveProxy (+ Cloudflare MASQUE)" "
+Статус: $c_state (Usque: $usque_srv_state)
+
+В чем главные плюсы этой связки:
+  1) Максимальная устойчивость к DPI: сегмент от вас до VPS маскируется
+     под реальный браузер Google Chrome (HTTP/2 и HTTP/3 TLS к вашему сайту).
+  2) Чистая репутация IP: сегмент от VPS в интернет выходит через CDN Cloudflare
+     по протоколу MASQUE (HTTP/3 QUIC), убирая капчи Cloudflare, ошибки
+     блокировок в OpenAI/ChatGPT и ограничения стриминговых сервисов.
+
+Выберите действие:" 20 "$WT_WIDTH" 3 "sc_choice"                 "1" " Настроить связку NaiveProxy + Cloudflare MASQUE «под ключ»"                 "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+                break
+            fi
+            [ "$sc_choice" = "1" ] && sc_choice="7"
+        fi
+
+        clear
+        case "$sc_choice" in
+            1)
+                print_naive_shadowrocket_links
+                pause_enter
+                ;;
+            2)
+                manage_naive_users_menu
+                ;;
+            3)
+                enable_masque_for_existing_naive "${cur_usque_mode:-l4-socks}" "false" || true
+                pause_enter
+                ;;
+            4)
+                echo -e "${C_CYAN} === ДИАГНОСТИКА И ПЕРЕРЕГИСТРАЦИЯ CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
+                verify_usque_masque_ip
+                echo ""
+                if prompt_yn "Перерегистрировать новое устройство в Cloudflare WARP (создать свежий /etc/usque/config.json)?" "false"; then
+                    enable_masque_for_existing_naive "${cur_usque_mode:-l4-socks}" "true" || true
+                fi
+                pause_enter
+                ;;
+            5)
+                local next_mode="socks"
+                [ "${cur_usque_mode:-l4-socks}" = "socks" ] && next_mode="l4-socks"
+                if prompt_yn "Переключить режим прокси Usque с '${cur_usque_mode:-l4-socks}' на '${next_mode}'?
+
+• l4-socks — легкий и быстрый L4 TCP-прокси (рекомендуется для NaiveProxy)
+• socks — полный стек gVisor (TCP+UDP, резерв HTTP/2)" "true"; then
+                    enable_masque_for_existing_naive "$next_mode" "false" || true
+                fi
+                pause_enter
+                ;;
+            6)
+                disable_usque_masque_routing
+                pause_enter
+                ;;
+            7)
+                echo -e "${C_CYAN} === НАСТРОЙКА СВЯЗКИ NAIVEPROXY + CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
+                local saved_dom="" saved_email="" n_dom="" n_email="" n_user="" n_pass=""
+                if [ -f /etc/default/bobarev-cascade ]; then
+                    # shellcheck disable=SC1091
+                    source /etc/default/bobarev-cascade
+                    saved_dom="${NAIVE_DOMAIN:-}"
+                    saved_email="${NAIVE_EMAIL:-}"
+                fi
+                prompt_default "1/4. Домен (A/AAAA-запись должна указывать напрямую на этот VPS):" "${saved_dom:-yourdomain.com}" n_dom
+                [ "$MODULE_CANCELED" = true ] && continue
+                n_dom=$(echo "$n_dom" | tr -d ' ' | tr -cd 'a-zA-Z0-9.-')
+                if ! [[ "$n_dom" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || [[ "$n_dom" != *.* ]]; then
+                    echo -e "${C_RED} Некорректный домен.${C_RESET}"; pause_enter; continue
+                fi
+                prompt_default "2/4. Email для автоматического выпуска SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
+                [ "$MODULE_CANCELED" = true ] && continue
+                if ! [[ "$n_email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+                    echo -e "${C_RED} Некорректный email.${C_RESET}"; pause_enter; continue
+                fi
+                local def_user="user$(tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 4 || echo '1')"
+                prompt_default "3/4. Логин пользователя NaiveProxy:" "${def_user}" n_user
+                [ "$MODULE_CANCELED" = true ] && continue
+                if ! [[ "$n_user" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                    echo -e "${C_RED} Имя пользователя: только буквы, цифры, _ и -.${C_RESET}"; pause_enter; continue
+                fi
+                local generated_pass
+                generated_pass=$(openssl rand -hex 12 2>/dev/null || tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
+                if ! n_pass=$(whiptail --title "Пароль NaiveProxy" --passwordbox "4/4. Пароль для подключения (минимум 8 символов):" 10 "$WT_WIDTH" "$generated_pass" 3>&1 1>&2 2>&3); then
+                    continue
+                fi
+                if [ "${#n_pass}" -lt 8 ] || [[ "$n_pass" == *:* ]] || [[ "$n_pass" == *$'
+'* ]]; then
+                    echo -e "${C_RED} Пароль: не менее 8 символов, без двоеточия и перевода строки.${C_RESET}"; pause_enter; continue
+                fi
+                if ! prompt_yn "Развернуть связку NaiveProxy + Cloudflare MASQUE (Usque) для домена $n_dom?" "true"; then
+                    continue
+                fi
+                if systemctl is-active --quiet hysteria-server.service || systemctl is-active --quiet hysteria-client.service || systemctl is-active --quiet bobarev-xray.service || is_derp_active; then
+                    echo -e "${C_YELLOW} Обнаружены активные службы другого каскада (Xray / Hysteria / DERP). Сначала отключите их в соответствующем меню.${C_RESET}"
+                    pause_enter; continue
+                fi
+                if ! check_required_ports_free "ru" "80" "443"; then
+                    pause_enter; continue
+                fi
+                local backup_dir
+                if ! backup_dir=$(mktemp -d /root/bobarev-naive-masque-backup.XXXXXXXX); then
+                    echo "Не удалось создать резервную копию."; pause_enter; continue
+                fi
+                chmod 700 "$backup_dir"
+                local old_default=false old_caddy=false
+                if [ -f /etc/default/bobarev-cascade ]; then
+                    cp -a /etc/default/bobarev-cascade "$backup_dir/bobarev-cascade" && old_default=true
+                fi
+                if [ -f "$CADDYFILE" ]; then
+                    cp -a "$CADDYFILE" "$backup_dir/Caddyfile" && old_caddy=true
+                fi
+
+                # Шаг 1: Установка и запуск Usque (Cloudflare MASQUE) на 127.0.0.1:1080
+                if ! install_and_setup_usque "${cur_usque_mode:-l4-socks}" "false"; then
+                    echo -e "${C_RED} Не удалось подготовить службу Usque (Cloudflare MASQUE). Бэкап: $backup_dir${C_RESET}"
+                    pause_enter; continue
+                fi
+
+                # Шаг 2: Сборка/проверка Caddy с модулем NaiveProxy
+                if ! ensure_go_and_build_caddy_naive; then
+                    echo -e "${C_RED} Ошибка подготовки Caddy + NaiveProxy. Бэкап: $backup_dir${C_RESET}"
+                    pause_enter; continue
+                fi
+
+                mkdir -p /etc/default
+                local wan_dev pub_ip
+                wan_dev=$(get_wan_if)
+                pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
+                local config_tmp
+                config_tmp=$(mktemp /etc/default/.bobarev-cascade.XXXXXXXX)
+                chmod 600 "$config_tmp"
+                {
+                    printf 'CASCADE_ROLE=%q
+' standalone_naive
+                    printf 'NAIVE_DOMAIN=%q
+' "$n_dom"
+                    printf 'NAIVE_EMAIL=%q
+' "$n_email"
+                    printf 'SERVER_PUB_IP=%q
+' "$pub_ip"
+                    printf 'NAIVE_OUT_MODE=%q
+' masque
+                    printf 'USQUE_MODE=%q
+' "${cur_usque_mode:-l4-socks}"
+                } > "$config_tmp"
+                mv -f "$config_tmp" /etc/default/bobarev-cascade
+
+                if ! add_or_update_naive_user "$n_user" "$n_pass" || ! render_naive_caddyfile; then
+                    echo -e "${C_RED} Ошибка применения конфигурации Caddy. Восстанавливаю прежние настройки (Бэкап: $backup_dir)...${C_RESET}"
+                    if [ "$old_default" = true ]; then
+                        cp -a "$backup_dir/bobarev-cascade" /etc/default/bobarev-cascade
+                    else
+                        rm -f /etc/default/bobarev-cascade
+                    fi
+                    if [ "$old_caddy" = true ]; then
+                        cp -a "$backup_dir/Caddyfile" "$CADDYFILE"
+                        systemctl reload caddy.service || true
+                    fi
+                    pause_enter; continue
+                fi
+
+                if ! systemctl is-active --quiet caddy.service; then
+                    echo -e "${C_RED} Служба Caddy не запустилась. Проверьте: journalctl -u caddy -n 30 (Бэкап: $backup_dir)${C_RESET}"
+                    pause_enter; continue
+                fi
+
+                if command -v ufw >/dev/null 2>&1; then
+                    ufw allow 80/tcp comment 'NaiveProxy ACME HTTP' >/dev/null 2>&1 || true
+                    ufw allow 443/tcp comment 'NaiveProxy HTTPS' >/dev/null 2>&1 || true
+                    ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC' >/dev/null 2>&1 || true
+                fi
+
+                echo ""
+                echo -e "${C_GREEN} === СВЯЗКА NAIVEPROXY + CLOUDFLARE MASQUE (USQUE) УСПЕШНО ЗАПУЩЕНА! ===${C_RESET}"
+                verify_usque_masque_ip
+                echo ""
+                print_naive_shadowrocket_links
+                pause_enter
+                ;;
+            8)
+                if prompt_yn "Остановить и полностью удалить связку NaiveProxy (Caddy) и Cloudflare MASQUE (Usque) на этом сервере?" "false"; then
+                    silent_run systemctl stop usque.service
+                    silent_run systemctl disable usque.service
+                    rm -f /etc/systemd/system/usque.service
+                    if prompt_yn "Удалить также зарегистрированный профиль WARP (/etc/usque/config.json)?" "false"; then
+                        rm -rf /etc/usque
+                    fi
+                    disable_hybrid_wg_routing
+                    silent_run systemctl stop caddy.service
+                    silent_run systemctl disable caddy.service
+                    rm -f /etc/caddy/Caddyfile /etc/default/bobarev-cascade
+                    rm -rf "$NAIVE_DIR" "$WEBROOT" "$LOG_DIR"
+                    silent_run systemctl daemon-reload
+                    echo -e "${C_GREEN} Связка NaiveProxy + Cloudflare MASQUE полностью остановлена и удалена.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -4963,12 +5449,10 @@ SSH_HARDENING_EOF
                 silent_run ufw delete allow in on tailscale0 to any port "$active_ssh_port" proto tcp
             fi
             silent_run ufw allow "$port"/tcp comment 'SSH Public Port'
-            if prompt_yn "Установить легковесную защиту от перебора паролей SSH (sshguard)?" "true"; then
-                export DEBIAN_FRONTEND=noninteractive
-                silent_run apt-get update
-                silent_run apt-get install -yq sshguard
-                silent_run systemctl enable --now sshguard
-                echo -e "${C_GREEN} Защита от перебора паролей (sshguard) активирована.${C_RESET}"
+        fi
+        if ! systemctl is-active --quiet sshguard.service 2>/dev/null && ! systemctl is-active --quiet fail2ban.service 2>/dev/null; then
+            if prompt_yn "Установить и включить защиту от перебора паролей SSH (SSHGuard)?" "true"; then
+                install_and_enable_sshguard
             fi
         fi
         echo -e "${C_GREEN} Служба удаленного доступа успешно перезапущена с абсолютным приоритетом параметров.${C_RESET}"
@@ -4979,6 +5463,138 @@ SSH_HARDENING_EOF
         rm -rf "$conf_bak_dir" 2>/dev/null || true
         systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
     fi
+}
+
+install_and_enable_sshguard() {
+    export DEBIAN_FRONTEND=noninteractive
+    echo -e "${C_BLUE} Установка и настройка службы SSHGuard...${C_RESET}"
+    silent_run apt-get update
+    silent_run apt-get install -yq sshguard
+    if [ -f /etc/sshguard/sshguard.conf ] && ! [ -f /var/log/auth.log ]; then
+        if ! grep -q "journalctl" /etc/sshguard/sshguard.conf 2>/dev/null; then
+            sed -i 's|^LOGREADER=.*|LOGREADER="LANG=C /usr/bin/journalctl -afb -p info -n1 -t sshd -t sshd-session -o cat"|' /etc/sshguard/sshguard.conf 2>/dev/null || true
+        fi
+    fi
+    silent_run systemctl stop fail2ban.service 2>/dev/null || true
+    silent_run systemctl disable fail2ban.service 2>/dev/null || true
+    silent_run systemctl enable --now sshguard.service
+    silent_run systemctl restart sshguard.service
+    if systemctl is-active --quiet sshguard.service 2>/dev/null; then
+        echo -e "${C_GREEN} ✔ Защита от перебора паролей (SSHGuard) успешно установлена и активна!${C_RESET}"
+    else
+        echo -e "${C_YELLOW} Служба SSHGuard установлена, проверьте статус: systemctl status sshguard${C_RESET}"
+    fi
+}
+
+install_and_enable_fail2ban() {
+    export DEBIAN_FRONTEND=noninteractive
+    echo -e "${C_BLUE} Установка и настройка Fail2Ban (с поддержкой systemd-journal)...${C_RESET}"
+    silent_run apt-get update
+    silent_run apt-get install -yq fail2ban python3-systemd
+
+    local sshd_cmd active_ssh_port="22"
+    sshd_cmd=$(get_sshd_cmd)
+    if [ -n "$sshd_cmd" ]; then
+        active_ssh_port=$($sshd_cmd -T 2>/dev/null | awk '$1=="port"{print $2;exit}' || echo "22")
+    fi
+    active_ssh_port="${active_ssh_port//[^0-9]/}"
+    [ -z "$active_ssh_port" ] && active_ssh_port="22"
+
+    mkdir -p /etc/fail2ban/jail.d
+    cat << F2B_EOF > /etc/fail2ban/jail.d/00-bobarev-sshd.local
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+backend = systemd
+
+[sshd]
+enabled = true
+port = ${active_ssh_port}
+logpath = %(sshd_log)s
+backend = systemd
+F2B_EOF
+
+    silent_run systemctl stop sshguard.service 2>/dev/null || true
+    silent_run systemctl disable sshguard.service 2>/dev/null || true
+    silent_run systemctl enable --now fail2ban.service
+    silent_run systemctl restart fail2ban.service
+    if systemctl is-active --quiet fail2ban.service 2>/dev/null; then
+        echo -e "${C_GREEN} ✔ Защита от перебора паролей (Fail2Ban, порт SSH: ${active_ssh_port}) успешно запущена!${C_RESET}"
+    else
+        echo -e "${C_YELLOW} Служба Fail2Ban установлена, проверьте статус: systemctl status fail2ban${C_RESET}"
+    fi
+}
+
+mod_ssh_bruteforce_guard() {
+    while true; do
+        MODULE_CANCELED=false
+        local sg_active="остановлена" f2b_active="остановлена" cur_guard="Не установлена / не активна"
+        if systemctl is-active --quiet sshguard.service 2>/dev/null; then
+            sg_active="активна"
+            cur_guard="SSHGuard (активна)"
+        fi
+        if systemctl is-active --quiet fail2ban.service 2>/dev/null; then
+            f2b_active="активна"
+            cur_guard="${cur_guard/Не установлена \/ не активна/}${cur_guard:+ }Fail2Ban (активна)"
+        fi
+
+        local sshd_cmd ssh_port="22"
+        sshd_cmd=$(get_sshd_cmd)
+        if [ -n "$sshd_cmd" ]; then
+            ssh_port=$($sshd_cmd -T 2>/dev/null | awk '$1=="port"{print $2;exit}' || echo "22")
+        fi
+        local failed_cnt=0
+        failed_cnt=$(journalctl -b --no-pager 2>/dev/null | grep -cE 'Failed password|Invalid user|Connection closed by authenticating' || true)
+
+        local bf_choice=""
+        if ! smart_menu "🛡 ЗАЩИТА ОТ ПЕРЕБОРА ПАРОЛЕЙ SSH" "
+Текущая защита: ${cur_guard}
+Порт SSH: ${ssh_port} | Отражено попыток входа с момента загрузки: ${failed_cnt:-0}
+
+Выберите действие:" 18 "$WT_WIDTH" 6 "bf_choice"             "1" "Установить и включить SSHGuard (легковесная защита в реальном времени)"             "2" "Установить и включить Fail2Ban (классическая защита с jail sshd)"             "3" "Показать статистику атак и заблокированные IP-адреса"             "4" "Отключить и остановить защиту от перебора (SSHGuard / Fail2Ban)"             "0" "⬅ Назад" || [ "$bf_choice" = "0" ]; then
+            return 0
+        fi
+
+        clear
+        case "$bf_choice" in
+            1)
+                install_and_enable_sshguard
+                pause_enter
+                ;;
+            2)
+                install_and_enable_fail2ban
+                pause_enter
+                ;;
+            3)
+                echo -e "${C_CYAN} === СТАТИСТИКА ЗАЩИТЫ ОТ ПЕРЕБОРА SSH ===${C_RESET}"
+                echo -e " Служба SSHGuard: ${C_BLUE}${sg_active}${C_RESET} | Служба Fail2Ban: ${C_BLUE}${f2b_active}${C_RESET}"
+                echo -e " Неудачных попыток входа с момента загрузки: ${C_YELLOW}${failed_cnt:-0}${C_RESET}"
+                echo ""
+                if systemctl is-active --quiet fail2ban.service 2>/dev/null && command -v fail2ban-client >/dev/null 2>&1; then
+                    echo -e "${C_CYAN} --- Статус джейла Fail2Ban (sshd) ---${C_RESET}"
+                    fail2ban-client status sshd 2>/dev/null || true
+                    echo ""
+                fi
+                if systemctl is-active --quiet sshguard.service 2>/dev/null; then
+                    echo -e "${C_CYAN} --- Последние события блокировки SSHGuard ---${C_RESET}"
+                    journalctl -u sshguard -n 15 --no-pager 2>/dev/null || true
+                    echo ""
+                fi
+                echo -e "${C_CYAN} --- Последние 10 неудачных попыток входа в журнале SSH ---${C_RESET}"
+                journalctl -b --no-pager 2>/dev/null | grep -E 'Failed password|Invalid user' | tail -n 10 || echo " Попыток перебора не зафиксировано."
+                pause_enter
+                ;;
+            4)
+                if prompt_yn "Остановить и отключить автозапуск служб SSHGuard и Fail2Ban?" "false"; then
+                    silent_run systemctl disable --now sshguard.service 2>/dev/null || true
+                    silent_run systemctl disable --now fail2ban.service 2>/dev/null || true
+                    echo -e "${C_YELLOW} Службы защиты от перебора (SSHGuard / Fail2Ban) остановлены и отключены.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
 }
 
 # 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6 форвардингом)
@@ -6873,9 +7489,9 @@ mod_server_audit() {
     systemctl is-active --quiet sshguard.service 2>/dev/null && guards=sshguard
     if systemctl is-active --quiet fail2ban.service 2>/dev/null; then guards="${guards:+$guards и }fail2ban"; fi
     journal_ssh=$(journalctl -b -n 1 -o cat --no-pager _COMM=sshd + _COMM=sshd-session 2>/dev/null || true)
-    if [ -z "$guards" ]; then protection="${C_YELLOW}Активные службы не обнаружены${C_RESET}"
-    elif [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then protection="${C_BLUE}${guards} запущены; журнал доступен${C_RESET}"
-    else protection="${C_YELLOW}${guards} запущены; журнал не подтверждён${C_RESET}"; fi
+    if [ -z "$guards" ]; then protection="${C_YELLOW}Не установлена (доступно в разделе 1 -> п. 7)${C_RESET}"
+    elif [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then protection="${C_GREEN}✔ Активна (${guards}, журнал SSH контролируется)${C_RESET}"
+    else protection="${C_GREEN}✔ Активна (${guards})${C_RESET}"; fi
     audit_human_row 'Защита от перебора:' "$protection"
     if [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then
         audit_human_row 'Системные журналы:' "${C_GREEN}События SSH доступны${C_RESET}"
@@ -7094,14 +7710,20 @@ mod_server_audit() {
                 fi
                 ;;
             standalone_naive)
-                if [ "$audit_out_mode" = "direct" ]; then
-                    cascade_status="${C_BLUE}NaiveProxy — прямой выход по настройкам${C_RESET}"
+                if [ "$audit_out_mode" = "masque" ] || systemctl is-active --quiet usque.service 2>/dev/null; then
+                    if systemctl is-active --quiet usque.service 2>/dev/null; then
+                        cascade_status="${C_GREEN}Автономный NaiveProxy -> Cloudflare MASQUE (Usque 127.0.0.1:1080 активен)${C_RESET}"
+                    else
+                        cascade_status="${C_YELLOW}Автономный NaiveProxy (режим MASQUE, но служба usque остановлена)${C_RESET}"
+                    fi
+                elif [ "$audit_out_mode" = "direct" ]; then
+                    cascade_status="${C_BLUE}Автономный NaiveProxy — прямой выход с этого VPS${C_RESET}"
                 elif [ "$audit_out_mode" = "mullvad_ts" ] && systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
                     cascade_status="${C_GREEN}Шлюз Mullvad Exit Node (NaiveProxy + VLESS-REALITY активны)${C_RESET}"
                 elif [ "$audit_out_mode" = "mullvad_ts" ]; then
                     cascade_status="${C_GREEN}Шлюз Mullvad Exit Node (NaiveProxy активен)${C_RESET}"
                 else
-                    cascade_status="${C_BLUE}NaiveProxy запущен в автономной конфигурации; фактический внешний IP не проверен${C_RESET}"
+                    cascade_status="${C_BLUE}NaiveProxy запущен в автономной конфигурации${C_RESET}"
                 fi
                 ;;
             *) cascade_status="${C_BLUE}NaiveProxy запущен; направление выхода по этой проверке не определено${C_RESET}" ;;
@@ -7336,20 +7958,104 @@ mod_server_audit() {
     audit_section '10' 'Профиль Bobarev Shell (что настроено скриптом)'
     local feat_on="${C_GREEN}✔ Настроено${C_RESET}"
     local feat_off="${C_BLUE}— Не настроено${C_RESET}"
-    [ -r /etc/bobarev-router-v2/config ] && audit_human_row 'Роутер SBC (режим шлюза):' "$feat_on" || audit_human_row 'Роутер SBC (режим шлюза):' "$feat_off"
-    [ -f /etc/default/bobarev-router ] && audit_human_row 'Роутер SBC (профиль v1):' "$feat_on" || audit_human_row 'Роутер SBC (профиль v1):' "$feat_off"
-    [ -f /etc/default/bobarev-cascade ] && audit_human_row 'Каскад Tunnel-in-Tunnel:' "$feat_on" || audit_human_row 'Каскад Tunnel-in-Tunnel:' "$feat_off"
-    if is_naive_active; then audit_human_row 'Прокси NaiveProxy (DPI):' "$feat_on"; else audit_human_row 'Прокси NaiveProxy (DPI):' "$feat_off"; fi
-    if systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then audit_human_row 'Xray VLESS REALITY:' "$feat_on"; else audit_human_row 'Xray VLESS REALITY:' "$feat_off"; fi
-    if systemctl is-active --quiet xraymesh.service 2>/dev/null; then audit_human_row 'XRayMesh (мост выхода):' "$feat_on"; else audit_human_row 'XRayMesh (мост выхода):' "$feat_off"; fi
-    [ -f /etc/wireguard/wg0.conf ] && audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_on" || audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_off"
-    [ -f /etc/wireguard/warp.conf ] && audit_human_row 'Cloudflare WARP (выход):' "$feat_on" || audit_human_row 'Cloudflare WARP (выход):' "$feat_off"
-    if command -v tailscale &>/dev/null; then audit_human_row 'Закрытая сеть Tailscale:' "$feat_on"; else audit_human_row 'Закрытая сеть Tailscale:' "$feat_off"; fi
-    [ -f /etc/systemd/system/derper.service ] && audit_human_row 'Личный DERP-ретранслятор:' "$feat_on" || audit_human_row 'Личный DERP-ретранслятор:' "$feat_off"
-    [ -f /etc/sysctl.d/99-zzz-server-hardening.conf ] && audit_human_row 'Тюнинг защиты ядра:' "$feat_on" || audit_human_row 'Тюнинг защиты ядра:' "$feat_off"
-    [ -f /etc/sysctl.d/99-zzz-ram-opt.conf ] && audit_human_row 'Тюнинг памяти/zRAM:' "$feat_on" || audit_human_row 'Тюнинг памяти/zRAM:' "$feat_off"
-    if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null; then audit_human_row 'Изоляция Docker (UFW):' "$feat_on"; else audit_human_row 'Изоляция Docker (UFW):' "$feat_off"; fi
-    audit_human_row 'Не настроенное доступно:' "${C_BLUE}в главном меню скрипта (разделы 3–14)${C_RESET}"
+
+    # 1. Единый понятный статус: настроен ли сервер/SBC как локальный роутер
+    if [ -r /etc/bobarev-router-v2/config ] || [ -f /etc/default/bobarev-router ]; then
+        if systemctl is-active --quiet bobarev-router-v2.service 2>/dev/null || systemctl is-active --quiet bobarev-router.service 2>/dev/null; then
+            audit_human_row 'Роутер SBC (раздача в LAN):' "${C_GREEN}✔ Настроен (активен)${C_RESET}"
+        else
+            audit_human_row 'Роутер SBC (раздача в LAN):' "${C_YELLOW}✔ Настроен (служба остановлена)${C_RESET}"
+        fi
+    else
+        audit_human_row 'Роутер SBC (раздача в LAN):' "${C_BLUE}— Не настроен${C_RESET}"
+    fi
+
+    # 2. Защита SSH от перебора паролей
+    if [ -n "${guards:-}" ]; then
+        audit_human_row 'Защита SSH от перебора:' "${C_GREEN}✔ Настроено (${guards})${C_RESET}"
+    else
+        audit_human_row 'Защита SSH от перебора:' "$feat_off"
+    fi
+
+    # 3. Прокси NaiveProxy (Caddy)
+    if is_naive_active; then
+        audit_human_row 'Прокси NaiveProxy (DPI):' "${C_GREEN}✔ Настроено (активен)${C_RESET}"
+    elif [ -f "$CADDYFILE" ]; then
+        audit_human_row 'Прокси NaiveProxy (DPI):' "${C_YELLOW}✔ Настроено (остановлен)${C_RESET}"
+    else
+        audit_human_row 'Прокси NaiveProxy (DPI):' "$feat_off"
+    fi
+
+    # 4. Cloudflare MASQUE (Usque)
+    if systemctl is-active --quiet usque.service 2>/dev/null; then
+        audit_human_row 'Cloudflare MASQUE (Usque):' "${C_GREEN}✔ Настроено (активен, 127.0.0.1:1080)${C_RESET}"
+    elif [ -s /etc/usque/config.json ]; then
+        audit_human_row 'Cloudflare MASQUE (Usque):' "${C_YELLOW}✔ Настроено (остановлен)${C_RESET}"
+    else
+        audit_human_row 'Cloudflare MASQUE (Usque):' "$feat_off"
+    fi
+
+    # 5. Каскадные протоколы (Xray / Hysteria 2 / WG-каскад / XRayMesh)
+    local casc_feat="$feat_off"
+    if systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
+        casc_feat="${C_GREEN}✔ Настроено (Xray VLESS REALITY)${C_RESET}"
+    elif systemctl is-active --quiet hysteria-client.service 2>/dev/null || systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
+        casc_feat="${C_GREEN}✔ Настроено (Hysteria 2 QUIC)${C_RESET}"
+    elif is_wg_cascade_active; then
+        casc_feat="${C_GREEN}✔ Настроено (WireGuard / udp2raw)${C_RESET}"
+    elif systemctl is-active --quiet xraymesh.service 2>/dev/null; then
+        casc_feat="${C_GREEN}✔ Настроено (XRayMesh)${C_RESET}"
+    elif [ -f /etc/default/bobarev-cascade ]; then
+        local c_role_chk=$(awk -F= '$1=="CASCADE_ROLE"{gsub(/["\047[:space:]]/,"",$2);print $2;exit}' /etc/default/bobarev-cascade 2>/dev/null || true)
+        if [ -n "$c_role_chk" ] && [ "$c_role_chk" != "standalone_naive" ]; then
+            casc_feat="${C_GREEN}✔ Настроено (${c_role_chk})${C_RESET}"
+        fi
+    fi
+    audit_human_row 'Каскадный мост (Сервер 1↔2):' "$casc_feat"
+
+    # 6. WireGuard wg0 и Cloudflare WARP
+    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; then
+        audit_human_row 'WireGuard wg0 (свой туннель):' "${C_GREEN}✔ Настроено (активен)${C_RESET}"
+    elif [ -f /etc/wireguard/wg0.conf ]; then
+        audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_on"
+    else
+        audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_off"
+    fi
+
+    if is_warp_active; then
+        audit_human_row 'Cloudflare WARP (WireGuard):' "${C_GREEN}✔ Настроено (активен)${C_RESET}"
+    elif [ -f /etc/wireguard/warp.conf ]; then
+        audit_human_row 'Cloudflare WARP (WireGuard):' "$feat_on"
+    else
+        audit_human_row 'Cloudflare WARP (WireGuard):' "$feat_off"
+    fi
+
+    # 7. Tailscale и личный DERP
+    if command -v tailscale &>/dev/null && tailscale status >/dev/null 2>&1; then
+        audit_human_row 'Закрытая сеть Tailscale:' "${C_GREEN}✔ Настроено (подключена)${C_RESET}"
+    elif command -v tailscale &>/dev/null; then
+        audit_human_row 'Закрытая сеть Tailscale:' "${C_YELLOW}✔ Установлена (не авторизована)${C_RESET}"
+    else
+        audit_human_row 'Закрытая сеть Tailscale:' "$feat_off"
+    fi
+
+    if is_derp_active; then
+        audit_human_row 'Личный DERP-ретранслятор:' "${C_GREEN}✔ Настроено (активен)${C_RESET}"
+    elif [ -f /etc/systemd/system/derper.service ]; then
+        audit_human_row 'Личный DERP-ретранслятор:' "$feat_on"
+    else
+        audit_human_row 'Личный DERP-ретранслятор:' "$feat_off"
+    fi
+
+    # 8. Системные оптимизации и безопасность
+    [ -f /etc/sysctl.d/99-zzz-server-hardening.conf ] && audit_human_row 'Тюнинг ядра и TCP BBR:' "$feat_on" || audit_human_row 'Тюнинг ядра и TCP BBR:' "$feat_off"
+    [ -f /etc/sysctl.d/99-zzz-ram-opt.conf ] && audit_human_row 'Тюнинг памяти и zRAM:' "$feat_on" || audit_human_row 'Тюнинг памяти и zRAM:' "$feat_off"
+    if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null; then
+        audit_human_row 'Изоляция Docker в UFW:' "$feat_on"
+    else
+        audit_human_row 'Изоляция Docker в UFW:' "$feat_off"
+    fi
+    audit_human_row 'Не настроенное доступно:' "${C_BLUE}в главном меню скрипта (разделы 1–5)${C_RESET}"
 
     # --- Итоговая сводка: пункты, отмеченные жёлтым/красным ---
     echo ""
@@ -9439,7 +10145,7 @@ mod_network_reset() {
  echo '--- NAT / MASQUERADE ---'
  iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
  echo '--- Активные сетевые службы ---'
- for unit in bobarev-router-v2 bobarev-router-dhcp bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
+ for unit in bobarev-router-v2 bobarev-router-dhcp bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server usque naive-mesh-bridge xray-mesh-socks xraymesh; do
   [[ -f "/etc/systemd/system/$unit.service" ]] || continue
   printf '%-32s %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
  done
@@ -9464,7 +10170,7 @@ mod_network_reset() {
    items+=('TS_ADV' 'Отключить анонсирование сервера как exit node' OFF)
   fi
  fi
- for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
+ for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server usque naive-mesh-bridge xray-mesh-socks xraymesh; do
   [[ -f "/etc/systemd/system/$unit.service" ]] || continue
   local state
   state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
@@ -9521,7 +10227,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /var/lib/bobarev-shell-mullvad/client-links.txt /var/lib/bobarev-shell-mullvad/vless-links.txt /usr/local/lib/bobarev-shell /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/hysteria /etc/xray /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /var/lib/bobarev-shell-mullvad/client-links.txt /var/lib/bobarev-shell-mullvad/vless-links.txt /usr/local/lib/bobarev-shell /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/usque /etc/hysteria /etc/xray /etc/systemd/system/usque.service /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -11390,20 +12096,21 @@ menu_server_security() {
     while true; do
         MODULE_CANCELED=false
         local choice=""
-        if ! smart_menu "🛠 БАЗОВАЯ НАСТРОЙКА И БЕЗОПАСНОСТЬ" "Выберите этап настройки сервера:" 22 "$WT_WIDTH" 15 choice \
+        if ! smart_menu "🛠 БАЗОВАЯ НАСТРОЙКА И БЕЗОПАСНОСТЬ" "Выберите этап настройки сервера:" 23 "$WT_WIDTH" 16 choice \
             "1" "Часовой пояс" \
             "2" "Имя сервера (Hostname)" \
             "3" "Обновление пакетов, приоритет IPv4 и zRAM" \
             "4" "Создание и настройка пользователя" \
             "5" "Привязка SSH-ключа безопасности" \
-            "6" "Конфигурация SSH и защита (SSHGuard)" \
-            "7" "Защита ядра и сетевой стек TCP BBR (Sysctl)" \
-            "8" "Управление брандмауэром (UFW)" \
-            "9" "Блокировка пароля суперпользователя (root)" \
-            "10" "Оптимизация RAM и Flash-памяти" \
-            "11" "Управление файлом подкачки (Swap)" \
-            "12" "Утилиты ПК и режим процессора (CPU)" \
-            "13" "Сброс видеовыхода HDMI" \
+            "6" "Конфигурация SSH (порт, ключи, доступ)" \
+            "7" "Защита от перебора паролей SSH (SSHGuard / Fail2Ban)" \
+            "8" "Защита ядра и сетевой стек TCP BBR (Sysctl)" \
+            "9" "Управление брандмауэром (UFW)" \
+            "10" "Блокировка пароля суперпользователя (root)" \
+            "11" "Оптимизация RAM и Flash-памяти" \
+            "12" "Управление файлом подкачки (Swap)" \
+            "13" "Утилиты ПК и режим процессора (CPU)" \
+            "14" "Сброс видеовыхода HDMI" \
             "A" "Выполнить первичную настройку целиком (Шаги 1-12)" \
             "0" "⬅ Назад"; then
             return 0
@@ -11417,13 +12124,14 @@ menu_server_security() {
             4) mod_user_setup || true; pause_enter ;;
             5) mod_ssh_key || true; pause_enter ;;
             6) mod_ssh_config || true; pause_enter ;;
-            7) mod_hardening || true; pause_enter ;;
-            8) mod_ufw || true; pause_enter ;;
-            9) mod_lock_root || true; pause_enter ;;
-            10) mod_ram_flash_opt || true; pause_enter ;;
-            11) mod_swap_manager || true; pause_enter ;;
-            12) mod_desktop_apps || true; pause_enter ;;
-            13) mod_hdmi_reset || true; pause_enter ;;
+            7) mod_ssh_bruteforce_guard || true ;;
+            8) mod_hardening || true; pause_enter ;;
+            9) mod_ufw || true; pause_enter ;;
+            10) mod_lock_root || true; pause_enter ;;
+            11) mod_ram_flash_opt || true; pause_enter ;;
+            12) mod_swap_manager || true; pause_enter ;;
+            13) mod_desktop_apps || true; pause_enter ;;
+            14) mod_hdmi_reset || true; pause_enter ;;
             A) run_full_auto_setup || true; pause_enter ;;
         esac
     done
@@ -11433,14 +12141,15 @@ menu_connections_proxies() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (NAIVEPROXY)" "Выберите топологию подключения:" 19 "$WT_WIDTH" 8 sub_choice \
+        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (NAIVEPROXY)" "Выберите топологию подключения:" 20 "$WT_WIDTH" 9 sub_choice \
             "1" "Автономный NaiveProxy (Один сервер + WG Dual-Gateway)" \
-            "2" "Каскад: NaiveProxy + Xray REALITY (+ WARP)" \
-            "3" "Каскад: NaiveProxy + Hysteria 2 (+ WARP)" \
-            "4" "Каскад: NaiveProxy + WireGuard / udp2raw (+ WARP)" \
-            "5" "Каскад: NaiveProxy + Tailscale / Mullvad (+ VLESS-REALITY)" \
-            "6" "Каскад: NaiveProxy + XRayMesh" \
-            "7" "Каскад: NaiveProxy + Tailscale (2 сервера + WARP)" \
+            "2" "Автономный NaiveProxy (Один сервер + Cloudflare MASQUE)" \
+            "3" "Каскад: NaiveProxy + Xray REALITY (+ WARP)" \
+            "4" "Каскад: NaiveProxy + Hysteria 2 (+ WARP)" \
+            "5" "Каскад: NaiveProxy + WireGuard / udp2raw (+ WARP)" \
+            "6" "Каскад: NaiveProxy + Tailscale / Mullvad (+ VLESS-REALITY)" \
+            "7" "Каскад: NaiveProxy + XRayMesh" \
+            "8" "Каскад: NaiveProxy + Tailscale (2 сервера + WARP)" \
             "0" "⬅ Назад"; then
             return 0
         fi
@@ -11448,12 +12157,13 @@ menu_connections_proxies() {
         clear
         case "$sub_choice" in
             1) setup_standalone_naive || true ;;
-            2) manage_cascade_xray_menu || true ;;
-            3) manage_cascade_hysteria_menu || true ;;
-            4) mod_direct_wg_cascade || true ;;
-            5) manage_naive_mullvad_menu || true ;;
-            6) manage_naive_mesh_menu || true ;;
-            7) manage_cascade_naive_ts_warp || true ;;
+            2) setup_standalone_naive_masque || true ;;
+            3) manage_cascade_xray_menu || true ;;
+            4) manage_cascade_hysteria_menu || true ;;
+            5) mod_direct_wg_cascade || true ;;
+            6) manage_naive_mullvad_menu || true ;;
+            7) manage_naive_mesh_menu || true ;;
+            8) manage_cascade_naive_ts_warp || true ;;
         esac
     done
 }

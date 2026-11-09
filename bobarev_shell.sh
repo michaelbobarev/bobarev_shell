@@ -3,10 +3,23 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.19 (Universal Simplified Menu Edition)
+# Версия: 3.18.20 (Universal Simplified Menu Edition)
+# ------------------------------------------------------------------------------
+# Изменения 3.18.20:
+#   * Вопрос про Tailscale задаётся ОДИН РАЗ за запуск мастера: ответ в модуле
+#     SSH («Скрыть доступ через закрытую сеть?») запоминается в
+#     /etc/default/bobarev-answers и больше не дублируется в модуле Tailscale.
+#   * Аудит: выровненный формат «строка к строке» (единая колонка значений),
+#     заголовки разделов с линиями, шапка с хостом/версией/uptime.
+#   * Аудит: новые показатели — ОС и ядро, ожидающие обновления, необходимость
+#     перезагрузки, процессор и занятость ОЗУ, неудачные попытки входа SSH,
+#     последний вход, службы на открытых портах.
+#   * Аудит: раздел 10 «Профиль Bobarev Shell» — что уже настроено скриптом
+#     (роутер, каскады, NaiveProxy, Xray, WARP, WireGuard, Tailscale, DERP...).
+#   * Аудит: итоговая сводка — список пунктов, отмеченных жёлтым/красным.
 # ==============================================================================
 
-SCRIPT_VERSION="3.18.19"
+SCRIPT_VERSION="3.18.20"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -4270,6 +4283,39 @@ TS_EOF
 # ------------------------------------------------------------------------------
 # БЕЗОПАСНЫЕ ФУНКЦИИ ВВОДА WHIPTAIL
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# ПАМЯТЬ ОТВЕТОВ: вопрос по Tailscale задаётся ОДИН РАЗ за запуск мастера.
+# Ответ сохраняется в /etc/default/bobarev-answers и используется при след. запуске.
+# ------------------------------------------------------------------------------
+BOBAREV_ANSWERS_FILE="/etc/default/bobarev-answers"
+BOBAREV_TS_DECLINED="${BOBAREV_TS_DECLINED:-}"
+
+bobarev_answer_save() {
+    # $1 = ключ, $2 = значение (только [a-z_])
+    local key="$1" val="$2"
+    case "$key$val" in *[!a-zA-Z0-9_-]*) return 0 ;; esac
+    touch "$BOBAREV_ANSWERS_FILE" 2>/dev/null || return 0
+    sed -i "/^${key}=/d" "$BOBAREV_ANSWERS_FILE" 2>/dev/null || true
+    printf '%s=%s\n' "$key" "$val" >> "$BOBAREV_ANSWERS_FILE" 2>/dev/null || true
+}
+
+bobarev_answer_get() {
+    local key="$1"
+    [ -r "$BOBAREV_ANSWERS_FILE" ] || return 1
+    awk -F= -v k="$key" '$1==k {print $2; exit}' "$BOBAREV_ANSWERS_FILE" 2>/dev/null || true
+}
+
+# Пользователь отказался от Tailscale в этом запуске — больше не спрашивать.
+bobarev_ts_decline() {
+    BOBAREV_TS_DECLINED=1
+    bobarev_answer_save TS_INSTALL declined
+}
+
+# Пользователь согласился — запомнить, чтобы в следующий раз не пугать вопросом.
+bobarev_ts_accept() {
+    bobarev_answer_save TS_INSTALL accepted
+}
+
 prompt_yn() {
     local prompt="$1"
     local default_yes="$2"
@@ -4739,8 +4785,11 @@ mod_ssh_config() {
     if prompt_yn "Скрыть доступ к серверу (разрешить вход по SSH только через закрытую сеть)?" "true"; then
         restrict_choice=true
         ts_restrict_comment="# SSH via Tailscale only"
+        bobarev_ts_accept
     else
         ts_restrict_comment="# SSH Public Access"
+        # Ответ «нет» запоминается: в этом запуске про Tailscale больше не спросим.
+        bobarev_ts_decline
     fi
 
     echo -e "${C_BLUE} Резервное копирование и очистка сторонних конфигураций SSH...${C_RESET}"
@@ -4978,6 +5027,9 @@ mod_ufw() {
         do_restrict=false
     elif prompt_yn "Разрешить вход по SSH только через закрытую сеть (с полной изоляцией остальных портов)?" "true"; then
         do_restrict=true
+        bobarev_ts_accept
+    else
+        bobarev_ts_decline
     fi
 
     local chosen_nf_mode=""
@@ -5488,14 +5540,29 @@ mod_tailscale() {
             ensure_tailscale_installed || true
             enable_routing_optimizations || true
         else
+            # Вопрос про Tailscale задаётся ТОЛЬКО ОДИН РАЗ за запуск мастера.
+            # Если пользователь уже ответил «нет» (в модуле SSH или UFW) — не спрашиваем снова.
+            local ts_saved_answer=""
+            ts_saved_answer=$(bobarev_answer_get TS_INSTALL 2>/dev/null || echo "")
+            if [ -n "$BOBAREV_TS_DECLINED" ]; then
+                echo -e "${C_BLUE} Установка Tailscale пропущена: в этом запуске вы уже ответили «нет» (вопрос про закрытую сеть).${C_RESET}"
+                echo -e "${C_BLUE} Установить позже: меню → Закрытая сеть Tailscale → Авторизация и подключение узла.${C_RESET}"
+                return 0
+            elif [ "$ts_saved_answer" = "declined" ]; then
+                echo -e "${C_BLUE} Установка Tailscale пропущена: сохранён ваш предыдущий ответ «нет» (файл /etc/default/bobarev-answers).${C_RESET}"
+                echo -e "${C_BLUE} Установить позже: меню → Закрытая сеть Tailscale → Авторизация и подключение узла.${C_RESET}"
+                return 0
+            fi
             if prompt_yn "Установить и настроить закрытую сеть Tailscale на этом сервере?" "true"; then
+                bobarev_ts_accept
                 ensure_tailscale_installed || true
                 enable_routing_optimizations || true
             else
+                bobarev_ts_decline
                 if command -v ufw &>/dev/null; then
                     silent_run ufw delete allow 41641/udp
                 fi
-                echo -e "${C_YELLOW} Установка Tailscale пропущена пользователем.${C_RESET}"
+                echo -e "${C_YELLOW} Установка Tailscale пропущена пользователем (ответ запомнен).${C_RESET}"
                 return 0
             fi
         fi
@@ -6256,10 +6323,28 @@ else:
 ' "$1"
 }
 
+# Счётчик пунктов, отмеченных жёлтым/красным — для итоговой сводки аудита.
+AUDIT_NOTES=()
+
 audit_human_row() {
     local label="$1" value="$2" gap
-    gap=$((28-${#label})); [ "$gap" -gt 0 ] || gap=1
+    case "$value" in
+        *"$C_YELLOW"*|*"$C_RED"*) AUDIT_NOTES+=("$label") ;;
+    esac
+    gap=$((30-${#label})); [ "$gap" -gt 0 ] || gap=1
     printf '   %s%*s%b\n' "$label" "$gap" '' "$value"
+}
+
+# Красивый заголовок раздела аудита: ─── 1. НАЗВАНИЕ ───────────
+audit_section() {
+    local num="$1" title="$2"
+    local head=" $num. $title "
+    local h=${#head}
+    local right=$((62 - h))
+    [ "$right" -lt 2 ] && right=2
+    local rd='' i
+    for ((i=0; i<right; i++)); do rd+='─'; done
+    echo -e "\n${C_BOLD}${C_CYAN}────$head$rd${C_RESET}"
 }
 
 audit_profile_state() {
@@ -6374,14 +6459,20 @@ bobarev_network_human_audit() {
 
 mod_server_audit() {
     clear
+    AUDIT_NOTES=()
+    local audit_host=$(hostname)
+    local audit_now=$(date '+%d.%m.%Y %H:%M')
+    local audit_up=$(uptime -p 2>/dev/null | sed 's/^up //;s/,/ /' || echo "неизвестно")
     echo -e "${C_CYAN}=================================================================${C_RESET}"
-    echo -e "${C_BOLD}         АУДИТ СИСТЕМЫ 1 (ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ)     ${C_RESET}"
-    echo -e "${C_CYAN}=================================================================${C_RESET}\n"
-    
+    echo -e "${C_BOLD}        АУДИТ СИСТЕМЫ (ПОЛНЫЙ ИНТЕЛЛЕКТУАЛЬНЫЙ)${C_RESET}"
+    echo -e "${C_BLUE}  Хост: ${C_BOLD}$audit_host${C_RESET}${C_BLUE} | Bobarev Shell v${SCRIPT_VERSION} | $audit_now${C_RESET}"
+    echo -e "${C_BLUE}  Время работы: $audit_up | Ядер: $(nproc 2>/dev/null || echo '?') | Открытых процессов: $(ps --no-headers 2>/dev/null | wc -l)${C_RESET}"
+    echo -e "${C_CYAN}=================================================================${C_RESET}"
+
     local active_user=$(get_active_user)
     local wan_if=$(get_wan_if)
 
-    echo -e "${C_BOLD}--- 1. Базовая система, хост и обновления ---${C_RESET}"
+    audit_section '1' 'Базовая система, хост и обновления'
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
     current_tz="${current_tz#Etc/}"
     local ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "no")
@@ -6393,18 +6484,37 @@ mod_server_audit() {
     local boot_target_human="${C_BLUE}Консольный (без рабочего стола, экономия ОЗУ)${C_RESET}"
     [ "$boot_target" = "graphical.target" ] && boot_target_human="${C_BLUE}Графический рабочий стол${C_RESET}"
 
-    echo -e "   Часовой пояс и время:      ${C_GREEN}$current_tz${C_RESET} ($ntp_str)"
-    echo -e "   Имя сервера (хост):        ${C_GREEN}$(hostname)${C_RESET}"
-    echo -e "   Тип устройства:            ${C_BLUE}$sys_type_human${C_RESET}"
-    echo -e "   Режим работы системы:      $boot_target_human"
+    audit_human_row 'Часовой пояс и время:' "${C_GREEN}$current_tz${C_RESET} ($ntp_str)"
+    audit_human_row 'Имя сервера (хост):' "${C_GREEN}$(hostname)${C_RESET}"
+    audit_human_row 'Тип устройства:' "${C_BLUE}$sys_type_human${C_RESET}"
+    audit_human_row 'Режим работы системы:' "$boot_target_human"
     
     if systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
-        echo -e "   Фоновые обновления:        ${C_GREEN} Включены (авто-установка обновлений защиты)${C_RESET}"
+        audit_human_row 'Фоновые обновления:' "${C_GREEN} Включены (авто-установка обновлений защиты)${C_RESET}"
     else
-        echo -e "   Фоновые обновления:        ${C_RED} Отключены${C_RESET}"
+        audit_human_row 'Фоновые обновления:' "${C_RED} Отключены${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 2. Аппаратная часть и Детектор оверселлинга ---${C_RESET}"
+    local os_pretty=$(grep -m1 '^PRETTY_NAME' /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "неизвестно")
+    local kernel_ver=$(uname -r 2>/dev/null || echo "?")
+    audit_human_row 'Система и ядро:' "${C_BLUE}$os_pretty (ядро $kernel_ver)${C_RESET}"
+
+    local updates_pending=""
+    if command -v apt-get &>/dev/null; then
+        updates_pending=$(apt list --upgradable 2>/dev/null | grep -c 'upgradable' || true)
+        if [ "${updates_pending:-0}" -gt 0 ] 2>/dev/null; then
+            audit_human_row 'Ожидают обновления:' "${C_YELLOW} $updates_pending пакетов (apt upgrade)${C_RESET}"
+        else
+            audit_human_row 'Ожидают обновления:' "${C_GREEN} Все пакеты актуальны${C_RESET}"
+        fi
+    fi
+    if [ -f /var/run/reboot-required ]; then
+        audit_human_row 'Требуется перезагрузка:' "${C_YELLOW} Да (обновлены компоненты ядра)${C_RESET}"
+    else
+        audit_human_row 'Требуется перезагрузка:' "${C_GREEN} Нет${C_RESET}"
+    fi
+
+    audit_section '2' 'Аппаратная часть и Детектор оверселлинга'
     local cpu_temp="Нет датчика"
     if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
         local raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "")
@@ -6554,31 +6664,47 @@ mod_server_audit() {
         verdict_human="${C_RED} Жесткий оверселлинг! (хостер урезает железо)${C_RESET}"
     fi
 
-    echo -e "   Температура процессора:    $cpu_temp"
-    echo -e "   Режим питания процессора:  $cpu_gov_human"
-    echo -e "   Текущая частота ядер:      ${C_BLUE}$cpu_freq${C_RESET}"
-    echo -e "   Вычислительная нагрузка:   ${C_BLUE}$load_avg${C_RESET}"
-    echo -e "   Занято места на диске:     ${C_BLUE}$disk_usage${C_RESET}"
-    echo -e "   Отклик ядра (Троттлинг):   $cpu_speed_status"
-    echo -e "   Кража CPU под нагрузкой:   $steal_status"
-    echo -e "   Реальный отклик диска:     $disk_io_status"
-    echo -e "   Ожидание ресурсов (PSI):   $psi_status"
-    echo -e "   Вердикт по оверселлингу:   $verdict_human"
+    audit_human_row 'Температура процессора:' "$cpu_temp"
 
-    echo -e "\n${C_BOLD}--- 3. Учетные записи, пользователи и Sudo ---${C_RESET}"
+    local cpu_model=$(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^[ \t]*//;s/(R)//g;s/(TM)//g;s/@.*//' || echo "неизвестно")
+    local cpu_cores=$(nproc 2>/dev/null || echo "?")
+    audit_human_row 'Процессор:' "${C_BLUE}$cpu_model — ядер: $cpu_cores${C_RESET}"
+
+    local mem_total_kb=$(grep -m1 '^MemTotal' /proc/meminfo 2>/dev/null | awk '{print $2}')
+    local mem_avail_kb=$(grep -m1 '^MemAvailable' /proc/meminfo 2>/dev/null | awk '{print $2}')
+    if [ -n "$mem_total_kb" ] && [ -n "$mem_avail_kb" ] 2>/dev/null; then
+        local mem_used_mb=$(( (mem_total_kb - mem_avail_kb) / 1024 ))
+        local mem_total_mb=$(( mem_total_kb / 1024 ))
+        local mem_pct=$(( (mem_used_mb * 100) / mem_total_mb ))
+        local mem_color="$C_GREEN"
+        [ "$mem_pct" -ge 80 ] && mem_color="$C_YELLOW"
+        [ "$mem_pct" -ge 92 ] && mem_color="$C_RED"
+        audit_human_row 'Оперативная память:' "${mem_color}${mem_used_mb} МБ из ${mem_total_mb} МБ (занято ${mem_pct}%)${C_RESET}"
+    fi
+    audit_human_row 'Режим питания процессора:' "$cpu_gov_human"
+    audit_human_row 'Текущая частота ядер:' "${C_BLUE}$cpu_freq${C_RESET}"
+    audit_human_row 'Вычислительная нагрузка:' "${C_BLUE}$load_avg${C_RESET}"
+    audit_human_row 'Занято места на диске:' "${C_BLUE}$disk_usage${C_RESET}"
+    audit_human_row 'Отклик ядра (Троттлинг):' "$cpu_speed_status"
+    audit_human_row 'Кража CPU под нагрузкой:' "$steal_status"
+    audit_human_row 'Реальный отклик диска:' "$disk_io_status"
+    audit_human_row 'Ожидание ресурсов (PSI):' "$psi_status"
+    audit_human_row 'Вердикт по оверселлингу:' "$verdict_human"
+
+    audit_section '3' 'Учетные записи, пользователи и Sudo'
     local in_sudo_group="нет"
     if id -nG "$active_user" 2>/dev/null | grep -qw "sudo"; then
         in_sudo_group="в группе sudo"
     fi
-    echo -e "   Основной администратор:    ${C_GREEN}$active_user ($in_sudo_group)${C_RESET}"
+    audit_human_row 'Основной администратор:' "${C_GREEN}$active_user ($in_sudo_group)${C_RESET}"
 
     local sudo_effective_line=$(sudo -l -U "$active_user" 2>/dev/null | grep -E "NOPASSWD|ALL" | tail -n 1 || echo "")
     if echo "$sudo_effective_line" | grep -q "NOPASSWD"; then
-        echo -e "   Повышение прав (Sudo):     ${C_GREEN} Без запроса пароля (NOPASSWD активен)${C_RESET}"
+        audit_human_row 'Повышение прав (Sudo):' "${C_GREEN} Без запроса пароля (NOPASSWD активен)${C_RESET}"
     elif [ -f "/etc/sudoers.d/99-zzz-$active_user" ] || [ -f "/etc/sudoers.d/$active_user" ]; then
-        echo -e "   Повышение прав (Sudo):     ${C_YELLOW}  Файл NOPASSWD есть, но перебит другим правилом (перезапустите п. 4)${C_RESET}"
+        audit_human_row 'Повышение прав (Sudo):' "${C_YELLOW}  Файл NOPASSWD есть, но перебит другим правилом (перезапустите п. 4)${C_RESET}"
     else
-        echo -e "   Повышение прав (Sudo):     ${C_BLUE}  Стандартный запрос пароля${C_RESET}"
+        audit_human_row 'Повышение прав (Sudo):' "${C_BLUE}  Стандартный запрос пароля${C_RESET}"
     fi
 
     local root_pw_state root_pw_human
@@ -6591,7 +6717,7 @@ mod_server_audit() {
     esac
     audit_human_row 'Учётная запись root:' "$root_pw_human"
 
-    echo -e "\n${C_BOLD}--- 4. Безопасность и конфигурация SSH ---${C_RESET}"
+    audit_section '4' 'Безопасность и конфигурация SSH'
     local ssh_port=unknown sshd_cmd ssh_eff='' root_text pass_text key_text valid_text
     sshd_cmd=$(get_sshd_cmd)
     valid_text="${C_YELLOW}Не удалось проверить${C_RESET}"
@@ -6657,24 +6783,39 @@ mod_server_audit() {
         audit_human_row 'Очистка логов при старте:' "${C_YELLOW}Включена — проверьте совместимость с защитой${C_RESET}"
     else audit_human_row 'Очистка логов при старте:' "${C_BLUE}Не включена${C_RESET}"; fi
 
-    echo -e "\n${C_BOLD}--- 5. Защита ядра и сетевые оптимизации ---${C_RESET}"
+    local failed_logins=0
+    failed_logins=$(journalctl -b --no-pager 2>/dev/null | grep -cE 'Failed password|Invalid user|Connection closed by authenticating' || true)
+    if [ "${failed_logins:-0}" -gt 0 ] 2>/dev/null; then
+        if [ "${failed_logins:-0}" -gt 20 ]; then
+            audit_human_row 'Неудачные попытки входа:' "${C_RED} $failed_logins с момента загрузки (идёт перебор!)${C_RESET}"
+        else
+            audit_human_row 'Неудачные попытки входа:' "${C_YELLOW} $failed_logins с момента загрузки${C_RESET}"
+        fi
+    else
+        audit_human_row 'Неудачные попытки входа:' "${C_GREEN} Не зафиксировано с момента загрузки${C_RESET}"
+    fi
+    local last_login=""
+    last_login=$(last -1 -n 1 --time-format short 2>/dev/null | head -n1 | awk '{print $1, $3, $4, $5}' || true)
+    [ -n "$last_login" ] && audit_human_row 'Последний вход по SSH:' "${C_BLUE}$last_login${C_RESET}" || true
+
+    audit_section '5' 'Защита ядра и сетевые оптимизации'
     check_param() {
         local param="$1" expected="$2" label="$3" ok_msg="$4" err_msg="$5"
         local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
         if [ "$param" = "net.core.rmem_max" ]; then
             if [ "$val" != "N/A" ] && [ "$val" -ge 26214400 ] 2>/dev/null; then
-                echo -e "   ${label}${C_GREEN} Активны (расширенные буферы под высокие скорости, сейчас: $val)${C_RESET}"
+                audit_human_row "$label" "${C_GREEN}Активны (расширенные буферы под высокие скорости, сейчас: $val)${C_RESET}"
                 return
             fi
         fi
         if [ "$val" = "$expected" ]; then
-            echo -e "   ${label}${C_GREEN} $ok_msg${C_RESET}"
+            audit_human_row "$label" "${C_GREEN}$ok_msg${C_RESET}"
         else
-            echo -e "   ${label}${C_YELLOW}  $err_msg (сейчас: $val)${C_RESET}"
+            audit_human_row "$label" "${C_YELLOW}$err_msg (сейчас: $val)${C_RESET}"
         fi
     }
-    check_param "kernel.dmesg_restrict"           "1"        "Защита журнала ядра:       " "Включена" "Отключена"
-    check_param "net.ipv4.ip_forward"             "1"        "Пересылка пакетов (IPv4): " "Разрешена в ядре" "Отключен"
+    check_param "kernel.dmesg_restrict"           "1"        "Защита журнала ядра:" "Включена" "Отключена"
+    check_param "net.ipv4.ip_forward"             "1"        "Пересылка пакетов (IPv4):" "Разрешена в ядре" "Отключен"
     local v6_forward v6_off v6_text
     v6_forward=$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || true)
     v6_off=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || true)
@@ -6683,9 +6824,9 @@ mod_server_audit() {
     elif [ "$v6_forward" = 0 ]; then v6_text="${C_BLUE}Отключена${C_RESET}"
     else v6_text="${C_YELLOW}Не удалось определить${C_RESET}"; fi
     audit_human_row 'Пересылка пакетов (IPv6):' "$v6_text"
-    check_param "net.ipv4.tcp_syncookies"         "1"        "Защита от флуда (SYN):     " "Включена" "Отключена"
-    check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:    " "Активно" "Стандартное"
-    check_param "net.core.rmem_max"               "67108864" "Расширенные буферы VPN:    " "Активны (расширенные буферы под высокие скорости)" "Стандартные"
+    check_param "net.ipv4.tcp_syncookies"         "1"        "Защита от флуда (SYN):" "Включена" "Отключена"
+    check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:" "Активно" "Стандартное"
+    check_param "net.core.rmem_max"               "67108864" "Расширенные буферы VPN:" "Активны (расширенные буферы под высокие скорости)" "Стандартные"
 
     audit_profile_state 'Профиль защиты ядра:' /etc/sysctl.d/99-zzz-server-hardening.conf
     local ping_state
@@ -6697,16 +6838,16 @@ mod_server_audit() {
     esac
 
     bobarev_network_human_audit kernel
-    echo -e "\n${C_BOLD}--- 6. Межсетевой экран (UFW), Изоляция и Режим роутера ---${C_RESET}"
+    audit_section '6' 'Межсетевой экран (UFW), Изоляция и Режим роутера'
     if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
         local ufw_out=$(LC_ALL=C ufw status 2>/dev/null || echo "")
-        echo -e "   Статус брандмауэра:        ${C_GREEN} Включен и защищает сервер${C_RESET}"
+        audit_human_row 'Статус брандмауэра:' "${C_GREEN} Включен и защищает сервер${C_RESET}"
         
         local fwd_policy=$(grep -E "^DEFAULT_FORWARD_POLICY=" /etc/default/ufw 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "DROP")
         if [ "$fwd_policy" = "ACCEPT" ]; then
-            echo -e "   Пересылка трафика (Шлюз):  ${C_GREEN} Разрешена (сервер может раздавать интернет)${C_RESET}"
+            audit_human_row 'Пересылка трафика (Шлюз):' "${C_GREEN} Разрешена (сервер может раздавать интернет)${C_RESET}"
         else
-            echo -e "   Пересылка трафика (Шлюз):  ${C_YELLOW}  Запрещена (только локальные подключения)${C_RESET}"
+            audit_human_row 'Пересылка трафика (Шлюз):' "${C_YELLOW}  Запрещена (только локальные подключения)${C_RESET}"
         fi
 
         # BOBAREV AUDIT BEGIN — UFW permissions, not external connectivity.
@@ -6723,24 +6864,24 @@ mod_server_audit() {
         ssh_public=$(printf '%s\n' "$audit_rules" | awk -v p="$ssh_port" '$1=="public" && ($2==p "/tcp" || $2==p || $2=="Anywhere") {print "yes"}')
         ssh_via_ts=$(printf '%s\n' "$audit_rules" | awk -v p="$ssh_port" '$1=="tailscale" && ($2==p "/tcp" || $2==p) {print "yes"}')
         if [ -n "$ssh_public" ]; then
-            echo -e "   ${C_RESET}Доступ к порту SSH:        ${C_YELLOW}Открыт снаружи ($ssh_port/tcp)${C_RESET}"
+            audit_human_row 'Доступ к порту SSH:' "${C_YELLOW}Открыт снаружи ($ssh_port/tcp)${C_RESET}"
         elif [ -n "$ssh_via_ts" ]; then
-            echo -e "   ${C_RESET}Доступ к порту SSH:        ${C_BLUE}Разрешён через Tailscale ($ssh_port/tcp)${C_RESET}"
+            audit_human_row 'Доступ к порту SSH:' "${C_BLUE}Разрешён через Tailscale ($ssh_port/tcp)${C_RESET}"
         else
-            echo -e "   ${C_RESET}Доступ к порту SSH:        ${C_YELLOW}Требует проверки${C_RESET}"
+            audit_human_row 'Доступ к порту SSH:' "${C_YELLOW}Требует проверки${C_RESET}"
         fi
         if command -v tailscale &>/dev/null; then
             ts_all=$(printf '%s\n' "$audit_rules" | awk '$1=="tailscale" && $2=="Anywhere" {print "yes"}')
             ts_ports=$(printf '%s\n' "$audit_rules" | awk '$1=="tailscale" && $2!="Anywhere" {print $2}' | LC_ALL=C sort -u | tr '\n' ' ')
             ts_ports="${ts_ports% }"
             if [ -n "$ts_all" ]; then
-                echo -e "   ${C_RESET}Доступ через Tailscale:    ${C_YELLOW}Разрешён ко всем портам${C_RESET}"
+                audit_human_row 'Доступ через Tailscale:' "${C_YELLOW}Разрешён ко всем портам${C_RESET}"
             elif [ "$ts_ports" = "$ssh_port/tcp" ]; then
-                echo -e "   ${C_RESET}Доступ через Tailscale:    ${C_BLUE}Разрешён для SSH ($ssh_port/tcp)${C_RESET}"
+                audit_human_row 'Доступ через Tailscale:' "${C_BLUE}Разрешён для SSH ($ssh_port/tcp)${C_RESET}"
             elif [ -n "$ts_ports" ]; then
-                echo -e "   ${C_RESET}Доступ через Tailscale:    ${C_BLUE}Разрешён к портам: $ts_ports${C_RESET}"
+                audit_human_row 'Доступ через Tailscale:' "${C_BLUE}Разрешён к портам: $ts_ports${C_RESET}"
             else
-                echo -e "   ${C_RESET}Доступ через Tailscale:    ${C_BLUE}Отдельные разрешения UFW не найдены${C_RESET}"
+                audit_human_row 'Доступ через Tailscale:' "${C_BLUE}Отдельные разрешения UFW не найдены${C_RESET}"
             fi
         fi
         # BOBAREV AUDIT END
@@ -6748,7 +6889,7 @@ mod_server_audit() {
         if [ -n "$wan_if" ]; then
             audit_nat_output "$wan_if"
         else
-            echo -e "   Трансляция NAT на выходе:  ${C_BLUE}  Выходной интерфейс не определён; проверка не выполнена${C_RESET}"
+            audit_human_row 'Трансляция NAT на выходе:' "${C_BLUE}  Выходной интерфейс не определён; проверка не выполнена${C_RESET}"
         fi
 
         if [ -r /etc/bobarev-router-v2/config ]; then
@@ -6765,9 +6906,9 @@ mod_server_audit() {
                     tun*|utun*) r_out_human="${C_GREEN} Через прокси-туннель ($r_out)${C_RESET}" ;;
                     "$wan_if")  r_out_human="${C_BLUE} Напрямую через провайдера ($r_out, без VPN)${C_RESET}" ;;
                 esac
-                echo -e "   Режим локального роутера:  ${C_GREEN} Активен v2 (LAN: $r_lan, шлюз: $r_ip)${C_RESET}"
-                echo -e "   Интернет для клиентов LAN: $r_out_human"
-                echo -e "   Защита от утечки IP:       ${C_GREEN} Включена (изолированная таблица + BR42_WAIT + unreachable metric)${C_RESET}"
+                audit_human_row 'Режим локального роутера:' "${C_GREEN} Активен v2 (LAN: $r_lan, шлюз: $r_ip)${C_RESET}"
+                audit_human_row 'Интернет для клиентов LAN:' "$r_out_human"
+                audit_human_row 'Защита от утечки IP:' "${C_GREEN} Включена (изолированная таблица + BR42_WAIT + unreachable metric)${C_RESET}"
             )
         elif [ -f /etc/default/bobarev-router ]; then
             # shellcheck disable=SC1091
@@ -6796,20 +6937,20 @@ mod_server_audit() {
                 r_ks_human="${C_BLUE}Не требуется (выбран прямой выход без VPN)${C_RESET}"
             fi
 
-            echo -e "   Режим локального роутера:  ${C_GREEN} Активен (раздает сеть в порт $r_lan, шлюз $r_ip)${C_RESET}"
-            echo -e "   Интернет для клиентов LAN: $r_out_human"
-            echo -e "   Трафик самого сервера:     $r_host_human"
-            echo -e "   Защита от утечки IP:       $r_ks_human"
+            audit_human_row 'Режим локального роутера:' "${C_GREEN} Активен (раздает сеть в порт $r_lan, шлюз $r_ip)${C_RESET}"
+            audit_human_row 'Интернет для клиентов LAN:' "$r_out_human"
+            audit_human_row 'Трафик самого сервера:' "$r_host_human"
+            audit_human_row 'Защита от утечки IP:' "$r_ks_human"
         fi
 
         if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules; then
-            echo -e "   Защита контейнеров Docker: ${C_GREEN} Включена (доступ к портам Docker извне закрыт)${C_RESET}"
+            audit_human_row 'Защита контейнеров Docker:' "${C_GREEN} Включена (доступ к портам Docker извне закрыт)${C_RESET}"
         fi
     else
-        echo -e "   Статус брандмауэра:        ${C_RED} Выключен (сервер не защищен)${C_RESET}"
+        audit_human_row 'Статус брандмауэра:' "${C_RED} Выключен (сервер не защищен)${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 7. Закрытая меш-сеть Tailscale и Каскадные туннели ---${C_RESET}"
+    audit_section '7' 'Закрытая меш-сеть Tailscale и Каскадные туннели'
     local cascade_status="${C_BLUE}Не настроен${C_RESET}"
     if [[ -f /etc/naiveproxy/mesh-paused ]]; then
         cascade_status="${C_BLUE}NaiveProxy + XRayMesh: сохранена отметка паузы${C_RESET}"
@@ -6857,10 +6998,10 @@ mod_server_audit() {
     elif systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; then
         cascade_status="${C_GREEN} Шлюз WireGuard wg0 активен (таблица 150)${C_RESET}"
     fi
-    echo -e "   Активный режим каскада:    $cascade_status"
+    audit_human_row 'Активный режим каскада:' "$cascade_status"
 
     if command -v tailscale &>/dev/null; then
-        echo -e "   Служба Tailscale:          ${C_GREEN} Установлена и работает${C_RESET}"
+        audit_human_row 'Служба Tailscale:' "${C_GREEN} Установлена и работает${C_RESET}"
         local ts_name ts_ip ts_exit ts_adv_exit ts_accept ts_stealth
         IFS="|" read -r ts_name _ <<< "$(get_tailscale_whoami)"
         ts_ip=$(tailscale ip -4 2>/dev/null | head -n 1 || echo "Не авторизован")
@@ -6917,27 +7058,27 @@ mod_server_audit() {
             ts_derp_human="${C_YELLOW}  Установлен, но служба derper остановлена${C_RESET}"
         fi
 
-        echo -e "   Имя устройства в сети:     ${C_BLUE}$ts_name${C_RESET}"
-        echo -e "   Внутренний IP-адрес:       ${C_BLUE}$ts_ip${C_RESET}"
-        echo -e "   Внешний шлюз Tailscale:    ${C_BLUE}$ts_exit_human${C_RESET}"
-        echo -e "   Раздает свой интернет:     $ts_adv_exit_human"
-        echo -e "   Доступ к чужим подсетям:   $ts_accept_human"
-        echo -e "   Скрытый режим (Stealth):   $ts_stealth_human"
-        echo -e "   Приоритет правил фаервола: $ts_nf_human"
-        echo -e "   Личный ретранслятор DERP:  $ts_derp_human"
-        echo -e "   Веб-панель (порт 5252):    $ts_web_human"
+        audit_human_row 'Имя устройства в сети:' "${C_BLUE}$ts_name${C_RESET}"
+        audit_human_row 'Внутренний IP-адрес:' "${C_BLUE}$ts_ip${C_RESET}"
+        audit_human_row 'Внешний шлюз Tailscale:' "${C_BLUE}$ts_exit_human${C_RESET}"
+        audit_human_row 'Раздает свой интернет:' "$ts_adv_exit_human"
+        audit_human_row 'Доступ к чужим подсетям:' "$ts_accept_human"
+        audit_human_row 'Скрытый режим (Stealth):' "$ts_stealth_human"
+        audit_human_row 'Приоритет правил фаервола:' "$ts_nf_human"
+        audit_human_row 'Личный ретранслятор DERP:' "$ts_derp_human"
+        audit_human_row 'Веб-панель (порт 5252):' "$ts_web_human"
 
         if systemctl is-active --quiet tailscale-gro.service 2>/dev/null; then
-            echo -e "   Аппаратное ускорение GRO:  ${C_GREEN} Включено${C_RESET}"
+            audit_human_row 'Аппаратное ускорение GRO:' "${C_GREEN} Включено${C_RESET}"
         else
-            echo -e "   Аппаратное ускорение GRO:  ${C_YELLOW}  Отключено${C_RESET}"
+            audit_human_row 'Аппаратное ускорение GRO:' "${C_YELLOW}  Отключено${C_RESET}"
         fi
     else
-        echo -e "   Служба Tailscale:          ${C_YELLOW}  Не установлена${C_RESET}"
+        audit_human_row 'Служба Tailscale:' "${C_YELLOW}  Не установлена${C_RESET}"
     fi
 
     bobarev_network_human_audit scheme
-    echo -e "\n${C_BOLD}--- 8. Сетевые интерфейсы и Открытые порты ---${C_RESET}"
+    audit_section '8' 'Сетевые интерфейсы и Открытые порты'
     local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' || echo "")
     for iface in $active_ifs; do
         local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")
@@ -6965,8 +7106,8 @@ mod_server_audit() {
         local drop_str="${C_GREEN}0 ${C_RESET}"
         [ "$total_drop" -gt 0 ] && drop_str="${C_YELLOW}$total_drop ${C_RESET}"
 
-        echo -e "   Интерфейс ${C_BLUE}$iface${C_RESET} (MTU: ${C_GREEN}$mtu${C_RESET}, Скорость: ${C_GREEN}$speed${C_RESET})"
-        echo -e "     Пакеты: Ошибки = $err_str | Потери = $drop_str"
+        echo -e "   Интерфейс ${C_BLUE}$iface${C_RESET}  (MTU: ${C_GREEN}$mtu${C_RESET} | Скорость: ${C_GREEN}$speed${C_RESET})"
+        audit_human_row '  Пакеты:' "Ошибки = $err_str | Потери = $drop_str"
     done
 
     # Compact interface summary; detailed helper retained.
@@ -6982,13 +7123,18 @@ mod_server_audit() {
             }
         ' | LC_ALL=C sort -u | paste -sd ',' - || true)
         [ -z "$ufw_ports_list" ] && ufw_ports_list="Разрешения Anywhere не найдены"
-        echo -e "   ${C_RESET}Открытые наружу порты:     ${C_BLUE}${ufw_ports_list}${C_RESET}"
+        audit_human_row 'Открытые наружу порты:' "${C_BLUE}${ufw_ports_list}${C_RESET}"
+        if command -v ss &>/dev/null; then
+            local port_procs
+            port_procs=$(ss -Hltnp 2>/dev/null | awk -v p="$ssh_port" '$4 !~ /^127\./ && $4 !~ /^\[::1\]/ {n=split($4,a,":"); if (a[n] ~ /^[0-9]+$/ && a[n]!=p) {port=a[n]; proc=""; for(i=1;i<=NF;i++) if($i ~ /users:\(\("/) { if (match($i, /users:\(\("[^"]+"/)) proc=substr($i, RSTART+9, RLENGTH-10) }; if(proc!="") printf "%s=%s\n", port, proc}' | LC_ALL=C sort -t= -k1,1n -u | awk -F= '{printf "%s(%s) ", $1, $2}' | sed 's/ $//')
+            [ -n "$port_procs" ] && audit_human_row 'Службы на этих портах:' "${C_BLUE}$port_procs${C_RESET}"
+        fi
     elif command -v ss &>/dev/null; then
         local listen_ports=$(ss -tlnH 2>/dev/null | awk '$4 !~ /^127\./ && $4 !~ /^\[::1\]/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -nu | tr '\n' ' ' || echo "")
-        [ -n "$listen_ports" ] && echo -e "   Открытые порты (без UFW):   ${C_YELLOW}$listen_ports${C_RESET}"
+        [ -n "$listen_ports" ] && audit_human_row 'Открытые порты (без UFW):' "${C_YELLOW}$listen_ports${C_RESET}"
     fi
 
-    echo -e "\n${C_BOLD}--- 9. Оптимизация памяти, накопителей и подкачки ---${C_RESET}"
+    audit_section '9' 'Оптимизация памяти, накопителей и подкачки'
     
     audit_profile_state 'Профиль памяти:' /etc/sysctl.d/99-zzz-ram-opt.conf
     local vm_swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "N/A")
@@ -7004,18 +7150,18 @@ mod_server_audit() {
     else
         swappiness_human="${C_BLUE}$vm_swappiness (Пользовательское значение)${C_RESET}"
     fi
-    echo -e "   Режим подкачки памяти:     $swappiness_human"
+    audit_human_row 'Режим подкачки памяти:' "$swappiness_human"
 
     if mount | grep " / " | grep -q "noatime"; then
-        echo -e "   Запись времени чтения:     ${C_GREEN} Отключена (noatime — снижен износ накопителя)${C_RESET}"
+        audit_human_row 'Запись времени чтения:' "${C_GREEN} Отключена (noatime — снижен износ накопителя)${C_RESET}"
     else
-        echo -e "   Запись времени чтения:     ${C_YELLOW}  Включена (лишняя нагрузка на диск)${C_RESET}"
+        audit_human_row 'Запись времени чтения:' "${C_YELLOW}  Включена (лишняя нагрузка на диск)${C_RESET}"
     fi
 
     if mount | grep " / " | grep -q "commit=120"; then
-        echo -e "   Буферизация записи диска:  ${C_GREEN} 120 сек. (бережет флеш-память от частых записей)${C_RESET}"
+        audit_human_row 'Буферизация записи диска:' "${C_GREEN} 120 сек. (бережет флеш-память от частых записей)${C_RESET}"
     else
-        echo -e "   Буферизация записи диска:  ${C_YELLOW}  Стандартная (5 сек.)${C_RESET}"
+        audit_human_row 'Буферизация записи диска:' "${C_YELLOW}  Стандартная (5 сек.)${C_RESET}"
     fi
 
     local swap_human_list=()
@@ -7031,12 +7177,44 @@ mod_server_audit() {
     if [ "${#swap_human_list[@]}" -gt 0 ]; then
         local joined_swap=$(printf "%s, " "${swap_human_list[@]}")
         joined_swap="${joined_swap%, }"
-        echo -e "   Виртуальная память:        ${C_GREEN} $joined_swap${C_RESET}"
+        audit_human_row 'Виртуальная память:' "${C_GREEN} $joined_swap${C_RESET}"
     else
-        echo -e "   Виртуальная память:        ${C_YELLOW}Отключена${C_RESET}"
+        audit_human_row 'Виртуальная память:' "${C_YELLOW}Отключена${C_RESET}"
     fi
 
-    echo -e "\n${C_CYAN}=================================================================${C_RESET}"
+    # --- 10. Профиль Bobarev Shell: что уже настроено на этом сервере ---
+    audit_section '10' 'Профиль Bobarev Shell (что настроено скриптом)'
+    local feat_on="${C_GREEN}✔ Настроено${C_RESET}"
+    local feat_off="${C_BLUE}— Не настроено${C_RESET}"
+    [ -r /etc/bobarev-router-v2/config ] && audit_human_row 'Роутер SBC (режим шлюза):' "$feat_on" || audit_human_row 'Роутер SBC (режим шлюза):' "$feat_off"
+    [ -f /etc/default/bobarev-router ] && audit_human_row 'Роутер SBC (профиль v1):' "$feat_on" || audit_human_row 'Роутер SBC (профиль v1):' "$feat_off"
+    [ -f /etc/default/bobarev-cascade ] && audit_human_row 'Каскад Tunnel-in-Tunnel:' "$feat_on" || audit_human_row 'Каскад Tunnel-in-Tunnel:' "$feat_off"
+    if is_naive_active; then audit_human_row 'Прокси NaiveProxy (DPI):' "$feat_on"; else audit_human_row 'Прокси NaiveProxy (DPI):' "$feat_off"; fi
+    if systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then audit_human_row 'Xray VLESS REALITY:' "$feat_on"; else audit_human_row 'Xray VLESS REALITY:' "$feat_off"; fi
+    if systemctl is-active --quiet xraymesh.service 2>/dev/null; then audit_human_row 'XRayMesh (мост выхода):' "$feat_on"; else audit_human_row 'XRayMesh (мост выхода):' "$feat_off"; fi
+    [ -f /etc/wireguard/wg0.conf ] && audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_on" || audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_off"
+    [ -f /etc/wireguard/warp.conf ] && audit_human_row 'Cloudflare WARP (выход):' "$feat_on" || audit_human_row 'Cloudflare WARP (выход):' "$feat_off"
+    if command -v tailscale &>/dev/null; then audit_human_row 'Закрытая сеть Tailscale:' "$feat_on"; else audit_human_row 'Закрытая сеть Tailscale:' "$feat_off"; fi
+    [ -f /etc/systemd/system/derper.service ] && audit_human_row 'Личный DERP-ретранслятор:' "$feat_on" || audit_human_row 'Личный DERP-ретранслятор:' "$feat_off"
+    [ -f /etc/sysctl.d/99-zzz-server-hardening.conf ] && audit_human_row 'Тюнинг защиты ядра:' "$feat_on" || audit_human_row 'Тюнинг защиты ядра:' "$feat_off"
+    [ -f /etc/sysctl.d/99-zzz-ram-opt.conf ] && audit_human_row 'Тюнинг памяти/zRAM:' "$feat_on" || audit_human_row 'Тюнинг памяти/zRAM:' "$feat_off"
+    if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null; then audit_human_row 'Изоляция Docker (UFW):' "$feat_on"; else audit_human_row 'Изоляция Docker (UFW):' "$feat_off"; fi
+    audit_human_row 'Не настроенное доступно:' "${C_BLUE}в главном меню скрипта (разделы 3–14)${C_RESET}"
+
+    # --- Итоговая сводка: пункты, отмеченные жёлтым/красным ---
+    echo ""
+    echo -e "${C_CYAN}=================================================================${C_RESET}"
+    local notes_count=${#AUDIT_NOTES[@]}
+    if [ "$notes_count" -eq 0 ]; then
+        echo -e "${C_BOLD} ИТОГ АУДИТА:${C_RESET} ${C_GREEN}замечаний нет — сервер в отличной форме${C_RESET}"
+    else
+        echo -e "${C_BOLD} ИТОГ АУДИТА:${C_RESET} ${C_YELLOW}${notes_count} пункт(ов) требуют внимания${C_RESET}"
+        local note_idx
+        for note_idx in "${AUDIT_NOTES[@]}"; do
+            echo -e "   ${C_YELLOW}•${C_RESET} $note_idx"
+        done
+    fi
+    echo -e "${C_CYAN}=================================================================${C_RESET}"
 }
 
 # 18. Универсальный режим локального маршрутизатора (с поддержкой SBC-клиента WireGuard/WARP)

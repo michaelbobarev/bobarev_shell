@@ -1,39 +1,12 @@
 #!/bin/bash
-set -Eeuo pipefail
-bobarev_error_report() {
-    local rc="$1" line="$2" fn="$3"
-    printf '\nBOBAREV: ошибка %s, строка %s, функция %s. Установка не подтверждена.\n' "$rc" "$line" "$fn" >&2
-    return "$rc"
-}
-trap 'bobarev_error_report "$?" "$LINENO" "${FUNCNAME[0]:-main}"' ERR
+set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.17 (Restored Full Edition)
+# Версия: 3.18.18 (Optimized & Deduplicated Edition)
 # ==============================================================================
 
-# Menu headers use the exact selected main-menu label.
-BOBAREV_SECTION_TITLE=''
-whiptail() {
- local -a forwarded=()
- while (($#)); do
-  if [[ "$1" == --title && -n "${BOBAREV_SECTION_TITLE:-}" ]]; then
-   shift
-   if (($#)); then shift; fi
-   continue
-  fi
-  forwarded+=("$1")
-  shift
- done
- if [[ -n "${BOBAREV_SECTION_TITLE:-}" ]]; then
-  command whiptail --title "$BOBAREV_SECTION_TITLE" "${forwarded[@]}"
- else
-  command whiptail "${forwarded[@]}"
- fi
-}
-export BOBAREV_SECTION_TITLE
-export -f whiptail
-declare -A BOBAREV_MENU_TITLES=()
+SCRIPT_VERSION="3.18.18"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -71,7 +44,6 @@ WEBROOT="/var/www/html"
 LOG_DIR="/var/log/caddy"
 UDP2RAW_BIN="/usr/local/bin/udp2raw"
 UDP2RAW_SERVICE="/etc/systemd/system/bobarev-udp2raw.service"
-
 
 SYSTEM_TYPE="Cloud_VPS"
 if [ -f /etc/armbian-release ] || [ -f /etc/default/armbian-zram ] || grep -q -i "armbian\|nanopi\|raspberry" /etc/os-release 2>/dev/null; then
@@ -115,25 +87,7 @@ get_cpu_rps_mask() {
     python3 -c "print(hex((1 << $ncpu) - 1)[2:])" 2>/dev/null || printf '%x' $(( (1 << (ncpu > 16 ? 16 : ncpu)) - 1 ))
 }
 
-SILENT_RUN_LAST_RC=0
-silent_run() {
-    SILENT_RUN_LAST_RC=0
-    "$@" >/dev/null 2>&1 || SILENT_RUN_LAST_RC=$?
-    return 0
-}
-run_optional() {
-    "$@" >/dev/null 2>&1 || true
-    return 0
-}
-run_required() {
-    local label="$1" rc=0
-    shift
-    "$@" || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        printf 'Ошибка: %s (код %s)\n' "$label" "$rc" >&2
-    fi
-    return "$rc"
-}
+silent_run() { "$@" >/dev/null 2>&1 || true; }
 
 verify_sha256() {
     local file="$1"
@@ -213,7 +167,6 @@ is_warp_active() {
     ip link show warp >/dev/null 2>&1 && return 0
     return 1
 }
-
 
 is_udp2raw_active() {
     systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null && return 0
@@ -302,37 +255,19 @@ disable_ufw_strict_rpfilter() {
 }
 
 ensure_ufw_mangle_tcpmss() {
-    command -v python3 >/dev/null 2>&1 || { echo 'Для безопасной настройки MSS нужен Python 3.' >&2; return 1; }
-    python3 - <<'BOBAREV_SAFE_MSS'
-from pathlib import Path
-import tempfile, subprocess, shutil, os, time
-p=Path('/etc/ufw/before.rules')
-if not p.is_file() or p.is_symlink():
-    raise SystemExit('Обычный файл UFW before.rules не найден; изменения отменены.')
-old=p.read_text();lines=old.splitlines(keepends=True);out=[];table=None
-for line in lines:
-    t=line.strip()
-    if t.startswith('*'):table=t
-    if not (table=='*mangle' and t=='-F FORWARD'):out.append(line)
-    if t=='COMMIT':table=None
-new=''.join(out)
-# Existing MSS profiles are not overwritten or broadened.
-if not any('TCPMSS' in l and not l.lstrip().startswith('#') for l in new.splitlines()):
-    raise SystemExit('MSS-правила не найдены: общий профиль автоматически не добавляется. Выберите сетевой сценарий.')
-if new!=old:
-    backup=Path(tempfile.mkdtemp(prefix='bobarev-mss-backup-',dir='/root'))
-    os.chmod(backup,0o700);shutil.copy2(p,backup/p.name)
-    fd,tmp=tempfile.mkstemp(prefix='.bobarev-mss-',dir=p.parent)
-    try:
-        with os.fdopen(fd,'w') as f:f.write(new)
-        st=p.stat();os.chown(tmp,st.st_uid,st.st_gid);os.chmod(tmp,st.st_mode & 0o777)
-        with open(tmp) as f:subprocess.run(['iptables-restore','--test','--noflush'],stdin=f,check=True)
-        os.replace(tmp,p)
-        print('Убрана очистка общей цепочки. Бэкап:',backup)
-    finally:
-        if os.path.exists(tmp):os.unlink(tmp)
-print('Существующие MSS-профили сохранены. IPv6 и работающий firewall не изменены.')
-BOBAREV_SAFE_MSS
+    if [ -f /etc/ufw/before.rules ]; then
+        if ! grep -q "TCPMSS" /etc/ufw/before.rules; then
+            sed -i '1s/^/*mangle\n:FORWARD ACCEPT [0:0]\n-F FORWARD\n-A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\nCOMMIT\n\n/' /etc/ufw/before.rules
+        elif ! grep -q "^-F FORWARD" /etc/ufw/before.rules; then
+            sed -i '/^:FORWARD ACCEPT/a -F FORWARD' /etc/ufw/before.rules 2>/dev/null || true
+        fi
+    fi
+    if [ -f /etc/ufw/before6.rules ]; then
+        sed -i '/^\*mangle/,/^COMMIT/d' /etc/ufw/before6.rules 2>/dev/null || true
+    fi
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -t mangle -F FORWARD 2>/dev/null || true
+    fi
 }
 
 ensure_ufw_nat_rule() {
@@ -348,155 +283,52 @@ ensure_ufw_nat_rule() {
             sed -i '/^\*nat/a :POSTROUTING ACCEPT [0:0]' /etc/ufw/before.rules
         fi
     fi
-    if ! grep -qxF -- "$rule" /etc/ufw/before.rules; then
+    if ! grep -qF -- "$rule" /etc/ufw/before.rules; then
         sed -i "/^:POSTROUTING/a $rule" /etc/ufw/before.rules
     fi
 }
 
-ensure_ufw_wan_nat_afterinit() {
-    local wandev="$1"
-    local chain="$2"
-    local helper="/usr/local/sbin/bobarev-wan-nat-iptables"
-    local state="/etc/default/bobarev-wan-nat"
-    local init="/etc/ufw/after.init"
-    local hash
-    hash=$(printf '%s' "$wandev" | sha256sum | cut -c1-10)
-    mkdir -p /etc/default
-    touch "$state"
-    grep -v "=\"$wandev|" "$state" > "$state.tmp" 2>/dev/null || true
-    mv "$state.tmp" "$state"
-    printf 'BBR_WAN_NAT_%s="%s|%s"\n' "$hash" "$wandev" "$chain" >> "$state"
-    if [ ! -x "$helper" ] || ! grep -q 'BOBAREV WAN NAT' "$helper" 2>/dev/null; then
-        if [ -f "$helper" ]; then
-            cp -a "$helper" "${helper}.bak-$(date +%s)"
-        fi
-        cat > "$helper" <<'HELPER_EOF'
-#!/bin/sh
-state="/etc/default/bobarev-wan-nat"
-[ -f "$state" ] || exit 0
-action="$1"
-entries=$(sed -n 's/^BBR_WAN_NAT_[^=]*="\([^|]*\)|\([^"]*\)"$/\1|\2/p' "$state")
-case "$action" in
-    start|reload|enable)
-        printf '%s\n' "$entries" | while IFS='|' read -r iface chain; do
-            [ -n "$iface" ] || continue
-            [ -n "$chain" ] || continue
-            iptables -t nat -C POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || \
-                iptables -t nat -A POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
-        done
-        ;;
-    stop|flush-all|disable)
-        printf '%s\n' "$entries" | while IFS='|' read -r iface chain; do
-            [ -n "$iface" ] || continue
-            [ -n "$chain" ] || continue
-            while iptables -t nat -D POSTROUTING -o "$iface" -j "$chain" 2>/dev/null; do :; done
-        done
-        ;;
-esac
-exit 0
-HELPER_EOF
-        chmod 755 "$helper"
-    fi
-    if [ ! -f "$init" ]; then
-        printf '#!/bin/sh\n' > "$init"
-    fi
-    if ! grep -qF 'bobarev-wan-nat-iptables' "$init"; then
-        cat >> "$init" <<'INIT_EOF'
-if [ -x /usr/local/sbin/bobarev-wan-nat-iptables ]; then
-    /usr/local/sbin/bobarev-wan-nat-iptables "$@" || true
-fi
-INIT_EOF
-    fi
-    chmod 755 "$init" 2>/dev/null || true
-}
-
-
 apply_wan_exit_nat() {
-    local wan_dev="$1" quiet="${2:-false}"
-    [[ "$wan_dev" =~ ^[a-zA-Z0-9_.:-]+$ ]] || { echo 'Не указан корректный выходной интерфейс.' >&2; return 1; }
-    command -v python3 >/dev/null 2>&1 || return 1
-    python3 - "$wan_dev" "$quiet" <<'BOBAREV_SAFE_WAN_NAT'
-import sys, subprocess, shlex, json, hashlib, tempfile, shutil, os
-from pathlib import Path
-iface,quiet=sys.argv[1:]
-def run(args,check=True,**kw):
-    return subprocess.run(args,text=True,capture_output=True,check=check,**kw)
-# Serialize script-managed NAT writes. Other firewall managers must not be run concurrently.
-import fcntl
-lock=open('/run/bobarev-wan-nat.lock','a');fcntl.flock(lock,fcntl.LOCK_EX)
-p=Path('/etc/ufw/before.rules')
-if not p.is_file() or p.is_symlink():raise SystemExit('Файл UFW не найден; NAT не изменён.')
-addresses=json.loads(run(['ip','-j','-4','address','show','dev',iface]).stdout)
-addr=[a for link in addresses for a in link.get('addr_info',[]) if a.get('scope')=='global' and a.get('family')=='inet']
-if not addr:raise SystemExit('На выходном интерфейсе нет адреса IPv4; NAT не изменён.')
-a=addr[0];target=['-j','SNAT','--to-source',a['local']] if a['prefixlen']==32 else ['-j','MASQUERADE']
-chain='BBR_WAN_'+hashlib.sha256(iface.encode()).hexdigest()[:10]
-legacy=['-A','POSTROUTING','-o',iface]+target
-old=p.read_text()
-legacy_line=' '.join(legacy)
-saved_legacy=any(shlex.split(l)==legacy for l in old.splitlines() if l.strip() and not l.lstrip().startswith('#'))
-runtime=run(['iptables','-w','5','-t','nat','-S','POSTROUTING']).stdout
-legacy_count=sum(shlex.split(l)==legacy for l in runtime.splitlines())
-if legacy_count>1:raise SystemExit('Есть старые копии NAT. Сначала удалите подтверждённый повтор; автоматическая очистка отменена.')
-if legacy_count and not saved_legacy:
-    raise SystemExit('Найдено правило неизвестного владельца. Автоматическая миграция отменена.')
-# Refuse to replace a different legacy SNAT/MASQUERADE selection.
-for line in runtime.splitlines():
-    t=shlex.split(line)
-    if '-o' in t and t[t.index('-o')+1]==iface and '-j' in t and t[t.index('-j')+1] in ('SNAT','MASQUERADE') and t!=legacy:
-        raise SystemExit('Для интерфейса есть другой NAT-профиль. Автоматическая замена отменена.')
-start='# BOBAREV WAN NAT '+iface+' BEGIN';end='# BOBAREV WAN NAT '+iface+' END'
-# Marked block contains only the script-owned chain and jump.
-block='\n'.join([start,':'+chain+' - [0:0]','-F '+chain,'-A '+chain+' '+ ' '.join(target),end])+'\n'
-lines=old.splitlines(keepends=True);out=[];inside=False;nat=False;inserted=False;blocks=0
-for line in lines:
-    t=line.strip()
-    if t==start:inside=True;blocks+=1;continue
-    if inside:
-        if t==end:inside=False
-        continue
-    if t=='*nat':nat=True
-    if nat and t==legacy_line:continue
-    if nat and t=='COMMIT' and not inserted:out.append(block);inserted=True
-    out.append(line)
-    if t=='COMMIT':nat=False
-if inside or blocks>1:raise SystemExit('Неоднозначный блок NAT; изменение отменено.')
-new=''.join(out)
-if not inserted:new='*nat\n:POSTROUTING ACCEPT [0:0]\n'+block+'COMMIT\n\n'+new
-backup=Path(tempfile.mkdtemp(prefix='bobarev-wan-nat-',dir='/root'));os.chmod(backup,0o700)
-shutil.copy2(p,backup/p.name)
-(backup/'iptables.v4').write_text(run(['iptables-save']).stdout);os.chmod(backup/'iptables.v4',0o600)
-fd,tmp=tempfile.mkstemp(prefix='.bobarev-nat-',dir=p.parent)
-try:
-    with os.fdopen(fd,'w') as f:f.write(new)
-    st=p.stat();os.chown(tmp,st.st_uid,st.st_gid);os.chmod(tmp,st.st_mode & 0o777)
-    with open(tmp) as f:
-        test=subprocess.run(['iptables-restore','--test','--noflush'],stdin=f,text=True,capture_output=True)
-    if test.returncode:raise SystemExit('Проверка NAT не пройдена. '+test.stderr)
-    current=run(['iptables','-w','5','-t','nat','-S',chain],check=False)
-    expected=['-A',chain]+target
-    if current.returncode==0:
-        rules=[shlex.split(l) for l in current.stdout.splitlines() if l.startswith('-A ')]
-        if rules not in ([],[expected]):raise SystemExit('Цепочка занята другим профилем; NAT не изменён.')
-    else:run(['iptables','-w','5','-t','nat','-N',chain])
-    if run(['iptables','-w','5','-t','nat','-C',chain]+target,check=False).returncode:
-        run(['iptables','-w','5','-t','nat','-A',chain]+target)
-    jump=['POSTROUTING','-o',iface,'-j',chain]
-    if run(['iptables','-w','5','-t','nat','-C']+jump,check=False).returncode:
-        run(['iptables','-w','5','-t','nat','-A']+jump)
-    os.replace(tmp,p)
-    # Only migrate one exact rule also present in saved UFW configuration.
-    if saved_legacy and legacy_count==1:
-        run(['iptables','-w','5','-t','nat','-D']+legacy[1:])
-    if quiet!='true':print('NAT для '+iface+' настроен без повторного добавления. Бэкап: '+str(backup))
-except BaseException:
-    print('Ошибка. Бэкап: '+str(backup)+'. Проверьте правила; автоматический откат всего firewall не выполняется.',file=sys.stderr)
-    raise
-finally:
-    if os.path.exists(tmp):os.unlink(tmp)
-BOBAREV_SAFE_WAN_NAT
-    local chain="BBR_WAN_$(printf '%s' "$wandev" | sha256sum | cut -c1-10)"
-    ensure_ufw_wan_nat_afterinit "$wandev" "$chain"
+    local wan_dev="$1"
+    local quiet="${2:-false}"
+    [ -z "$wan_dev" ] && return 0
+
+    local iface_ip_info=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null || echo "")
+    local pub_ip=$(echo "$iface_ip_info" | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+    local is_mask_32=$(echo "$iface_ip_info" | grep -qw "/32" && echo "yes" || echo "no")
+
+    for r_if in $(ip -br link show 2>/dev/null | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' | grep -vE "^(lo|${wan_dev}|docker.*|veth.*|br-.*)$" || true); do
+        iptables -C FORWARD -i "$r_if" -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$r_if" -o "$wan_dev" -j ACCEPT 2>/dev/null || true
+        iptables -C FORWARD -i "$wan_dev" -o "$r_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o "$r_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    done
+
+    iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -s 10.144.144.0/24 -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+    while iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null; do :; done
+    if [ -n "$pub_ip" ]; then
+        iptables -t nat -D POSTROUTING -s 100.64.0.0/10 -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null || true
+        while iptables -t nat -D POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip" 2>/dev/null; do :; done
+    fi
+
+    if [ -f /etc/ufw/before.rules ]; then
+        sed -i "/-o ${wan_dev} -j MASQUERADE/d" /etc/ufw/before.rules 2>/dev/null || true
+        sed -i "/-o ${wan_dev} -j SNAT/d" /etc/ufw/before.rules 2>/dev/null || true
+    fi
+
+    if [ "$is_mask_32" = "yes" ] && [ -n "$pub_ip" ]; then
+        iptables -t nat -A POSTROUTING -o "$wan_dev" -j SNAT --to-source "$pub_ip"
+        ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j SNAT --to-source $pub_ip"
+        if [ "$quiet" != "true" ]; then
+            echo -e "${C_BLUE} Обнаружена маска /32 на интерфейсе $wan_dev: закреплена постоянная привязка SNAT ($pub_ip).${C_RESET}"
+        fi
+    else
+        iptables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE
+        ensure_ufw_nat_rule "-A POSTROUTING -o $wan_dev -j MASQUERADE"
+        if [ "$quiet" != "true" ]; then
+            echo -e "${C_BLUE} Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
+        fi
+    fi
+    return 0
 }
 
 select_and_apply_routed_interfaces() {
@@ -957,16 +789,6 @@ manage_naive_users_menu() {
 # НОВЫЕ МОДУЛИ V 3.15 (TUI EDITION)
 # ==========================================
 
-
-
-
-
-
-
-
-
-
-
 while true; do
         MODULE_CANCELED=false
         local u_cnt=0
@@ -1172,7 +994,6 @@ print_naive_shadowrocket_links() {
     echo -e "\n${C_BLUE}HTTP/2 может улучшить производительность при множестве параллельных запросов, но не гарантирует более высокую скорость или стабильность. Фактический результат зависит от сети, клиента и удалённого сайта.${C_RESET}"
 }
 
-
 write_bobarev_cascade_ru_script() {
     cat << 'RU_SH_EOF' > /usr/local/bin/bobarev-cascade-ru.sh
 #!/bin/bash
@@ -1266,8 +1087,6 @@ RU_SVC_EOF
     silent_run systemctl daemon-reload
     silent_run systemctl enable --now bobarev-cascade-ru.service
 }
-
-
 
 setup_hybrid_wg_routing() {
     echo -e "${C_CYAN} === НАСТРОЙКА ГИБРИДНОГО ШЛЮЗА: NAIVEPROXY + TAILSCALE EXIT NODE -> WG0 ===${C_RESET}"
@@ -1417,7 +1236,6 @@ EOF
         echo -e "${C_YELLOW} Повторная инициализация интерфейса wg0...${C_RESET}"
         ip link del dev wg0 2>/dev/null || true
         systemctl restart wg-quick@wg0
-
 
     fi
 
@@ -1688,7 +1506,6 @@ setup_standalone_naive() {
         esac
     done
 }
-
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): NAIVEPROXY -> TAILSCALE ===${C_RESET}"
@@ -1992,37 +1809,45 @@ manage_cascade_naive_ts_warp() {
 # МОДУЛЬ 20: ПРЯМОЙ СКОРОСТНОЙ КАСКАД (NAIVEPROXY -> WG + UDP2RAW -> WARP)
 # ==============================================================================
 check_required_ports_free() {
- local role="${1:-}" spec port proto family addr output failed=0
- shift || return 2
- command -v ss >/dev/null && [[ $EUID -eq 0 ]] || { echo 'Проверка портов не выполнена: нужны root и ss.' >&2; return 2; }
- for spec in "$@"; do
-  # Legacy integer requests conservatively check both protocols and families.
-  port="$spec"
-  [[ "$port" =~ ^[0-9]{1,5}$ ]] && ((10#$port >= 1 && 10#$port <= 65535)) || { echo "Некорректный порт: $spec" >&2; return 2; }
-  for proto in t u; do
-   for family in 4 6; do
-    if ! output=$(ss -"$family" -"$proto" -lnpH "sport = :$port" 2>&1); then
-     printf 'Проверка не выполнена: %s\n' "$output" >&2; return 2
-    fi
-    if [[ -n "$output" ]]; then
-     printf 'Занятые привязки: порт %s, протокол %s, IPv%s\n%s\n' "$port" "$proto" "$family" "$output" >&2
-     failed=1
-    fi
-   done
-  done
- done
- ((failed == 0)) || { echo 'Конфликт: автоматическое освобождение и исключения по имени запрещены.' >&2; return 1; }
- echo 'На момент проверки занятых привязок не обнаружено; это не гарантия последующего запуска.'
-}
+    # Проверяет, не заняты ли целевые порты СТОРОННИМИ процессами (игнорируя наши собственные caddy, udp2raw и ядерный интерфейс wg-cascade)
+    local role="$1" # ru | foreign
+    shift
+    local ports=("$@")
+    local conflict_found=false
 
+    # Определяем текущий порт нашего собственного интерфейса wg-cascade (если он уже запущен в ядре),
+    # так как ядерный модуль WireGuard в ss -tulpn не имеет поля users:(...)
+    local own_wg_port=""
+    if ip link show wg-cascade >/dev/null 2>&1; then
+        own_wg_port=$(wg show wg-cascade listen-port 2>/dev/null | tr -d '[:space:]' || echo "")
+    fi
 
-bobarev_verify_download() {
- local file="$1" expected="$2" actual
- [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Нет доверенной ожидаемой SHA256: установка запрещена.' >&2; return 1; }
- actual=$(sha256sum -- "$file") || return 1
- actual=${actual%% *}
- [[ "${actual,,}" == "${expected,,}" ]] || { echo 'SHA256 не совпадает: установка запрещена.' >&2; return 1; }
- echo 'SHA256 скачанного артефакта подтверждена.'
+    for p in "${ports[@]}"; do
+        [ -z "$p" ] && continue
+        # Если этот порт занят нашим же ядерным интерфейсом wg-cascade — пропускаем (он будет штатно перезапущен)
+        if [ -n "$own_wg_port" ] && [ "$p" = "$own_wg_port" ]; then
+            continue
+        fi
+        local line=""
+        line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|udp2raw|hysteria|xray|derper)"' | head -n 1 || echo "")
+        if [ -n "$line" ]; then
+            # Если на порту 51889 или порту из /etc/wireguard/wg-cascade.conf висит ядерный сокет без users:(...), это наш wg-cascade
+            if ! echo "$line" | grep -q "users:(" && { [ "$p" = "51889" ] || grep -qE "^ListenPort[[:space:]]*=[[:space:]]*${p}\b" /etc/wireguard/wg-cascade.conf 2>/dev/null; }; then
+                continue
+            fi
+            local proto=$(echo "$line" | awk '{print $1}')
+            local proc_info=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "ядерный модуль / неизвестный процесс")
+            local pid_info=$(echo "$line" | grep -oP 'pid=\K[0-9]+' || echo "-")
+            echo -e "${C_RED} Внимание: Порт ${p}/${proto} уже занят сторонним процессом '${proc_info}' (PID: ${pid_info})!${C_RESET}"
+            conflict_found=true
+        fi
+    done
+
+    if [ "$conflict_found" = true ]; then
+        echo -e "${C_YELLOW} Пожалуйста, освободите указанные порты (остановите/удалите конфликтующий процесс) и запустите настройку заново.${C_RESET}"
+        return 1
+    fi
+    return 0
 }
 
 ensure_udp2raw_installed() {
@@ -2034,10 +1859,7 @@ ensure_udp2raw_installed() {
     apt-get update -qq
     apt-get install -yq curl wget tar iptables
 
-    local u2r_sha="${BOBAREV_UDP2RAW_SHA256:-}"
-    [[ "$u2r_sha" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Задайте доверенную BOBAREV_UDP2RAW_SHA256 для архива 20230206.0.' >&2; return 1; }
-    local tmp_u2r
-    tmp_u2r=$(mktemp -d /root/.udp2raw-XXXXXX) || return 1
+    local tmp_u2r=$(mktemp -d /root/.udp2raw-XXXXXX)
     local u2r_url="https://github.com/wangyu-/udp2raw/releases/download/20230206.0/udp2raw_binaries.tar.gz"
 
     if ! wget -q --tries=3 --timeout=30 "$u2r_url" -O "${tmp_u2r}/udp2raw.tar.gz"; then
@@ -2046,9 +1868,13 @@ ensure_udp2raw_installed() {
         return 1
     fi
 
-    if ! bobarev_verify_download "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
-        rm -rf "$tmp_u2r"
-        return 1
+    # Хеш для версии 20230206.0 (рекомендуется уточнить актуальный SHA256)
+    local u2r_sha="${BOBAREV_UDP2RAW_SHA256:-}"
+    if [ -n "$u2r_sha" ]; then
+        if ! verify_sha256 "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
+            rm -rf "$tmp_u2r"
+            return 1
+        fi
     fi
 
     if ! tar -xzf "${tmp_u2r}/udp2raw.tar.gz" -C "$tmp_u2r" 2>/dev/null; then
@@ -2067,9 +1893,7 @@ ensure_udp2raw_installed() {
     fi
 
     if [ -f "${tmp_u2r}/${bin_name}" ]; then
-        if ! install -m 755 "${tmp_u2r}/${bin_name}" "$UDP2RAW_BIN"; then
-            rm -rf "$tmp_u2r"; return 1
-        fi
+        install -m 755 "${tmp_u2r}/${bin_name}" "$UDP2RAW_BIN"
     else
         rm -rf "$tmp_u2r"
         echo -e "${C_RED} Не найден подходящий бинарник udp2raw (${bin_name}) для архитектуры ${arch}!${C_RESET}"
@@ -2081,24 +1905,24 @@ ensure_udp2raw_installed() {
 }
 
 ensure_hysteria_installed() {
- if [[ -x /usr/local/bin/hysteria ]]; then
-  echo 'Hysteria уже существует; эта операция не подтверждает происхождение существующего файла.'
-  return 0
- fi
- local arch h_arch=amd64 tmp expected="${BOBAREV_HYSTERIA_SHA256:-}"
- [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Задайте доверенную BOBAREV_HYSTERIA_SHA256 для скачиваемого бинарника и архитектуры.' >&2; return 1; }
- arch=$(dpkg --print-architecture 2>/dev/null) || return 1
- if [[ "$arch" == arm64 || "$arch" == aarch64 ]]; then h_arch=arm64; fi
- tmp=$(mktemp -d /usr/local/bin/.bobarev-hysteria.XXXXXX) || return 1
- if ! curl -fsSL "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${h_arch}" -o "$tmp/hysteria" ||
-    ! bobarev_verify_download "$tmp/hysteria" "$expected"; then
-  rm -rf "$tmp"; return 1
- fi
- if ! chmod 755 "$tmp/hysteria" || ! mv -T -- "$tmp/hysteria" /usr/local/bin/hysteria; then
-  rm -rf "$tmp"; return 1
- fi
- rm -rf "$tmp"
- echo 'Hysteria установлена после проверки SHA256; работоспособность службы проверяется отдельно.'
+    if [ -x "/usr/local/bin/hysteria" ]; then
+        return 0
+    fi
+    echo -e "${C_BLUE} Скачивание и установка Hysteria 2...${C_RESET}"
+    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+    local h_arch="amd64"
+    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
+        h_arch="arm64"
+    fi
+
+    local h_url="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${h_arch}"
+    if ! curl -fsSL "$h_url" -o /usr/local/bin/hysteria; then
+        echo -e "${C_RED} Ошибка скачивания Hysteria!${C_RESET}"
+        return 1
+    fi
+    chmod +x /usr/local/bin/hysteria
+    echo -e "${C_GREEN} Hysteria 2 успешно установлена.${C_RESET}"
+    return 0
 }
 
 clean_udp2raw_iptables() {
@@ -3222,7 +3046,6 @@ manage_cascade_hysteria_menu() {
     done
 }
 
-
 # ==============================================================================
 # МОДУЛЬ 21: КАСКАД 3 (NAIVEPROXY -> XRAY REALITY VLESS -> WARP / ЧИСТЫЙ IP)
 # ==============================================================================
@@ -4284,7 +4107,6 @@ COMMIT
 DOCKER_UFW_EOF
 }
 
-
 configure_rps_for_interfaces() {
     local wan_if=$(get_wan_if)
     local cpu_mask=$(get_cpu_rps_mask)
@@ -4496,14 +4318,6 @@ smart_menu() {
     local var_name="$6"
     shift 6
     local options=("$@")
-    if [[ "$title" == *'ГЛАВНОЕ МЕНЮ'* ]]; then
-        local n key label
-        for ((n=0;n<${#options[@]};n+=2)); do
-            key=${options[n]}; label=${options[n+1]}
-            label="${label#"${label%%[![:space:]]*}"}"
-            BOBAREV_MENU_TITLES["$key"]="$label"
-        done
-    fi
 
     local wt_choice
     if wt_choice=$(whiptail --title "$title" --menu "$msg" "$height" "$width" "$menu_h" "${options[@]}" 3>&1 1>&2 2>&3); then
@@ -4521,8 +4335,6 @@ backup_file() {
         echo -e "${C_BLUE} Создана резервная копия: ${file}.bak${C_RESET}"
     fi
 }
-
-
 
 check_system_resources() {
     echo -e "${C_CYAN} Проверка системных ресурсов...${C_RESET}"
@@ -5678,7 +5490,7 @@ mod_tailscale() {
         local nf_cur=$(get_tailscale_netfilter_mode)
 
         local ts_choice
-        if ! smart_menu "Настройка закрытой сети" "" 21 $WT_WIDTH 13 "ts_choice" \
+        if ! smart_menu "Настройка закрытой сети Tailscale" "" 20 $WT_WIDTH 12 "ts_choice" \
         "1" " Авторизация" \
         "2" " Настройка шлюза" \
         "3" " Трансляция локальных сетей" \
@@ -5688,9 +5500,8 @@ mod_tailscale() {
         "7" " Локальный веб-интерфейс" \
         "8" " Приоритет сетевых правил" \
         "9" " Личный ретранслятор (DERP)" \
-        "10" " Каскад: NaiveProxy + Tailscale + WARP" \
+        "10" " Диагностика и дополнительные настройки Tailscale" \
         "11" " Полный сброс" \
-        "12" " Диагностика и дополнительные настройки Tailscale" \
         "0" " Вернуться назад"; then
             break
         fi
@@ -5699,7 +5510,7 @@ mod_tailscale() {
         clear
 
         case "$ts_choice" in
-            12) ts42_tools ;;
+            10) ts42_tools ;;
             1)
                 if is_tailscale_authenticated; then
                     if prompt_yn "Узел уже находится в сети. Желаете выполнить повторную привязку?" "false"; then
@@ -5878,9 +5689,6 @@ mod_tailscale() {
                 ;;
             9)
                 manage_custom_derp
-                ;;
-            10)
-                manage_cascade_naive_ts_warp
                 ;;
             11)
                 if prompt_yn "Полностью сбросить все сетевые параметры к заводским значениям?" "false"; then
@@ -7248,7 +7056,7 @@ br26_apply() {
    tailscale set --exit-node-allow-lan-access=true || exit 1
   fi
   ts42_wait_running || exit 1
-  ts_wait_exit_node || { echo 'Нет default tailscale0'; exit 1; }
+  ts42_wait_default || { echo 'Нет default tailscale0'; exit 1; }
   ts42_ipv4 || exit 1
   [[ -n "$EXIT_NODE" ]] || { echo 'Для загрузки нужен явный EXIT_NODE'; exit 1; }
   ts43_install_exit_restore "$EXIT_NODE" || exit 1
@@ -8096,30 +7904,6 @@ br_snapshot() {
  systemctl list-unit-files > "$d/units.txt"
  command -v tailscale >/dev/null && tailscale debug prefs > "$d/tailscale-prefs.json" 2>/dev/null || true
  echo "Резервная копия: $d (содержит приватные настройки; не публикуйте)"
-}
-
-ts_is_online() {
- command -v tailscale >/dev/null 2>&1 || return 1
- local js state online
- js="$(tailscale status --json 2>/dev/null)" || return 1
- [[ -n "$js" ]] || return 1
- state="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("BackendState",""))' <<<"$js" 2>/dev/null)" || return 1
- [[ "$state" == "Running" ]] || return 1
- online="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(str(bool(d.get("Self",{}).get("Online",False))).lower())' <<<"$js" 2>/dev/null)" || return 1
- [[ "$online" == "true" ]]
-}
-
-ts_wait_exit_node() {
- local i
- for i in $(seq 1 90); do
-  ip -4 route show table 52 default 2>/dev/null | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null && return 0
-  sleep 1
- done
- return 1
-}
-
-ts_exit_node_works() {
- /usr/bin/curl -4 --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1
 }
 
 # BOBAREV SHELL: isolated fail-fast network controller.
@@ -9125,11 +8909,7 @@ BOBAREV_ENGINE_3146
  } > "$lib/build-pins.conf"
  chmod 600 "$lib/build-pins.conf"
 }
-# Old function retained as a compatibility message, never a silent DNS rewrite.
-ensure_mullvad_return_route_and_dot_dns() {
- echo 'Используйте мастер пункта 24: изменения применяются только транзакцией с откатом.'
- return 1
-}
+
 setup_vless_reality_mullvad_inbound() {
  echo -e "${C_CYAN} === ДОПОЛНИТЕЛЬНЫЙ ВХОД VLESS-REALITY (IPv4 + IPv6) -> MULLVAD EXIT NODE ===${C_RESET}"
  ensure_xray_installed || return 1
@@ -9195,7 +8975,7 @@ setup_vless_reality_mullvad_inbound() {
  mkdir -p /var/lib/bobarev-shell-mullvad
  if [ -f /etc/default/bobarev-cascade ]; then
   sed -i '/^MULLVAD_VLESS_PORT=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-  echo "MULLVAD_VLESS_PORT="$x_port"" >> /etc/default/bobarev-cascade
+  echo "MULLVAD_VLESS_PORT=\"$x_port\"" >> /etc/default/bobarev-cascade
  else
   printf 'CASCADE_ROLE="standalone_naive"
 NAIVE_OUT_MODE="mullvad_ts"
@@ -9255,62 +9035,79 @@ manage_naive_mullvad_menu() {
 }
 
 mod_network_reset() {
- local selected item action unit path expected actual choice
- local registry=/etc/bobarev-shell/owned-units.sha256
- local -a items=() units=() actions=()
- echo 'Адресное отключение компонентов. Доступ SSH может прерваться из-за изменения сети.'
- echo 'Полный сброс, удаление конфигураций и запуск альтернативного DHCP не выполняются.'
- # Only explicitly registered exact unit contents are eligible. Never infer ownership from names.
- for unit in bobarev-router-dhcp bobarev-router-v2 bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh bobarev-tailscale-exit-restore; do
-  path="/etc/systemd/system/$unit.service"
-  [[ -f "$path" && ! -L "$path" && -f "$registry" && ! -L "$registry" ]] || continue
-  [[ $(stat -c '%u' "$registry") == 0 ]] || continue
-  [[ $(stat -c '%a' "$registry") == 600 ]] || continue
-  expected=$(awk -v p="$path" '$2==p {print $1}' "$registry")
-  actual=$(sha256sum "$path") || return 1
-  [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$expected" == "${actual%% *}" ]] || continue
-  # Drop-ins change effective behavior and require a separate ownership review.
-  [[ -z $(systemctl show "$unit.service" -p DropInPaths --value) ]] || continue
-  items+=("$unit" 'Подтверждённый экземпляр; остановка или автозапуск отдельно' OFF)
+ local selected='' item='' unit='' ts_exit='' ts_adv=''
+ local -a items=()
+ echo 'Сканирование сетевых настроек...'
+ echo '--- Интерфейсы ---'
+ ip -br address || true
+ echo '--- IPv4 policy routing ---'
+ ip -4 rule || true
+ echo '--- NAT / MASQUERADE ---'
+ iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
+ echo '--- Активные сетевые службы ---'
+ for unit in bobarev-router-v2 bobarev-router-dhcp bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
+  [[ -f "/etc/systemd/system/$unit.service" ]] || continue
+  printf '%-32s %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
  done
  if command -v tailscale >/dev/null; then
-  items+=(TS_EXIT 'Убрать exit node; восстановление не отключается автоматически' OFF TS_ADV 'Прекратить анонс exit node' OFF)
+  ts_exit="$(tailscale get exit-node 2>/dev/null || echo '')"
+  ts_adv="$(tailscale get advertise-exit-node 2>/dev/null || echo false)"
+  echo "--- Tailscale exit node: ${ts_exit:-не выбран} ---"
+  echo "--- Анонсирование exit node: $ts_adv ---"
  fi
- ((${#items[@]})) || { echo 'Нет подтверждённых экземпляров. Автоматическое присвоение принадлежности запрещено.'; return 0; }
- selected=$(whiptail --title 'Адресное отключение' --checklist 'Выберите компоненты. Все действия подтверждаются общим планом.' 24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
+ echo ''
+ echo 'Базовая ОС, SSH, пользователи, ключи и авторизация VPN сохраняются.'
+ echo 'Это не заводской сброс. Неизвестные старые правила показываются, но автоматически не удаляются.'
+ echo ''
+ if [[ -f /etc/systemd/system/bobarev-router-v2.service ]]; then
+  items+=('LAN_ROUTER' 'Отключить LAN-маршрутизатор, DHCP и его NAT/MASQUERADE' OFF)
+ fi
+ if command -v tailscale >/dev/null; then
+  if [[ -n "$ts_exit" && "$ts_exit" != "none" && "$ts_exit" != "false" ]]; then
+   items+=('TS_EXIT' 'Отключить выбранный Tailscale exit node' OFF)
+  fi
+  if [[ "$ts_adv" == "true" ]]; then
+   items+=('TS_ADV' 'Отключить анонсирование сервера как exit node' OFF)
+  fi
+ fi
+ for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server naive-mesh-bridge xray-mesh-socks xraymesh; do
+  [[ -f "/etc/systemd/system/$unit.service" ]] || continue
+  local state
+  state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
+  items+=("$unit" "Остановить службу [$state]" OFF)
+ done
+ ((${#items[@]})) || { echo 'Нет распознанных компонентов для безопасного отключения.'; return 0; }
+ selected=$(whiptail --title 'Сброс сетевых настроек' --checklist \
+  'Пробел — выбрать. Отключаются только выбранные маршрутизация, NAT/MASQUERADE и службы. Конфиги, пакеты, SSH и авторизация VPN сохраняются.' \
+  24 "$WT_WIDTH" 12 "${items[@]}" 3>&1 1>&2 2>&3) || return 0
  [[ -n "$selected" ]] || return 0
+ echo 'Будут отключены:'
+ for item in $selected; do echo "  ${item//\"/}"; done
+ nm_yes 'Подтвердить выбранный сброс?' || return 0
+ br_snapshot || return 1
  for item in $selected; do
   item=${item//\"/}
   case "$item" in
-   TS_EXIT|TS_ADV) units+=("$item"); actions+=(role);;
+   LAN_ROUTER)
+    systemctl disable --now bobarev-router-dhcp.service bobarev-router-v2.service || true
+    if [[ -f /etc/bobarev-router-dnsmasq-was-active ]]; then
+     systemctl start dnsmasq.service || true
+     rm -f /etc/bobarev-router-dnsmasq-was-active
+    fi
+    echo 'LAN-маршрутизатор, DHCP и его NAT/MASQUERADE отключены.' ;;
+   TS_EXIT)
+    tailscale set --exit-node="" || true
+    echo 'Tailscale exit node отключён.' ;;
+   TS_ADV)
+    tailscale set --advertise-exit-node=false || true
+    echo 'Анонсирование exit node отключено.' ;;
    *)
-    choice=$(whiptail --menu "$item: выберите одно действие" 15 "$WT_WIDTH" 3 stop 'Только остановить' disable 'Только отключить автозапуск' 3>&1 1>&2 2>&3) || return 0
-    units+=("$item"); actions+=("$choice")
-    systemctl cat "$item.service" || return 1
-    systemctl list-dependencies --reverse "$item.service" --no-pager || return 1
-    ;;
+    systemctl disable --now "$item.service" || true
+    echo "Служба $item остановлена и отключена." ;;
   esac
  done
- echo 'План (ExecStop и зависимости показаны выше; снимок не гарантирует откат):'
- for item in "${!units[@]}"; do printf '%s: %s\n' "${units[$item]}" "${actions[$item]}"; done
- echo 'При TS_EXIT сохранённый механизм восстановления может повторно выбрать exit node. Отключите его автозапуск отдельным выбранным действием.'
- nm_yes 'Выполнить именно этот план с риском потери сетевого доступа?' || return 0
- br_snapshot || return 1
- for item in "${!units[@]}"; do
-  unit=${units[$item]}; action=${actions[$item]}
-  case "$unit" in
-   TS_EXIT) if ! tailscale set --exit-node=""; then echo 'Частичный результат: ошибка exit node.' >&2; return 1; fi;;
-   TS_ADV) if ! tailscale set --advertise-exit-node=false; then echo 'Частичный результат: ошибка анонса.' >&2; return 1; fi;;
-   *)
-    if ! systemctl "$action" "$unit.service"; then echo "Частичный результат: ошибка $unit/$action" >&2; return 1; fi
-    if [[ "$action" == stop ]] && systemctl is-active --quiet "$unit.service"; then echo "Служба остаётся активной: $unit" >&2; return 1; fi
-    if [[ "$action" == disable ]] && systemctl is-enabled --quiet "$unit.service"; then echo "Автозапуск остаётся включён: $unit" >&2; return 1; fi;;
-  esac
-  printf 'Выполнено: %s / %s\n' "$unit" "$action"
- done
- echo 'Выбранные действия выполнены. Автоматический откат и восстановление исходной сети не заявляются.'
+ echo 'Сброс завершён. Конфигурации сохранены для повторного включения.'
 }
-
 
 mod_backup_manager() {
     echo -e "${C_CYAN} === 18/27. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
@@ -10370,7 +10167,6 @@ run_full_auto_setup() {
     MODULE_CANCELED=false
 }
 
-
 nm_reload_caddy() {
  local cb="${CADDY_BIN:-/usr/local/bin/caddy}" cf="${CADDYFILE:-/etc/caddy/Caddyfile}"
  [[ -x "$cb" ]] || cb=$(command -v caddy) || { echo 'Не найден Caddy.' >&2; return 1; }
@@ -11063,9 +10859,67 @@ echo 'Проверку с mesh-адреса выполните на сервер
 NM_EXIT_SCRIPT
 }
 
-# ------------------------------------------------------------------------------
-# ОБРАБОТКА CLI-АРГУМЕНТОВ БЫСТРОГО ЗАПУСКА
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# ОБРАБОТКА CLI-АРГУМЕНТОВ И БЫСТРЫХ КОМАНД
+# ==============================================================================
+bobarev_cli_status() {
+    echo "=== BOBAREV CLI STATUS ==="
+    echo "Версия: $SCRIPT_VERSION"
+    if command -v systemctl >/dev/null 2>&1; then
+        for u in caddy.service hysteria-server.service hysteria-client.service bobarev-xray.service wg-quick@wg0 wg-quick@wg-cascade.service derper.service bobarev-router-v2.service; do
+            if systemctl list-unit-files "$u" >/dev/null 2>&1; then
+                printf '%-32s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
+            fi
+        done
+    fi
+    if command -v tailscale >/dev/null 2>&1; then
+        echo "Tailscale: $(tailscale status >/dev/null 2>&1 && echo active || echo inactive)"
+    fi
+    if command -v ufw >/dev/null 2>&1; then
+        echo "UFW: $(ufw status | head -n 1)"
+    fi
+    return 0
+}
+
+bobarev_cli_naive_status() {
+    echo "=== BOBAREV NAIVE STATUS ==="
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        echo "Роль: ${CASCADE_ROLE:-unknown}"
+        echo "Домен: ${NAIVE_DOMAIN:-unknown}"
+        echo "Выход: ${NAIVE_OUT_MODE:-direct}"
+    else
+        echo "Конфигурация не найдена."
+    fi
+    if systemctl is-active --quiet caddy.service; then
+        echo "Caddy: активен"
+    else
+        echo "Caddy: не активен"
+    fi
+    return 0
+}
+
+bobarev_cli_tailscale_status() {
+    echo "=== BOBAREV TAILSCALE STATUS ==="
+    if command -v tailscale >/dev/null 2>&1; then
+        tailscale status || true
+    else
+        echo "Tailscale не установлен."
+    fi
+    return 0
+}
+
+bobarev_cli_router_status() {
+    echo "=== BOBAREV ROUTER STATUS ==="
+    echo "IP forward: $(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)"
+    echo "WAN: $(get_wan_if 2>/dev/null || echo unknown)"
+    if command -v ufw >/dev/null 2>&1; then
+        echo "UFW: $(ufw status | head -n 1)"
+    fi
+    return 0
+}
+
 if [ "${1:-}" != "" ]; then
     case "${1:-}" in
         --bobarev-mullvad)
@@ -11096,16 +10950,36 @@ if [ "${1:-}" != "" ]; then
             run_full_auto_setup
             exit 0
             ;;
+        status)
+            bobarev_cli_status
+            exit 0
+            ;;
+        naive-status)
+            bobarev_cli_naive_status
+            exit 0
+            ;;
+        tailscale-status)
+            bobarev_cli_tailscale_status
+            exit 0
+            ;;
+        router-status)
+            bobarev_cli_router_status
+            exit 0
+            ;;
         --help|-h)
-            echo -e "${C_BOLD}BOBAREV SHELL v3.18.17 (BOBAREV SHELL — Mullvad VPS Safety Revision)${C_RESET}"
+            echo -e "${C_BOLD}BOBAREV SHELL v${SCRIPT_VERSION} (Optimized & Deduplicated Edition)${C_RESET}"
             echo "Использование: $0 [опция]"
-            echo "  (без опций)   Запуск интерактивного меню"
-            echo "  --audit, -a   Мгновенный вывод интеллектуального аудита (Модуль 17)"
-            echo "  --net-audit   Глубокий аудит сети, ТСПУ и каскадных пар (Модуль 21)"
-            echo "  --update, -u  Обновление пакетов, приоритет IPv4 и настройка zRAM (Модуль 3)"
-            echo "  --backup, -b  Экспорт или импорт настроек сервера (Модуль 19)"
-            echo "  --auto        Последовательная настройка сервера целиком (Шаги 1-12)"
-            echo "  --help, -h    Показать эту справку"
+            echo "  (без опций)       Запуск интерактивного меню"
+            echo "  --audit, -a       Интеллектуальный аудит состояния сервера"
+            echo "  --net-audit, -n   Глубокий аудит сети, ТСПУ и каскадных пар"
+            echo "  --update, -u      Обновление пакетов, приоритет IPv4 и настройка zRAM"
+            echo "  --backup, -b      Экспорт или импорт настроек сервера"
+            echo "  --auto            Последовательная первичная настройка сервера (Шаги 1-12)"
+            echo "  status            Краткая сводка состояния служб, Tailscale и UFW"
+            echo "  naive-status      Статус конфигурации NaiveProxy и службы Caddy"
+            echo "  tailscale-status  Статус узлов Tailscale"
+            echo "  router-status     Статус маршрутизации (IP forward, WAN, UFW)"
+            echo "  --help, -h        Показать эту справку"
             exit 0
             ;;
         *)
@@ -11116,303 +10990,144 @@ if [ "${1:-}" != "" ]; then
 fi
 
 # ==============================================================================
-# ===  ЗАПУСК ГЛАВНОГО МЕНЮ (ВСЕГДА В САМОМ КОНЦЕ ФАЙЛА) ===
+# СИСТЕМА МЕНЮ (ОПТИМИЗИРОВАННАЯ БЕЗ ДУБЛИКАТОВ И ЗАГЛУШЕК)
 # ==============================================================================
-
-
-mod_mtu_mss_optimizer() {
-    whiptail --title "MTU/MSS — диагностика" --msgbox "Этот пункт теперь только показывает текущие MTU и MSS-правила. Он не меняет настройки автоматически." 10 70 || true
-    echo "=== MTU/MSS DIAGNOSTIC ==="
-    ip -o link show | awk -F': ' '{print $2, $0}' | sed 's/^[0-9]*: //' | head -n 20
-    echo "---- MSS rules ----"
-    iptables -t mangle -S 2>/dev/null | grep -i 'TCPMSS' || echo "MSS-правил не найдено."
-    echo "Диагностика завершена. Изменения не применены."
-}
-
-
-mod_bbr_setup() {
-    if whiptail --title "Настройка TCP BBR" --yesno "Включить алгоритм TCP BBR для максимального ускорения сети?" 10 60; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        sysctl -p
-        whiptail --title "Успех" --msgbox "TCP BBR успешно активирован!" 8 50
-    fi
-}
-
-mod_telegram_bot() {
-    whiptail --title "Telegram" --msgbox "Этот модуль пока не реализован. Конфигурация не изменена." 9 65 || true
-}
-
-mod_amnezia_wg() {
-    whiptail --title "AmneziaWG" --msgbox "Этот модуль пока не реализован. Конфигурация не изменена." 9 65 || true
-}
-
-mod_crowdsec() {
-    if whiptail --title "CrowdSec IPS" --yesno "Установить CrowdSec для защиты сервера от брутфорса и атак?" 10 60; then
-        whiptail --title "Установка" --infobox "Загрузка и установка CrowdSec..." 8 50
-        curl -s https://install.crowdsec.net | sudo sh > /dev/null 2>&1
-        apt-get install -yq crowdsec > /dev/null 2>&1
-        whiptail --title "Успех" --msgbox "CrowdSec успешно установлен и работает в фоне!" 8 50
-    fi
-}
-
-# ==========================================
-# НОВАЯ СИСТЕМА ИЕРАРХИЧЕСКИХ МЕНЮ (v3.16.3 - Path Navigation)
-# ==========================================
-
 menu_server_security() {
     while true; do
-        local choice c
-        if ! choice=$(whiptail --title "Базовая настройка" --menu "Выберите категорию:" 18 75 7 "1" "Основные настройки" "2" "Пользователи и SSH" "3" "Защита и брандмауэр" "4" "Память и производительность" "5" "Оборудование и утилиты" "A" "Первичная настройка целиком" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then
+        MODULE_CANCELED=false
+        local choice=""
+        if ! choice=$(whiptail --title "🛠 БАЗОВАЯ НАСТРОЙКА И БЕЗОПАСНОСТЬ" --menu "Выберите этап настройки сервера:" 22 "$WT_WIDTH" 15 \
+            "1" "Часовой пояс" \
+            "2" "Имя сервера (Hostname)" \
+            "3" "Обновление пакетов, приоритет IPv4 и zRAM" \
+            "4" "Создание и настройка пользователя" \
+            "5" "Привязка SSH-ключа безопасности" \
+            "6" "Конфигурация SSH и защита (SSHGuard)" \
+            "7" "Защита ядра и сетевой стек TCP BBR (Sysctl)" \
+            "8" "Управление брандмауэром (UFW)" \
+            "9" "Блокировка пароля суперпользователя (root)" \
+            "10" "Оптимизация RAM и Flash-памяти" \
+            "11" "Управление файлом подкачки (Swap)" \
+            "12" "Утилиты ПК и режим процессора (CPU)" \
+            "13" "Сброс видеовыхода HDMI" \
+            "A" "Выполнить первичную настройку целиком (Шаги 1-12)" \
+            "0" "⬅ Назад" 3>&1 1>&2 2>&3); then
             return 0
         fi
-        [ -z "$choice" ] && return 0
+        [ -z "$choice" ] || [ "$choice" = "0" ] && return 0
+        clear
         case "$choice" in
-            1)
-                if ! c=$(whiptail --title "Основные настройки" --menu "Выберите действие:" 16 70 4 "1" "Часовой пояс" "2" "Имя сервера" "3" "Обновление компонентов" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
-                case "$c" in 1) mod_timezone; pause_enter ;; 2) mod_hostname; pause_enter ;; 3) mod_apt_update; pause_enter ;; esac ;;
-            2)
-                if ! c=$(whiptail --title "Пользователи и SSH" --menu "Выберите действие:" 16 70 5 "1" "Создание и настройка пользователя" "2" "Привязка ключа безопасности" "3" "Конфигурация удаленного доступа" "4" "Блокировка доступа суперпользователя" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
-                case "$c" in 1) mod_user_setup; pause_enter ;; 2) mod_ssh_key; pause_enter ;; 3) mod_ssh_config; pause_enter ;; 4) mod_lock_root; pause_enter ;; esac ;;
-            3)
-                if ! c=$(whiptail --title "Защита и брандмауэр" --menu "Выберите действие:" 16 70 4 "1" "Управление брандмауэром" "2" "Настройка системной защиты" "3" "Защита сервера (CrowdSec)" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
-                case "$c" in 1) mod_ufw; pause_enter ;; 2) mod_hardening; pause_enter ;; 3) mod_crowdsec; pause_enter ;; esac ;;
-            4)
-                if ! c=$(whiptail --title "Память и производительность" --menu "Выберите действие:" 16 70 4 "1" "Оптимизация памяти" "2" "Управление файлом подкачки" "3" "Настройка TCP BBR" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
-                case "$c" in 1) mod_ram_flash_opt; pause_enter ;; 2) mod_swap_manager; pause_enter ;; 3) mod_bbr_setup; pause_enter ;; esac ;;
-            5)
-                if ! c=$(whiptail --title "Оборудование и утилиты" --menu "Выберите действие:" 16 70 3 "1" "Утилиты ПК и режим процессора" "2" "Сброс видеовыхода HDMI" "0" "⬅ Назад" 3>&1 1>&2 2>&3); then continue; fi
-                case "$c" in 1) mod_desktop_apps; pause_enter ;; 2) mod_hdmi_reset; pause_enter ;; esac ;;
+            1) mod_timezone; pause_enter ;;
+            2) mod_hostname; pause_enter ;;
+            3) mod_apt_update; pause_enter ;;
+            4) mod_user_setup; pause_enter ;;
+            5) mod_ssh_key; pause_enter ;;
+            6) mod_ssh_config; pause_enter ;;
+            7) mod_hardening; pause_enter ;;
+            8) mod_ufw; pause_enter ;;
+            9) mod_lock_root; pause_enter ;;
+            10) mod_ram_flash_opt; pause_enter ;;
+            11) mod_swap_manager; pause_enter ;;
+            12) mod_desktop_apps; pause_enter ;;
+            13) mod_hdmi_reset; pause_enter ;;
             A) run_full_auto_setup; pause_enter ;;
-            0) return 0 ;;
-        esac
-    done
-}
-
-
-menu_naiveproxy_two_servers() {
-    while true; do
-        if ! sub_choice=$(whiptail --title "NAIVEPROXY → ДВА СЕРВЕРА" --menu "Как соединить входной и выходной серверы?" 18 75 6             "1" "Xray REALITY (Рекомендуется)"             "2" "Hysteria 2"             "3" "WireGuard"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
-        case "$sub_choice" in
-            1) manage_cascade_xray_menu ;;
-            2) manage_cascade_hysteria_menu ;;
-            3) mod_direct_wg_cascade ;;
-            0|"") return ;;
-        esac
-    done
-}
-
-menu_naiveproxy_setup() {
-    while true; do
-        if ! sub_choice=$(whiptail --title "СОЕДИНЕНИЯ → NAIVEPROXY" --menu "Выберите топологию сети:" 20 75 8             "1" "Один сервер (Автономный + WG Dual-Gateway)"             "2" "Два сервера (Каскад)"             "3" "Выход через Tailscale / Mullvad"             "4" "Выход через XRayMesh"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
-        case "$sub_choice" in
-            1) setup_standalone_naive ;;
-            2) menu_naiveproxy_two_servers ;;
-            3) manage_naive_mullvad_menu ;;
-            4) manage_naive_mesh_menu ;;
-            0|"") return ;;
-        esac
-    done
-}
-
-menu_wg_amnezia() {
-    while true; do
-        if ! sub_choice=$(whiptail --title "🔒 WIREGUARD / AMNEZIAWG" --menu "Выберите тип VPN:" 15 75 6             "1" "Классический WireGuard (Каскад)"             "2" "AmneziaWG (Установка / QR)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-
-        case "$sub_choice" in
-            1) mod_direct_wg_cascade ;;
-            2) mod_amnezia_wg ;;
-            0|"") return ;;
         esac
     done
 }
 
 menu_connections_proxies() {
     while true; do
-        if ! sub_choice=$(whiptail --title "🌍 СОЕДИНЕНИЯ И ПРОКСИ" --menu "Сценарии и протоколы:" 20 75 8             "1" "NaiveProxy — вход для клиентов"             "2" "Xray REALITY — управление каскадом"             "3" "Hysteria 2 — управление каскадом"             "4" "WireGuard / AmneziaWG — управление"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
+        MODULE_CANCELED=false
+        local sub_choice=""
+        if ! sub_choice=$(whiptail --title "🌍 ПРОКСИ, VPN И КАСКАДЫ (NAIVEPROXY)" --menu "Выберите топологию подключения:" 19 "$WT_WIDTH" 8 \
+            "1" "Автономный NaiveProxy (Один сервер + WG Dual-Gateway)" \
+            "2" "Каскад: NaiveProxy + Xray REALITY (+ WARP)" \
+            "3" "Каскад: NaiveProxy + Hysteria 2 (+ WARP)" \
+            "4" "Каскад: NaiveProxy + WireGuard / udp2raw (+ WARP)" \
+            "5" "Каскад: NaiveProxy + Tailscale / Mullvad (+ VLESS-REALITY)" \
+            "6" "Каскад: NaiveProxy + XRayMesh" \
+            "7" "Каскад: NaiveProxy + Tailscale (2 сервера + WARP)" \
+            "0" "⬅ Назад" 3>&1 1>&2 2>&3); then
+            return 0
+        fi
+        [ -z "$sub_choice" ] || [ "$sub_choice" = "0" ] && return 0
+        clear
         case "$sub_choice" in
-            1) menu_naiveproxy_setup ;;
+            1) setup_standalone_naive ;;
             2) manage_cascade_xray_menu ;;
             3) manage_cascade_hysteria_menu ;;
-            4) menu_wg_amnezia ;;
-            0|"") return ;;
-        esac
-    done
-}
-
-menu_tailscale_network() {
-    while true; do
-        if ! sub_choice=$(whiptail --title "🔒 ЗАКРЫТАЯ СЕТЬ TAILSCALE" --menu "Управление виртуальной сетью:" 15 75 6             "1" "Подключение и состояние (Установка)"             "2" "Использовать Tailscale для NaiveProxy (Переход)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
-        case "$sub_choice" in
-            1) mod_tailscale ;;
-            2) manage_naive_mullvad_menu ;;
-            0|"") return ;;
-        esac
-    done
-}
-
-menu_local_router() {
-    while true; do
-        if ! sub_choice=$(whiptail --title "🖧 ЛОКАЛЬНЫЙ МАРШРУТИЗАТОР" --menu "Настройка сервера как LAN-роутера:" 15 75 6             "1" "Настроить LAN и выход в интернет (SBC)"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
-        case "$sub_choice" in
-            1) mod_router_sbc ;;
-            0|"") return ;;
+            4) mod_direct_wg_cascade ;;
+            5) manage_naive_mullvad_menu ;;
+            6) manage_naive_mesh_menu ;;
+            7) manage_cascade_naive_ts_warp ;;
         esac
     done
 }
 
 menu_diagnostics_maintenance() {
     while true; do
-        if ! sub_choice=$(whiptail --title "⚙️ ДИАГНОСТИКА И ОБСЛУЖИВАНИЕ" --menu "Инструменты:" 20 75 10             "1" "Состояние сервера (Аудит ресурсов)"             "2" "Проверка сети и каскадных пар"             "3" "Системные журналы"             "4" "Анализ загрузки системы"             "5" "Экспорт / Импорт настроек (Бэкап)"             "6" "Остановка и сброс сетевых надстроек"             "0" "⬅ Назад" 3>&1 1>&2 2>&3); then return; fi
-            
+        MODULE_CANCELED=false
+        local sub_choice=""
+        if ! sub_choice=$(whiptail --title "⚙️ ДИАГНОСТИКА, АУДИТ И ОБСЛУЖИВАНИЕ" --menu "Выберите инструмент:" 18 "$WT_WIDTH" 7 \
+            "1" "Состояние сервера (Аудит ресурсов и безопасности)" \
+            "2" "Проверка сети, ТСПУ и каскадных пар" \
+            "3" "Управление системными журналами (Логи)" \
+            "4" "Анализ времени загрузки системы" \
+            "5" "Экспорт / Импорт настроек (Бэкап)" \
+            "6" "Выборочный сброс сетевых надстроек" \
+            "0" "⬅ Назад" 3>&1 1>&2 2>&3); then
+            return 0
+        fi
+        [ -z "$sub_choice" ] || [ "$sub_choice" = "0" ] && return 0
+        clear
         case "$sub_choice" in
             1) mod_server_audit; pause_enter ;;
             2) mod_network_cascade_audit ;;
             3) mod_logging_manager; pause_enter ;;
             4) mod_boot_diag; pause_enter ;;
             5) mod_backup_manager; pause_enter ;;
-            6) mod_network_reset ;;
-            0|"") return ;;
+            6) mod_network_reset; pause_enter ;;
         esac
     done
 }
 
-
-detect_current_state() {
-    CURRENT_HOSTNAME=$(hostname)
-
-    # Проверка статусов служб
-    SRV_CADDY="остановлен"
-    systemctl is-active --quiet caddy && SRV_CADDY="работает"
-
-    SRV_XRAY="остановлен"
-    systemctl is-active --quiet bobarev-xray.service && SRV_XRAY="работает"
-
-    SRV_HYSTERIA="остановлен"
-    systemctl is-active --quiet hysteria-server.service && SRV_HYSTERIA="работает"
-
-    # Определение схемы и роли
-    CONN_SCHEME="Не определено"
-    ROLE="Роль не подтверждена"
-
-    if [ "$SRV_CADDY" = "работает" ]; then
-        if grep -q "forward_proxy" /etc/caddy/Caddyfile 2>/dev/null; then
-            if [ "$SRV_XRAY" = "работает" ]; then
-                CONN_SCHEME="NaiveProxy → Xray REALITY"
-                if grep -q "reverse_proxy 127.0.0.1:8080" /etc/caddy/Caddyfile 2>/dev/null; then
-                    ROLE="Входной сервер (Сервер 1)"
-                else
-                    ROLE="Выходной сервер (Сервер 2)"
-                fi
-            elif [ "$SRV_HYSTERIA" = "работает" ]; then
-                CONN_SCHEME="NaiveProxy → Hysteria 2"
-                ROLE="Входной сервер (Сервер 1)"
-            else
-                CONN_SCHEME="NaiveProxy (Автономный)"
-                ROLE="Одиночный сервер"
-            fi
-        fi
-    elif [ "$SRV_XRAY" = "работает" ]; then
-         CONN_SCHEME="Xray REALITY"
-         ROLE="Выходной сервер (Сервер 2)"
-    elif [ "$SRV_HYSTERIA" = "работает" ]; then
-         CONN_SCHEME="Hysteria 2"
-         ROLE="Выходной сервер (Сервер 2)"
-    fi
-
-    # Настоящая проверка Tailscale
-    TS_STATE="не настроена"
-    if command -v tailscale >/dev/null 2>&1; then
-        if tailscale status >/dev/null 2>&1; then
-            TS_STATE="активна"
-        fi
-    fi
-}
-
-bobarev_interactive_stdin() {
-    if [ ! -t 0 ]; then
-        if [ "${BASH_SOURCE[0]:-}" = /dev/stdin ] || [ "${BASH_SOURCE[0]:-}" = /dev/fd/0 ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
-            echo "Не запускайте интерактивную настройку через curl | bash. Сохраните файл и выполните: bash файл.sh" >&2
-            return 1
-        fi
-        if { true </dev/tty; } 2>/dev/null; then
-            exec </dev/tty
-        else
-            echo "Нет управляющего терминала. Запустите сохранённый файл в интерактивной SSH-сессии." >&2
-            return 1
-        fi
-    fi
-    return 0
-}
-
-bobarev_cli_status() {
-    echo "=== BOBAREV CLI STATUS ==="
-    echo "Версия: $SCRIPT_VERSION"
-    if command -v systemctl >/dev/null 2>&1; then
-        for u in caddy.service hysteria-server.service hysteria-client.service bobarev-xray.service wg-quick@wg0 wg-quick@wg-cascade.service derper.service; do
-            if systemctl list-unit-files "$u" >/dev/null 2>&1; then
-                printf '%-32s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
-            fi
-        done
-    fi
-    if command -v tailscale >/dev/null 2>&1; then
-        echo "Tailscale: $(tailscale status >/dev/null 2>&1 && echo active || echo inactive)"
-    fi
-    if command -v ufw >/dev/null 2>&1; then
-        echo "UFW: $(ufw status | head -n 1)"
-    fi
-    return 0
-}
-bobarev_cli_naive_status() {
-    echo "=== BOBAREV NAIVE STATUS ==="
-    if [ -f /etc/default/bobarev-cascade ]; then
-        source /etc/default/bobarev-cascade
-        echo "Роль: ${CASCADE_ROLE:-unknown}"
-        echo "Домен: ${NAIVE_DOMAIN:-unknown}"
-        echo "Выход: ${NAIVE_OUT_MODE:-direct}"
-    else
-        echo "Конфигурация не найдена."
-    fi
-    if systemctl is-active --quiet caddy.service; then
-        echo "Caddy: активен"
-    else
-        echo "Caddy: не активен"
-    fi
-    return 0
-}
-bobarev_cli_tailscale_status() {
-    echo "=== BOBAREV TAILSCALE STATUS ==="
-    if command -v tailscale >/dev/null 2>&1; then
-        tailscale status || true
-    else
-        echo "Tailscale не установлен."
-    fi
-    return 0
-}
-bobarev_cli_router_status() {
-    echo "=== BOBAREV ROUTER STATUS ==="
-    echo "IP forward: $(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)"
-    echo "WAN: $(get_wan_if 2>/dev/null || echo unknown)"
-    if command -v ufw >/dev/null 2>&1; then
-        echo "UFW: $(ufw status | head -n 1)"
-    fi
-    return 0
-}
-# CLI dispatch
-case "${1:-}" in
-    status) bobarev_cli_status; exit 0 ;;
-    naive-status) bobarev_cli_naive_status; exit 0 ;;
-    tailscale-status) bobarev_cli_tailscale_status; exit 0 ;;
-    router-status) bobarev_cli_router_status; exit 0 ;;
-esac
 # --- ГЛАВНЫЙ ЦИКЛ ---
 while true; do
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v3.18.17" --menu "Главное меню:" 18 75 6         "1" "🛠 Базовая настройка"         "2" "🌍 Прокси и VPN"         "3" "🔒 Приватная сеть (Tailscale)"         "4" "🖧 Настройка роутера"         "5" "⚙️ Обслуживание и Аудит"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    MODULE_CANCELED=false
+    export TERM_COLS=$(tput cols 2>/dev/null || echo 85)
+    export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
+    export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
+    export WT_HEIGHT=$((TERM_LINES < 27 ? TERM_LINES : 27))
+
+    ts_main_status="Отсутствует"
+    if command -v tailscale &>/dev/null; then
+        if is_derp_active; then
+            ts_main_status="Активна + Личный DERP"
+        elif is_tailscale_web_active; then
+            ts_main_status="Активна (веб-панель)"
+        elif tailscale status >/dev/null 2>&1; then
+            ts_main_status="Активна"
+        else
+            ts_main_status="Установлена (не активна)"
+        fi
+    fi
+
+    if command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active"; then
+        ufw_status="Активен"
+    else
+        ufw_status="Не активен"
+    fi
+
+    tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
+    tz="${tz#Etc/}"
+
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v${SCRIPT_VERSION}" --menu "\nХост: $(hostname) ($(get_system_type_short)) | Часовой пояс: $tz\nUFW: $ufw_status | Tailscale: $ts_main_status\n\nВыберите раздел:" 20 "$WT_WIDTH" 6 \
+        "1" "🛠 Базовая настройка и безопасность" \
+        "2" "🌍 Прокси, VPN и Каскады (NaiveProxy)" \
+        "3" "🔒 Приватная сеть Tailscale и DERP" \
+        "4" "🖧 Локальный маршрутизатор (LAN / SBC)" \
+        "5" "⚙️ Диагностика, Аудит и Бэкап" \
+        "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0
@@ -11421,8 +11136,8 @@ while true; do
     case "$MAIN_CHOICE" in
         1) menu_server_security ;;
         2) menu_connections_proxies ;;
-        3) menu_tailscale_network ;;
-        4) menu_local_router ;;
+        3) clear; mod_tailscale ;;
+        4) clear; mod_router_sbc ;;
         5) menu_diagnostics_maintenance ;;
         0|"")
             clear

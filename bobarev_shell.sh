@@ -3,10 +3,10 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.18 (Optimized & Deduplicated Edition)
+# Версия: 3.18.19 (Universal Simplified Menu Edition)
 # ==============================================================================
 
-SCRIPT_VERSION="3.18.18"
+SCRIPT_VERSION="3.18.19"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -4383,23 +4383,25 @@ pause_enter() {
     read -r -p "Нажмите Enter для возврата в меню..." < /dev/tty || true
 }
 
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${C_RED} Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).${C_RESET}" >&2
-    exit 1
-fi
-
-if ! check_system_resources; then
-    echo -e "${C_RED} Критическая ошибка ресурсов. Запуск невозможен.${C_RESET}"
-    exit 1
-fi
-
-if ! command -v whiptail &>/dev/null; then
-    echo -e "${C_BLUE} Интерфейс whiptail не обнаружен. Автоматическая установка...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -yq whiptail >/dev/null 2>&1 || {
-        echo -e "${C_RED} Не удалось установить whiptail. Выполните вручную: apt update && apt install whiptail${C_RESET}" >&2
+if [ "${1:-}" != "--help" ] && [ "${1:-}" != "-h" ]; then
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${C_RED} Ошибка: этот скрипт должен запускаться от имени суперпользователя (root).${C_RESET}" >&2
         exit 1
-    }
+    fi
+
+    if ! check_system_resources; then
+        echo -e "${C_RED} Критическая ошибка ресурсов. Запуск невозможен.${C_RESET}"
+        exit 1
+    fi
+
+    if ! command -v whiptail &>/dev/null; then
+        echo -e "${C_BLUE} Интерфейс whiptail не обнаружен. Автоматическая установка...${C_RESET}"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq && apt-get install -yq whiptail >/dev/null 2>&1 || {
+            echo -e "${C_RED} Не удалось установить whiptail. Выполните вручную: apt update && apt install whiptail${C_RESET}" >&2
+            exit 1
+        }
+    fi
 fi
 
 # ==============================================================================
@@ -5204,28 +5206,48 @@ ts42_wait_default() {
  return 1
 }
 ts42_control() {
- local answer env file=/etc/systemd/system/tailscaled.service.d/90-control-443.conf backup=''
- env=$(systemctl show tailscaled --property=Environment --value)
- smart_menu 'Tailscale: управление TCP 443' "Окружение: $env
-Внутренний TS_FORCE_NOISE_443=true. Требует проверки после обновлений." 17 "${WT_WIDTH:-85}" 2 answer KEEP 'Сохранить настройки' ENABLE 'Включить TCP 443' || return 1
- [[ "$answer" == ENABLE ]] || return 0
- [[ " $env " != *' TS_FORCE_NOISE_443=true '* ]] || { echo 'Уже включено; restart не нужен.'; return 0; }
- nm_yes 'Применить и перезапустить tailscaled? Используйте локальную консоль/SSH, не Tailscale.' || return 1
- mkdir -p /etc/systemd/system/tailscaled.service.d || return 1
- if [[ -e "$file" ]]; then
-  [[ -f "$file" && ! -L "$file" ]] || return 1
-  backup=$(mktemp /root/bobarev-443.XXXXXX) || return 1
-  cp -a "$file" "$backup" || return 1
+ local answer env file=/etc/systemd/system/tailscaled.service.d/90-control-443.conf backup='' state_human='Стандартный режим'
+ env=$(systemctl show tailscaled --property=Environment --value 2>/dev/null || true)
+ if [[ " $env " == *' TS_FORCE_NOISE_443=true '* ]]; then
+  state_human='Включён (принудительный TCP 443)'
  fi
- printf '[Service]\nEnvironment="TS_FORCE_NOISE_443=true"\n' > "$file" || return 1
- if systemctl daemon-reload && systemctl restart tailscaled && ts42_wait_running; then return 0; fi
- if [[ -n "$backup" ]]; then cp -a "$backup" "$file" || return 1; else rm -f "$file"; fi
- systemctl daemon-reload || true;systemctl restart tailscaled || true
- return 1
+ smart_menu 'Tailscale: обход блокировок через TCP 443' "Текущий статус: $state_human
+
+Режим TS_FORCE_NOISE_443=true переводит управляющее соединение Tailscale на порт TCP 443 (помогает при жестких блокировках DPI/ТСПУ)." 16 "${WT_WIDTH:-85}" 3 answer   ENABLE 'Включить принудительный TCP 443'   DISABLE 'Отключить (вернуть стандартный режим)'   0 '⬅ Назад' || return 0
+ case "$answer" in
+  ENABLE)
+   [[ " $env " != *' TS_FORCE_NOISE_443=true '* ]] || { echo 'Режим TCP 443 уже включён.'; return 0; }
+   nm_yes 'Включить TCP 443 и перезапустить tailscaled?' || return 0
+   mkdir -p /etc/systemd/system/tailscaled.service.d || return 1
+   if [[ -e "$file" ]]; then
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    backup=$(mktemp /root/bobarev-443.XXXXXX) || return 1
+    cp -a "$file" "$backup" || return 1
+   fi
+   printf '[Service]
+Environment="TS_FORCE_NOISE_443=true"
+' > "$file" || return 1
+   if systemctl daemon-reload && systemctl restart tailscaled && ts42_wait_running; then
+    echo -e "${C_GREEN} Принудительный режим TCP 443 успешно активирован.${C_RESET}"
+    return 0
+   fi
+   if [[ -n "$backup" ]]; then cp -a "$backup" "$file" || return 1; else rm -f "$file"; fi
+   systemctl daemon-reload || true; systemctl restart tailscaled || true
+   return 1
+   ;;
+  DISABLE)
+   [[ -f "$file" ]] || { echo 'Принудительный режим TCP 443 не был включён.'; return 0; }
+   nm_yes 'Отключить принудительный TCP 443 и перезапустить tailscaled?' || return 0
+   rm -f "$file"
+   systemctl daemon-reload && systemctl restart tailscaled && ts42_wait_running
+   echo -e "${C_GREEN} Возвращён стандартный режим управления Tailscale.${C_RESET}"
+   ;;
+ esac
 }
+
 ts43_router_set_exit() {
  local mode=$1 node=${2:-} wan='' gw='' tmp
- [[ -r /etc/bobarev-router-v2/config ]] || { echo 'Локальный маршрутизатор не настроен.'; return 1; }
+ [[ -r /etc/bobarev-router-v2/config ]] || return 0
  if [[ "$mode" == wan ]]; then
   wan=$(ip -4 route show default 2>/dev/null | awk '$1=="default"{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1);exit}}')
   [[ -n "$wan" && "$wan" != tailscale0 ]] || { echo 'Не найден WAN помимо tailscale0.'; return 1; }
@@ -5240,21 +5262,32 @@ ts43_router_set_exit() {
   [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || exit 1
   OUT=tailscale0; GATEWAY=''; EXIT_NODE=$node
  fi
- printf 'LANS=('; printf ' %q' "${LANS[@]}"; printf ' )\n'
- printf 'ADDRS=('; printf ' %q' "${ADDRS[@]}"; printf ' )\n'
- printf 'STARTS=('; printf ' %q' "${STARTS[@]}"; printf ' )\n'
- printf 'ENDS=('; printf ' %q' "${ENDS[@]}"; printf ' )\n'
- printf 'OUT=%q\nGATEWAY=%q\nDHCP=%q\nEXIT_NODE=%q\nDHCP_OWNER=%q\n' "$OUT" "$GATEWAY" "${DHCP:-false}" "$EXIT_NODE" "${DHCP_OWNER:-managed}"
+ printf 'LANS=('; printf ' %q' "${LANS[@]}"; printf ' )
+'
+ printf 'ADDRS=('; printf ' %q' "${ADDRS[@]}"; printf ' )
+'
+ printf 'STARTS=('; printf ' %q' "${STARTS[@]}"; printf ' )
+'
+ printf 'ENDS=('; printf ' %q' "${ENDS[@]}"; printf ' )
+'
+ printf 'OUT=%q
+GATEWAY=%q
+DHCP=%q
+EXIT_NODE=%q
+DHCP_OWNER=%q
+' "$OUT" "$GATEWAY" "${DHCP:-false}" "$EXIT_NODE" "${DHCP_OWNER:-managed}"
  ) > "$tmp" || { rm -f "$tmp"; return 1; }
  install -m 600 "$tmp" /etc/bobarev-router-v2/config || { rm -f "$tmp"; return 1; }
  rm -f "$tmp"
  systemctl restart bobarev-router-v2.service || return 1
 }
+
 ts43_install_exit_restore() {
  local node=$1
  [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || { echo 'Нужен явный IP/hostname, не пустая строка.'; return 1; }
  install -d -m 700 /etc/bobarev-tailscale || return 1
- printf '%s\n' "$node" > /etc/bobarev-tailscale/exit-node || return 1
+ printf '%s
+' "$node" > /etc/bobarev-tailscale/exit-node || return 1
  chmod 600 /etc/bobarev-tailscale/exit-node
  cat > /usr/local/sbin/bobarev-tailscale-exit-restore <<'TS42_RESTORE'
 #!/bin/bash
@@ -5275,7 +5308,7 @@ fi
 for i in {1..30}; do
  if ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default dev tailscale0([[:space:]]|$)'; then
   actual=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((p.get("HostName", "?") for p in (d.get("Peer") or {}).values() if p.get("ExitNode")),"не определён"))') || actual='не определён'
-  echo "Настройка выхода применена: $node; peer=$actual. Доступность интернета проверяется отдельно."
+  echo "Настройка выхода применена: $node; peer=$actual."
   exit 0
  fi
  sleep 2
@@ -5300,104 +5333,93 @@ TS42_UNIT
  systemctl daemon-reload || return 1
  systemctl enable bobarev-tailscale-exit-restore.service || return 1
 }
-ts43_direct_mode() {
- local node saved='' answer
- [[ -r /etc/bobarev-tailscale/exit-node ]] && saved=$(cat /etc/bobarev-tailscale/exit-node) || saved=''
- smart_menu 'Прямой интернет (WAN без exit node)' "Отключить exit node и переключить LAN маршрутизатора на WAN этого устройства.
-Клиенты LAN получат внешний IP домашнего роутера/провайдера.
-Сохранённый VPN-выход: ${saved:-нет}.
-Порядок: сначала маршрутизатор на WAN, затем отключение exit node." 22 "${WT_WIDTH:-85}" 2 answer NO 'Отмена' YES 'Переключить на прямой интернет' || return 1
- [[ "$answer" == YES ]] || return 0
- ts43_router_set_exit wan || return 1
- systemctl disable --now bobarev-tailscale-exit-restore.service 2>/dev/null || true
- tailscale set --exit-node= || true
- echo 'Exit node отключён. LAN направлен через WAN.'
- ts42_ipv4
-}
-ts43_vpn_mode() {
- local node saved='' current
- [[ -r /etc/bobarev-tailscale/exit-node ]] && saved=$(cat /etc/bobarev-tailscale/exit-node) || saved=''
- tailscale exit-node list || true
- br26_input 'Явный IP или hostname VPN-выхода из списка выше. Пустое значение не используется.' "$saved" node || return 1
- [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || return 1
- nm_yes "Вернуть VPN: выход $node для этого устройства и его LAN? Изменится внешний IP." || return 1
+
+ts_smart_connect_exit_node() {
+ local node='' saved='' current=''
+ current=$(ts42_current_exit 2>/dev/null) || current=''
+ [[ -r /etc/bobarev-tailscale/exit-node ]] && saved=$(cat /etc/bobarev-tailscale/exit-node 2>/dev/null) || saved=''
+ echo -e "${C_CYAN}=== ДОСТУПНЫЕ ШЛЮЗЫ (EXIT NODES) В СЕТИ TAILSCALE ===${C_RESET}"
+ tailscale exit-node list 2>/dev/null || echo "Список exit-node пуст или недоступен."
+ echo ""
+ tailscale exit-node suggest 2>/dev/null || true
+ echo ""
+ br26_input 'Введите IP или имя (hostname) удалённого шлюза из списка выше:' "${current:-$saved}" node || return 0
+ [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || { echo -e "${C_RED}Некорректный адрес узла.${C_RESET}"; return 1; }
+ nm_yes "Направить интернет-трафик через шлюз $node и закрепить его автозапуск при загрузке?" || return 0
  ts42_wait_running || return 1
- current=$(ts42_current_exit) || current=''
- if [[ "$current" != "$node" ]]; then
-  tailscale set --exit-node="$node" --exit-node-allow-lan-access=true || return 1
- fi
- ts42_wait_default || { echo 'VPN выход не готов; маршрутизатор оставлен в текущем режиме.'; return 1; }
- ts42_ipv4 || { echo 'IPv4 через VPN не работает; маршрутизатор оставлен в текущем режиме. Проверьте exit node.'; return 1; }
- ts43_install_exit_restore "$node" || return 1
- ts43_router_set_exit tailscale0 "$node" || return 1
- systemctl start bobarev-tailscale-exit-restore.service || return 1
- ts42_ipv4
-}
-ts42_exit_select() {
- local node current router_out=''
- tailscale exit-node list || return 1
- current=$(ts42_current_exit) || current=''
- br26_input 'Явный IP/hostname выхода. Пустое значение не используется для сброса.' "$current" node || return 1
- [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || return 1
- nm_yes "Выбрать $node сейчас и восстанавливать его при загрузке? Изменится интернет этого устройства. При отказе WAN fallback не будет." || return 1
- if [[ -r /etc/bobarev-router-v2/config ]]; then
-  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
-  echo 'Если локальный маршрутизатор имеет собственный EXIT_NODE, выберите тот же узел в его мастере: иначе при старте его настройка имеет приоритет.'
- fi
- ts43_install_exit_restore "$node" || return 1
- systemctl start bobarev-tailscale-exit-restore.service || return 1
- if ts42_ipv4; then
-  if [[ "$router_out" == tailscale0 ]]; then
-   echo 'Маршрутизатор использует tailscale0: LAN-клиенты также направлены через этот выход.'
-  else
-   echo 'Маршрутизатор использует WAN: LAN-клиенты не идут через этот exit node. Для перевода LAN в VPN используйте «Вернуть VPN exit node».'
-  fi
- else
-  echo 'ВНИМАНИЕ: IPv4 через выбранный выход не работает. Если маршрутизатор в tailscale0, клиенты могут остаться без интернета; используйте «Прямой интернет: WAN без exit node» или восстановите exit node.' >&2
+ tailscale set --exit-node="$node" --exit-node-allow-lan-access=true || return 1
+ if ! ts42_wait_default || ! ts42_ipv4; then
+  echo -e "${C_RED}Шлюз $node не отвечает или нет выхода в интернет. Возвращаю прямой выход...${C_RESET}" >&2
+  tailscale set --exit-node= 2>/dev/null || true
   return 1
  fi
+ ts43_install_exit_restore "$node" || return 1
+ if [[ -r /etc/bobarev-router-v2/config ]]; then
+  if nm_yes "Обнаружен локальный LAN-роутер. Перевести клиентов локальной сети (LAN) тоже на выход через этот VPN-шлюз ($node)?"; then
+   ts43_router_set_exit tailscale0 "$node" || return 1
+  fi
+ fi
+ echo -e "${C_GREEN}Шлюз $node успешно подключён и закреплён при перезагрузке!${C_RESET}"
 }
-ts42_exit_apply_now() {
- [[ -x /usr/local/sbin/bobarev-tailscale-exit-restore ]] || { echo 'Сначала выберите и сохраните явный выход.'; return 1; }
- nm_yes 'Применить сохранённый выход сейчас? Изменится интернет этого устройства.' || return 1
- systemctl start bobarev-tailscale-exit-restore.service || return 1
- ts42_ipv4
+
+ts_smart_disconnect_exit_node() {
+ local exit_now='' router_out=''
+ exit_now=$(ts42_current_exit 2>/dev/null) || exit_now=''
+ if [[ -r /etc/bobarev-router-v2/config ]]; then
+  router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+ fi
+ nm_yes "Отключить VPN-шлюз (${exit_now:-активный}) и переключить выход в интернет напрямую через провайдера (WAN)?" || return 0
+ if [[ "$router_out" == tailscale0 ]]; then
+  echo "Переключение локального маршрутизатора (LAN) на прямой WAN..."
+  ts43_router_set_exit wan || return 1
+ fi
+ systemctl disable --now bobarev-tailscale-exit-restore.service 2>/dev/null || true
+ tailscale set --exit-node= 2>/dev/null || true
+ echo -e "${C_GREEN}VPN-шлюз отключён. Устройство работает через прямой интернет (WAN).${C_RESET}"
+ ts42_ipv4 || true
 }
-ts42_exit_disable_restore() {
- nm_yes 'Отключить ТОЛЬКО отдельную службу восстановления? Текущий exit node не отключается. Маршрутизатор со своим EXIT_NODE всё ещё применит его при старте.' || return 1
- systemctl disable --now bobarev-tailscale-exit-restore.service || return 1
- echo 'Автоприменение выключено. Для смены текущего выхода используйте настройки шлюза Tailscale.'
-}
-ts43_consistency() {
- local exit_now router_out='' router_exit='' route
- exit_now=$(ts42_current_exit) || exit_now=''
+
+ts_full_diagnostic() {
+ local exit_now='' router_out='' router_exit='' route='' v6_ip=''
+ exit_now=$(ts42_current_exit 2>/dev/null) || exit_now=''
  if [[ -r /etc/bobarev-router-v2/config ]]; then
   router_out=$(grep -E '^OUT=' /etc/bobarev-router-v2/config 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
   router_exit=$(grep -E '^EXIT_NODE=' /etc/bobarev-router-v2/config 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
  fi
- route=$(ip route get 1.1.1.1 2>/dev/null || true)
- echo "Текущий exit node Tailscale: ${exit_now:-нет}"
- echo "Маршрутизатор OUT: ${router_out:-не настроен}"
- echo "Маршрутизатор EXIT_NODE: ${router_exit:-пусто}"
- echo "Фактический маршрут до 1.1.1.1:"
- echo "$route"
- if [[ "$router_out" == tailscale0 && -z "$exit_now" ]]; then
-  echo 'ВНИМАНИЕ: маршрутизатор в tailscale0, но exit node не выбран. LAN-клиенты могут остаться без интернета.'
- elif [[ "$router_out" == tailscale0 && "$exit_now" != "$router_exit" ]]; then
-  echo 'ВНИМАНИЕ: выход Tailscale и EXIT_NODE маршрутизатора различаются. При старте маршрутизатора применится его EXIT_NODE.'
- elif [[ "$router_out" != tailscale0 && -n "$exit_now" ]]; then
-  echo 'Режим: LAN через WAN, exit node выбран только для этого устройства. Клиенты используют чистый IP.'
- else
-  echo 'Согласованность: ошибок не обнаружено.'
+ route=$(ip route get 1.1.1.1 2>/dev/null | head -n 1 || true)
+ echo -e "${C_CYAN}=== 1. СТАТУС ШЛЮЗА И МАРШРУТИЗАЦИИ ===${C_RESET}"
+ echo "Хост:                        $(hostname)"
+ echo "IPv4 Forwarding:             $(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)"
+ echo "Текущий Exit Node Tailscale: ${exit_now:-нет (прямой WAN)}"
+ if [[ -n "$router_out" ]]; then
+  echo "Режим LAN-роутера (OUT):     ${router_out} (EXIT_NODE: ${router_exit:-нет})"
+  if [[ "$router_out" == tailscale0 && -z "$exit_now" ]]; then
+   echo -e "${C_YELLOW}ВНИМАНИЕ: LAN-роутер настроен на tailscale0, но exit node сейчас не выбран!${C_RESET}"
+  elif [[ "$router_out" == tailscale0 && "$exit_now" != "$router_exit" ]]; then
+   echo -e "${C_YELLOW}ВНИМАНИЕ: Текущий exit node ($exit_now) отличается от сохранённого в роутере ($router_exit).${C_RESET}"
+  fi
  fi
- echo 'Правило 5270 направляет собственный трафик устройства в таблицу 52 при активном exit node.'
+ echo "Маршрут до 1.1.1.1:          ${route:-не определён}"
+
+ echo -e "
+${C_CYAN}=== 2. ВНЕШНИЙ IP-АДРЕС НА ВЫХОДЕ ===${C_RESET}"
+ ts42_ipv4 || true
+ v6_ip=$(curl -q --noproxy '*' -6 -fsS --connect-timeout 4 --max-time 8 https://api6.ipify.org 2>/dev/null || true)
+ [[ -n "$v6_ip" ]] && echo "IPv6: $v6_ip" || echo "IPv6: не используется / недоступен"
+
+ echo -e "
+${C_CYAN}=== 3. ПРОВЕРКА СВЯЗНОСТИ И NAT (NETCHECK) ===${C_RESET}"
+ tailscale netcheck 2>/dev/null || echo "Не удалось выполнить netcheck."
+
+ echo -e "
+${C_CYAN}=== 4. РЕКОМЕНДУЕМЫЙ ВЫХОДНОЙ УЗЕЛ ===${C_RESET}"
+ tailscale exit-node suggest 2>/dev/null || echo "Нет доступных рекомендаций."
+
+ echo -e "
+${C_CYAN}=== 5. АКТИВНЫЕ ПРАВИЛА NAT (POSTROUTING) ===${C_RESET}"
+ iptables -t nat -S POSTROUTING 2>/dev/null || true
 }
-ts42_audit() {
- hostname;sysctl net.ipv4.ip_forward
- iptables -S FORWARD;iptables -S ts-forward || true
- iptables -t nat -S POSTROUTING;iptables -t nat -S ts-postrouting || true
- echo 'Локальная проверка iptables не определяет роль устройства. nftables требует отдельного анализа.'
-}
+
 br48_dnsmasq_range() {
  local f
  for f in /etc/dnsmasq.d/*.conf /etc/dnsmasq.conf; do
@@ -5405,45 +5427,53 @@ br48_dnsmasq_range() {
   awk '/^[[:space:]]*dhcp-range=/ {print; exit}' "$f" | head -n1 | awk -F'[=,]' '{print $2, $3}'
  done | head -n1
 }
+
 ts42_tools() {
- local c target='' port='' endpoints='' val=''
+ local c target='' port='' endpoints='' val='' sub_c=''
  while true; do
-  smart_menu 'Tailscale: диагностика и дополнительные настройки' 'Изменения только с подтверждением. Ping/netcheck не меняют конфигурацию.' 28 "${WT_WIDTH:-85}" 14 c 1 'Путь до peer: direct / DERP / relay' 2 'Netcheck: NAT и UDP' 3 'IPv4 / IPv6 выхода' 4 'Рекомендованный exit node (без выбора)' 5 'Управление через TCP 443' 6 'Выбрать выход + восстановление при загрузке' 7 'Применить сохранённый выход сейчас' 8 'Прямой интернет: WAN без exit node' 9 'Вернуть VPN exit node' 10 'Отключить автоприменение выхода' 11 'Согласованность выхода и маршрутизатора' 12 'Peer Relay (расширенно)' 13 'Автообновления клиента' 14 'Локальные правила Tailscale/NAT' 0 'Назад' || return 0
+  smart_menu 'Tailscale: диагностика и управление выходом'    'Все основные инструменты диагностики, переключения VPN-шлюза и обхода блокировок на одном экране:'    18 "${WT_WIDTH:-85}" 7 c    1 'Полная диагностика (Статус, внешний IP, Netcheck и NAT)'    2 'Пинг узла: проверка прямого соединения (Direct / DERP)'    3 'Подключить VPN-выход (Exit Node + автозапуск при старте)'    4 'Отключить VPN-выход (Прямой интернет через WAN)'    5 'Обход блокировок: принудительный TCP 443 (Вкл / Выкл)'    6 'Дополнительно: Peer Relay и Автообновления'    0 '⬅ Назад' || return 0
   case "$c" in
    0) return 0 ;;
-   1) br26_input 'IP/hostname peer' "$target" target || continue
+   1) clear; ts_full_diagnostic ;;
+   2) clear
+      echo -e "${C_CYAN}=== СПИСОК УЗЛОВ В ВАШЕЙ СЕТИ TAILSCALE ===${C_RESET}"
+      tailscale status 2>/dev/null || true
+      echo ""
+      br26_input 'Введите IP или имя узла (peer) для проверки связи:' "$target" target || continue
       [[ "$target" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] && tailscale ping --c=5 "$target" || true ;;
-   2) tailscale netcheck || true ;;
-   3) ts42_ipv4 || true; curl -q --noproxy '*' -6 -fsS --connect-timeout 5 --max-time 12 https://api6.ipify.org || true; echo ;;
-   4) tailscale exit-node suggest || true;echo 'Рекомендация не применялась.' ;;
-   5) ts42_control || true ;;
-   6) ts42_exit_select || true ;;
-   7) ts42_exit_apply_now || true ;;
-   8) ts43_direct_mode || true ;;
-   9) ts43_vpn_mode || true ;;
-   10) ts42_exit_disable_restore || true ;;
-   11) ts43_consistency || true ;;
-   12) echo 'Нужны разрешения relay в tailnet grants и доступный UDP-порт. Политики/проброс NAT автоматически не меняются.'
-      if ! tailscale set --help 2>&1 | grep -q -- --relay-server-port; then echo 'Клиент не поддерживает Peer Relay.';pause_enter;continue;fi
-      br26_input 'UDP-порт Peer Relay (1024..65535)' '40000' port || continue
-      [[ "$port" =~ ^[0-9]{4,5}$ ]] && ((10#$port>=1024 && 10#$port<=65535)) || continue
-      nm_yes "Включить Peer Relay UDP $port? ACL/доступность нужно настроить отдельно." || continue
-      tailscale set --relay-server-port="$port" || { pause_enter;continue; }
-      if nm_yes 'Открыть этот UDP-порт в UFW?'; then ufw allow "$port/udp" || true;fi
-      if nm_yes 'Задать static endpoints (расширенно)?'; then
-       br26_input 'Список IP:порт через запятую; пример публичного IPv4: 203.0.113.1:40000' '' endpoints || continue
-       if python3 - "$endpoints" <<'TS42_ENDPOINT'
-import sys,ipaddress
-for s in sys.argv[1].split(','):
- host,port=s.rsplit(':',1);ipaddress.ip_address(host.strip('[]'));assert port.isdecimal() and 1<=int(port)<=65535
-TS42_ENDPOINT
-       then
-        nm_yes "Применить static endpoints: $endpoints?" && tailscale set --relay-server-static-endpoints="$endpoints" || true
-       fi
-      fi ;;
-   13) smart_menu 'Автообновления Tailscale' 'Может перезапускать VPN. На маршрутизаторе это влияет на клиентов.' 15 "${WT_WIDTH:-85}" 2 val true 'Включить' false 'Выключить' || continue
-      if nm_yes "Установить auto-update=$val?"; then tailscale set --auto-update="$val" || true;fi ;;
-   14) ts42_audit || true ;;
+   3) clear; ts_smart_connect_exit_node || true ;;
+   4) clear; ts_smart_disconnect_exit_node || true ;;
+   5) clear; ts42_control || true ;;
+   6)
+      if ! smart_menu 'Дополнительные параметры Tailscale' 'Выберите настройку:' 14 "${WT_WIDTH:-85}" 3 sub_c        1 'Настроить UDP Peer Relay (прямой ретранслятор между узлами)'        2 'Автообновления клиента Tailscale (Включить / Выключить)'        0 '⬅ Назад'; then
+       continue
+      fi
+      case "$sub_c" in
+       1)
+          if ! tailscale set --help 2>&1 | grep -q -- --relay-server-port; then
+           echo 'Установленная версия Tailscale не поддерживает Peer Relay.'
+          else
+           br26_input 'UDP-порт Peer Relay (1024..65535):' '40000' port || continue
+           if [[ "$port" =~ ^[0-9]{4,5}$ ]] && ((10#$port>=1024 && 10#$port<=65535)); then
+            if nm_yes "Включить Peer Relay на порту UDP $port?"; then
+             tailscale set --relay-server-port="$port" || true
+             if command -v ufw >/dev/null 2>&1 && nm_yes 'Открыть этот UDP-порт в брандмауэре UFW?'; then
+              ufw allow "$port/udp" comment 'Tailscale Peer Relay' || true
+             fi
+             if nm_yes 'Задать статические внешние адреса (static endpoints)?'; then
+              br26_input 'Список IP:порт через запятую (например 203.0.113.1:40000):' '' endpoints || continue
+              tailscale set --relay-server-static-endpoints="$endpoints" || true
+             fi
+            fi
+           fi
+          fi ;;
+       2)
+          if smart_menu 'Автообновления Tailscale' 'Выберите режим автоматического обновления пакета Tailscale:' 14 "${WT_WIDTH:-85}" 2 val            true 'Включить автообновления'            false 'Выключить автообновления'; then
+           tailscale set --auto-update="$val" || true
+           echo -e "${C_GREEN}Настройка auto-update=$val применена.${C_RESET}"
+          fi ;;
+       0) continue ;;
+      esac ;;
   esac
   pause_enter
  done
@@ -5490,19 +5520,18 @@ mod_tailscale() {
         local nf_cur=$(get_tailscale_netfilter_mode)
 
         local ts_choice
-        if ! smart_menu "Настройка закрытой сети Tailscale" "" 20 $WT_WIDTH 12 "ts_choice" \
-        "1" " Авторизация" \
-        "2" " Настройка шлюза" \
-        "3" " Трансляция локальных сетей" \
-        "4" " Прием маршрутов" \
-        "5" " Стелс-режим" \
-        "6" " Ускорение и MSS Clamping" \
-        "7" " Локальный веб-интерфейс" \
-        "8" " Приоритет сетевых правил" \
-        "9" " Личный ретранслятор (DERP)" \
-        "10" " Диагностика и дополнительные настройки Tailscale" \
-        "11" " Полный сброс" \
-        "0" " Вернуться назад"; then
+        if ! smart_menu "🔒 Закрытая сеть Tailscale" "Выберите раздел управления сетью Tailscale:" 20 $WT_WIDTH 11 "ts_choice" \
+        "1" " Авторизация и подключение узла" \
+        "2" " Настройка шлюза (Exit Node: раздача / подключение)" \
+        "3" " Маршруты подсетей (Раздача LAN и приём маршрутов)" \
+        "4" " Стелс-режим (Фильтрация входящих пакетов)" \
+        "5" " Ускорение сети и фиксация MTU (MSS Clamping)" \
+        "6" " Локальная веб-панель управления (порт 5252)" \
+        "7" " Приоритет сетевых правил (UFW / Tailscale NAT)" \
+        "8" " Личный ретранслятор (DERP-сервер)" \
+        "9" " Диагностика, обход TCP 443 и автозапуск шлюза" \
+        "10" " Полный сброс настроек Tailscale" \
+        "0" " ⬅ Назад"; then
             break
         fi
 
@@ -5510,7 +5539,7 @@ mod_tailscale() {
         clear
 
         case "$ts_choice" in
-            10) ts42_tools ;;
+            9) ts42_tools ;;
             1)
                 if is_tailscale_authenticated; then
                     if prompt_yn "Узел уже находится в сети. Желаете выполнить повторную привязку?" "false"; then
@@ -5530,11 +5559,12 @@ mod_tailscale() {
                 ;;
             2)
                 local en_choice
-                if smart_menu "Настройка шлюза" "Действие:" 12 $WT_WIDTH 4 "en_choice" \
-                "1" " Назначить этот сервер шлюзом" \
-                "2" " Отключить трансляцию шлюза" \
-                "3" " Подключиться к удаленному шлюзу" \
-                "4" " Отключиться от шлюза"; then
+                if smart_menu "Настройка шлюза (Exit Node)" "Выберите режим работы шлюза:" 14 $WT_WIDTH 5 "en_choice" \
+                "1" " Сделать ЭТОТ сервер выходным шлюзом (раздавать интернет)" \
+                "2" " Отключить раздачу интернета с этого сервера" \
+                "3" " Подключиться к удаленному шлюзу (Exit Node + автозапуск)" \
+                "4" " Отключиться от удаленного шлюза (Прямой интернет WAN)" \
+                "0" " ⬅ Назад"; then
                     case "$en_choice" in
                         1) 
                             echo -e "${C_BLUE} Настройка сервера в качестве сетевого шлюза...${C_RESET}"
@@ -5568,6 +5598,7 @@ mod_tailscale() {
                             
                             whiptail --title " ВАЖНО: Активация в панели Tailscale" --msgbox \
 "Сервер объявлен шлюзом, форвардинг и правила NAT/SNAT закреплены!\n\nОстался финальный шаг в веб-панели:\n1. Откройте: https://login.tailscale.com/admin/machines\n2. Напротив этого сервера нажмите [...] -> Edit route settings...\n3. Включите переключатель 'Use as exit node'!\n\n Если интернет через шлюз не открывается на клиентах,\nпереподключите Tailscale на клиентском устройстве." 16 $WT_WIDTH
+                            pause_enter
                             ;;
                         2) 
                             silent_run tailscale set --advertise-exit-node=false
@@ -5582,26 +5613,28 @@ mod_tailscale() {
                                     silent_run ufw reload
                                 fi
                             fi
-                            echo -e "${C_GREEN} Функция шлюза Tailscale отключена.${C_RESET}" 
+                            echo -e "${C_GREEN} Функция шлюза Tailscale отключена.${C_RESET}"
+                            pause_enter
                             ;;
                         3)
-                            local target_ip=""
-                            prompt_clean "IP-адрес или имя удаленного шлюза:" target_ip
-                            if [ -n "$target_ip" ]; then
-                                silent_run tailscale set --exit-node="$target_ip" --exit-node-allow-lan-access
-                                echo -e "${C_GREEN} Весь трафик перенаправлен через выбранный узел.${C_RESET}"
-                            fi
+                            ts_smart_connect_exit_node || true
+                            pause_enter
                             ;;
-                        4) silent_run tailscale set --exit-node=; echo -e "${C_GREEN} Перенаправление трафика отключено.${C_RESET}" ;;
+                        4)
+                            ts_smart_disconnect_exit_node || true
+                            pause_enter
+                            ;;
                     esac
-                    pause_enter
                 fi
                 ;;
             3)
                 local tr_choice
-                if smart_menu "Трансляция локальных сетей" "Действие:" 11 $WT_WIDTH 2 "tr_choice" \
-                "1" " Включить трансляцию (Задать подсеть)" \
-                "2" " Отключить трансляцию"; then
+                if smart_menu "Маршруты подсетей (Subnet Router)" "Управление трансляцией и приёмом локальных подсетей:" 14 $WT_WIDTH 5 "tr_choice" \
+                "1" " Включить раздачу локальной подсети (Advertise Routes)" \
+                "2" " Отключить раздачу локальной подсети" \
+                "3" " Разрешить приём маршрутов от других узлов (Accept Routes)" \
+                "4" " Отключить приём маршрутов от других узлов" \
+                "0" " ⬅ Назад"; then
                     case "$tr_choice" in
                         1)
                             local sub=$(get_interface_subnet "$DEFAULT_WAN_IF")
@@ -5612,24 +5645,27 @@ mod_tailscale() {
                                 silent_run tailscale set --advertise-routes="$r_input"
                                 echo -e "${C_GREEN} Выбранный диапазон ($r_input) транслируется в общую сеть.${C_RESET}"
                             fi
+                            pause_enter
                             ;;
                         2)
                             silent_run tailscale set --advertise-routes=""
                             echo -e "${C_GREEN} Трансляция локальных сетей успешно отключена.${C_RESET}"
+                            pause_enter
+                            ;;
+                        3)
+                            silent_run tailscale set --accept-routes=true
+                            echo -e "${C_GREEN} Принятие маршрутов от других устройств включено.${C_RESET}"
+                            pause_enter
+                            ;;
+                        4)
+                            silent_run tailscale set --accept-routes=false
+                            echo -e "${C_BLUE} Принятие маршрутов отключено.${C_RESET}"
+                            pause_enter
                             ;;
                     esac
-                    pause_enter
                 fi
                 ;;
             4)
-                if prompt_yn "Разрешить принятие внешних сетевых маршрутов от других устройств в вашей сети?" "true"; then
-                    silent_run tailscale set --accept-routes=true; echo -e "${C_GREEN} Принятие маршрутов включено.${C_RESET}"
-                else
-                    silent_run tailscale set --accept-routes=false; echo -e "${C_BLUE} Принятие маршрутов отключено.${C_RESET}"
-                fi
-                pause_enter
-                ;;
-            5)
                 if prompt_yn "Включить скрытый режим работы (отбрасывание нежелательного входящего трафика)?" "true"; then
                     silent_run tailscale set --stateful-filtering=true; echo -e "${C_GREEN} Скрытый режим работы активирован.${C_RESET}"
                 else
@@ -5637,11 +5673,11 @@ mod_tailscale() {
                 fi
                 pause_enter
                 ;;
-            6)
+            5)
                 if prompt_yn "Активировать аппаратное ускорение и нативную фиксацию MTU (MSS Clamping)?" "true"; then enable_routing_optimizations; fi
                 pause_enter
                 ;;
-            7)
+            6)
                 if prompt_yn "Включить встроенную панель управления в браузере (порт 5252/tcp)?" "true"; then
                     silent_run tailscale set --webclient=true
                     if command -v ufw &>/dev/null; then
@@ -5659,7 +5695,7 @@ mod_tailscale() {
                 fi
                 pause_enter
                 ;;
-            8)
+            7)
                 local nf_choice
                 if smart_menu "Приоритет сетевых правил" "Действие:" 13 $WT_WIDTH 4 "nf_choice" \
                 "1" " Приоритет брандмауэра UFW (системный режим)" \
@@ -5687,10 +5723,10 @@ mod_tailscale() {
                     pause_enter
                 fi
                 ;;
-            9)
+            8)
                 manage_custom_derp
                 ;;
-            11)
+            10)
                 if prompt_yn "Полностью сбросить все сетевые параметры к заводским значениям?" "false"; then
                     systemctl disable --now bobarev-tailscale-exit-restore.service 2>/dev/null || true
                     tailscale up --reset 2>&1 | grep -v "accept-routes" || true

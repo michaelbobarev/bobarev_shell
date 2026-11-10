@@ -3,9 +3,83 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.23 (Universal Simplified Menu Edition)
+# Версия: 3.18.24 (Universal Simplified Menu Edition — Full Cloudflare MASQUE)
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="3.18.23"
+# Изменения 3.18.24:
+#   * Полное удаление устаревшего каскада «WireGuard + udp2raw» (wg-cascade / table 51888):
+#     вырезаны функции setup_direct_wg_server2_foreign, setup_direct_wg_server1_ru,
+#     mod_direct_wg_cascade, ensure_udp2raw_installed, clean_udp2raw_iptables и
+#     configure_udp2raw_service. Больше не отключается аппаратное ускорение сетевой
+#     карты (TSO/GSO/GRO) на драйвере virtio_net.
+#   * Полная замена заблокированного в РФ классического Cloudflare WARP по WireGuard
+#     (wgcf / порт 2408 / table 51820) на современный стек Cloudflare MASQUE (Usque,
+#     HTTP/3 QUIC поверх UDP 443) во всех каскадах (Автономный NaiveProxy, Xray REALITY,
+#     Hysteria 2 и Tailscale).
+#   * Служба usque.service переведена по умолчанию на полный стек gVisor (`usque socks
+#     -b 127.0.0.1 -p 1080 -c /etc/usque/config.json`) для нативной поддержки TCP и UDP
+#     (голосовые вызовы, WebRTC, QUIC).
+#   * В render_xray_client_config() оставлен исключительно современный блок фрагментации
+#     Xray 26+ `streamSettings.finalmask.tcp` без устаревшего отката на `settings.fragment`.
+#   * Оптимизировано меню раздела 2 («🌍 ПРОКСИ, VPN И КАСКАДЫ»): 7 актуальных топологий.
+# Изменения 3.18.23:
+#   * Исправлена генерация /etc/xray/config.json в функции render_xray_client_config():
+#     корректное экранирование кавычек в строке `"interface": "${wan_dev}",` (ранее
+#     приводившее к ошибке Xray: invalid character 'i' looking for beginning of object
+#     key string), а также переход на актуальный синтаксис Xray 26+
+#     `streamSettings.finalmask.tcp` для фрагментации TLS с автоматическим откатом
+#     на `settings.fragment` для старых версий Xray и предпусковой проверкой `xray run -test`.
+#   * Добавлена сквозная защита от блокировок ТСПУ подсетей Google (sum.golang.org,
+#     proxy.golang.org, dl.google.com) на российских серверах во всех модулях сборки
+#     Go / xcaddy / Caddy NaiveProxy и личного ретранслятора DERP:
+#     авто-переключение на зеркала GOPROXY (https://goproxy.io,https://goproxy.cn,direct)
+#     и GOSUMDB=off при недоступности sum.golang.org, зеркала загрузки Go с проверкой
+#     SHA256, резервная загрузка готового бинарника xcaddy с GitHub Releases и
+#     возможность сборки через уже поднятый локальный SOCKS5-туннель каскада.
+#   * В каскадах Сервера 1 (Xray REALITY и Hysteria 2) запуск клиентского SOCKS5-туннеля
+#     перенесён ПЕРЕД сборкой Caddy, чтобы сборка могла использовать туннель при жёстких
+#     блокировках на РФ-хостинге.
+# Изменения 3.18.22:
+#   * Защита от перебора паролей SSH вынесена в отдельный наглядный пункт меню
+#     «7. Защита от перебора паролей SSH (SSHGuard / Fail2Ban)» в разделе 1
+#     (поддержка быстрой установки SSHGuard или Fail2Ban с systemd-backend,
+#     просмотра журнала атак и заблокированных IP), а также предлагается в п. 6
+#     независимо от выбранного режима Tailscale.
+#   * Переработан раздел 10 аудита («Профиль Bobarev Shell — что настроено скриптом»):
+#     две строки роутера объединены в единый понятный статус «Роутер SBC (раздача в LAN)»,
+#     добавлены индикаторы «Защита SSH от перебора» и «Cloudflare MASQUE (Usque)»,
+#     обновлена ссылка на разделы главного меню (разделы 1–5).
+#   * Добавлен новый режим «2. Автономный NaiveProxy (Один сервер + Cloudflare MASQUE)»
+#     в разделе 2 (на базе клиента Diniboy1123/usque по протоколу HTTP/3 QUIC MASQUE):
+#     маскировка входящего трафика под Chrome (защита от DPI) + выход в интернет
+#     через CDN Cloudflare (чистая репутация IP без капч, блокировок ChatGPT/OpenAI
+#     и ограничений стриминговых сервисов).
+# Изменения 3.18.21:
+#   * Исправлена ошибка синтаксиса awk в модуле аудита (раздел 8, открытые порты),
+#     приводившая к обрыву аудита ("awk: line 2: missing } near end of file")
+#     и аварийному выбросу из скрипта в терминал при активном set -euo pipefail.
+#   * Устранены все потенциальные точки аварийного выхода ("выброса в терминал")
+#     в меню, подменю, диалогах whiptail (авто-адаптация высоты smart_menu под
+#     размер окна терминала) и функции pause_enter (очистка буфера ввода).
+#   * Исправлено определение и маршрутизация выходного IP в Каскаде 3 (Xray REALITY):
+#     устранён флаг --noproxy '*' при проверке через --socks5-hostname 127.0.0.1:10808
+#     (из-за которого curl игнорировал SOCKS5-прокси и показывал IP Сервера 1 вместо
+#     Сервера 2), добавлена жёсткая привязка интерфейсов и перезапуск Caddy.
+#   * Устранено дублирование dhcp-option 3 и 6 в существующем dnsmasq на роутере.
+# Изменения 3.18.20:
+#   * Вопрос про Tailscale задаётся ОДИН РАЗ за запуск мастера: ответ в модуле
+#     SSH («Скрыть доступ через закрытую сеть?») запоминается в
+#     /etc/default/bobarev-answers и больше не дублируется в модуле Tailscale.
+#   * Аудит: выровненный формат «строка к строке» (единая колонка значений),
+#     заголовки разделов с линиями, шапка с хостом/версией/uptime.
+#   * Аудит: новые показатели — ОС и ядро, ожидающие обновления, необходимость
+#     перезагрузки, процессор и занятость ОЗУ, неудачные попытки входа SSH,
+#     последний вход, службы на открытых портах.
+#   * Аудит: раздел 10 «Профиль Bobarev Shell» — что уже настроено скриптом
+#     (роутер, каскады, NaiveProxy, Xray, WARP, WireGuard, Tailscale, DERP...).
+#   * Аудит: итоговая сводка — список пунктов, отмеченных жёлтым/красным.
+# ==============================================================================
+
+SCRIPT_VERSION="3.18.24"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -41,8 +115,6 @@ NAIVE_USERS_FILE="/etc/naiveproxy/users.conf"
 NAIVE_PASS_FILE="/etc/naiveproxy/users.pass"
 WEBROOT="/var/www/html"
 LOG_DIR="/var/log/caddy"
-UDP2RAW_BIN="/usr/local/bin/udp2raw"
-UDP2RAW_SERVICE="/etc/systemd/system/bobarev-udp2raw.service"
 
 SYSTEM_TYPE="Cloud_VPS"
 if [ -f /etc/armbian-release ] || [ -f /etc/default/armbian-zram ] || grep -q -i "armbian\|nanopi\|raspberry" /etc/os-release 2>/dev/null; then
@@ -162,19 +234,7 @@ is_naive_active() {
 }
 
 is_warp_active() {
-    systemctl is-active --quiet wg-quick@warp.service 2>/dev/null && return 0
-    ip link show warp >/dev/null 2>&1 && return 0
-    return 1
-}
-
-is_udp2raw_active() {
-    systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null && return 0
-    return 1
-}
-
-is_wg_cascade_active() {
-    systemctl is-active --quiet wg-quick@wg-cascade.service 2>/dev/null && return 0
-    ip link show wg-cascade >/dev/null 2>&1 && return 0
+    systemctl is-active --quiet usque.service 2>/dev/null && return 0
     return 1
 }
 
@@ -374,12 +434,6 @@ flush_and_reload_nat() {
         if [ "$fwd_pol" = "ACCEPT" ] || [ "$(tailscale get advertise-exit-node 2>/dev/null || echo 'false')" = "true" ] || ip link show tun0 >/dev/null 2>&1; then
             apply_wan_exit_nat "$wan_dev" "true" || true
         fi
-    fi
-    if is_warp_active; then
-        iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE 2>/dev/null || true
-    fi
-    if is_wg_cascade_active; then
-        iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
     fi
     if is_wg0_active; then
         iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wg0 -j MASQUERADE 2>/dev/null || true
@@ -897,7 +951,7 @@ while true; do
 tune_fq_qdisc_interfaces() {
     command -v tc &>/dev/null || return 0
     local wan_if=$(get_wan_if)
-    for dev in $wan_if tailscale0 wg0 wg-cascade warp; do
+    for dev in $wan_if tailscale0 wg0; do
         [ -z "$dev" ] && continue
         if ip link show "$dev" >/dev/null 2>&1; then
             tc qdisc replace dev "$dev" root fq limit 30000 flow_limit 10000 2>/dev/null || true
@@ -1090,9 +1144,6 @@ while iptables -t mangle -D OUTPUT -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPM
 
 for m_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
     while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
-    while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
-    while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
-    while iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
     while iptables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
     while iptables -t mangle -D OUTPUT -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
     while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
@@ -1106,26 +1157,13 @@ if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
-    # Для связки NaiveProxy -> Tailscale (MTU 1280 + Disco) -> WARP (MTU 1280) фиксируем MSS 1140
+    # Для связки NaiveProxy -> Tailscale (MTU 1280 + Disco) фиксируем MSS 1140
     iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     iptables -t mangle -I OUTPUT 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
         tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true 2>/dev/null || true
     fi
-elif [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
-    if command -v tailscale &>/dev/null; then
-        tailscale set --exit-node= 2>/dev/null || true
-    fi
-    while ip rule del priority 100 2>/dev/null; do :; done
-    [ -n "$PUB_IP" ] && while ip rule del from "$PUB_IP" lookup main 2>/dev/null; do :; done
-    ip route replace default dev wg-cascade table 51888 2>/dev/null || true
-    ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
-    while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
-    iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wg-cascade -j MASQUERADE
-    iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-    iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-    iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
 fi
 RU_SH_EOF
     chmod +x /usr/local/bin/bobarev-cascade-ru.sh
@@ -1579,7 +1617,7 @@ is_usque_active() {
 }
 
 install_and_setup_usque() {
-    local proxy_mode="${1:-l4-socks}"
+    local proxy_mode="${1:-socks}"
     local force_re_reg="${2:-false}"
 
     echo -e "${C_BLUE} Проверка системных зависимостей (curl, jq, unzip, qrencode)...${C_RESET}"
@@ -1649,9 +1687,9 @@ install_and_setup_usque() {
         echo -e "${C_GREEN} Учетная запись Cloudflare MASQUE успешно зарегистрирована!${C_RESET}"
     fi
 
-    [ "$proxy_mode" != "socks" ] && proxy_mode="l4-socks"
+    [ "$proxy_mode" != "l4-socks" ] && proxy_mode="socks"
 
-    echo -e "${C_BLUE} Настройка системной службы usque.service (режим: ${proxy_mode}, 127.0.0.1:1080)...${C_RESET}"
+    echo -e "${C_BLUE} Настройка системной службы usque.service (режим: ${proxy_mode}, стек gVisor TCP+UDP на 127.0.0.1:1080)...${C_RESET}"
     cat << USQUE_SVC_EOF > /etc/systemd/system/usque.service
 [Unit]
 Description=Usque MASQUE Cloudflare WARP SOCKS5 Proxy (${proxy_mode} on 127.0.0.1:1080)
@@ -1661,7 +1699,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/etc/usque
-Environment="GOMEMLIMIT=256MiB"
+Environment="GOMEMLIMIT=384MiB"
 ExecStart=/usr/local/bin/usque ${proxy_mode} -b 127.0.0.1 -p 1080 -c /etc/usque/config.json
 Restart=always
 RestartSec=3
@@ -1722,7 +1760,7 @@ verify_usque_masque_ip() {
 }
 
 enable_masque_for_existing_naive() {
-    local proxy_mode="${1:-l4-socks}"
+    local proxy_mode="${1:-socks}"
     local force_re_reg="${2:-false}"
 
     if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
@@ -1787,7 +1825,7 @@ setup_standalone_naive_masque() {
         local is_configured=false
         local c_state="Не настроен"
         local cur_out="masque"
-        local cur_usque_mode="l4-socks"
+        local cur_usque_mode="socks"
         local usque_srv_state="остановлен"
 
         if is_usque_active; then
@@ -1802,7 +1840,7 @@ setup_standalone_naive_masque() {
             if [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
                 is_configured=true
                 cur_out="${NAIVE_OUT_MODE:-direct}"
-                cur_usque_mode="${USQUE_MODE:-l4-socks}"
+                cur_usque_mode="${USQUE_MODE:-socks}"
                 local out_human="Прямой выход с VPS"
                 if [ "$cur_out" = "masque" ] && is_usque_active; then
                     out_human="Cloudflare MASQUE (${cur_usque_mode} -> CDN Cloudflare)"
@@ -1858,7 +1896,7 @@ setup_standalone_naive_masque() {
                 manage_naive_users_menu
                 ;;
             3)
-                enable_masque_for_existing_naive "${cur_usque_mode:-l4-socks}" "false" || true
+                enable_masque_for_existing_naive "${cur_usque_mode:-socks}" "false" || true
                 pause_enter
                 ;;
             4)
@@ -1866,14 +1904,14 @@ setup_standalone_naive_masque() {
                 verify_usque_masque_ip
                 echo ""
                 if prompt_yn "Перерегистрировать новое устройство в Cloudflare WARP (создать свежий /etc/usque/config.json)?" "false"; then
-                    enable_masque_for_existing_naive "${cur_usque_mode:-l4-socks}" "true" || true
+                    enable_masque_for_existing_naive "${cur_usque_mode:-socks}" "true" || true
                 fi
                 pause_enter
                 ;;
             5)
                 local next_mode="socks"
-                [ "${cur_usque_mode:-l4-socks}" = "socks" ] && next_mode="l4-socks"
-                if prompt_yn "Переключить режим прокси Usque с '${cur_usque_mode:-l4-socks}' на '${next_mode}'?
+                [ "${cur_usque_mode:-socks}" = "socks" ] && next_mode="l4-socks"
+                if prompt_yn "Переключить режим прокси Usque с '${cur_usque_mode:-socks}' на '${next_mode}'?
 
 • l4-socks — легкий и быстрый L4 TCP-прокси (рекомендуется для NaiveProxy)
 • socks — полный стек gVisor (TCP+UDP, резерв HTTP/2)" "true"; then
@@ -1943,7 +1981,7 @@ setup_standalone_naive_masque() {
                 fi
 
                 # Шаг 1: Установка и запуск Usque (Cloudflare MASQUE) на 127.0.0.1:1080
-                if ! install_and_setup_usque "${cur_usque_mode:-l4-socks}" "false"; then
+                if ! install_and_setup_usque "${cur_usque_mode:-socks}" "false"; then
                     echo -e "${C_RED} Не удалось подготовить службу Usque (Cloudflare MASQUE). Бэкап: $backup_dir${C_RESET}"
                     pause_enter; continue
                 fi
@@ -1967,7 +2005,7 @@ setup_standalone_naive_masque() {
                     printf 'NAIVE_EMAIL=%q\n' "$n_email"
                     printf 'SERVER_PUB_IP=%q\n' "$pub_ip"
                     printf 'NAIVE_OUT_MODE=%q\n' masque
-                    printf 'USQUE_MODE=%q\n' "${cur_usque_mode:-l4-socks}"
+                    printf 'USQUE_MODE=%q\n' "${cur_usque_mode:-socks}"
                 } > "$config_tmp"
                 mv -f "$config_tmp" /etc/default/bobarev-cascade
 
@@ -2075,11 +2113,7 @@ setup_cascade_server1_ru() {
         silent_run systemctl disable derper.service
     fi
 
-    if is_wg_cascade_active; then
-        echo -e "${C_BLUE} Отключение прямого моста wg-cascade (переход на Tailscale-маршрут)...${C_RESET}"
-        silent_run systemctl stop wg-quick@wg-cascade.service
-        silent_run systemctl disable wg-quick@wg-cascade.service
-    fi
+
 
     ensure_go_and_build_caddy_naive || return 1
 
@@ -2113,124 +2147,15 @@ EOF
     print_naive_shadowrocket_links
 }
 
-ensure_warp_installed_and_configured() {
-    if ! command -v wg &>/dev/null || ! command -v iptables &>/dev/null || ! command -v curl &>/dev/null; then
-        echo -e "${C_BLUE} Установка пакетов wireguard-tools, iptables и curl...${C_RESET}"
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -yq wireguard-tools iptables curl >/dev/null 2>&1
-    fi
-
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    local wgcf_arch="amd64"
-    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
-        wgcf_arch="arm64"
-    fi
-
-    if [ ! -x /usr/local/bin/wgcf ]; then
-        echo -e "${C_BLUE} Скачивание утилиты wgcf для генерации профиля Cloudflare WARP...${C_RESET}"
-
-        local wgcf_sha=""
-        case "$wgcf_arch" in
-            amd64) wgcf_sha="4fb7a136aa470ece11d17949c7db07b040ec9c604742dc8680bcf1889f85d0c8" ;;
-            arm64) wgcf_sha="710ab2d8ac145d81a4cf0c11bdb0e05914f77ae2a45f67b87e718d84b4cb7301" ;;
-            *)     wgcf_sha="" ;;
-        esac
-
-        if ! curl -fsSL "https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux_${wgcf_arch}" -o /usr/local/bin/wgcf 2>/dev/null; then
-            local latest_url=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null | grep "browser_download_url.*linux_${wgcf_arch}" | head -n 1 | cut -d'"' -f4 || echo "")
-            [ -n "$latest_url" ] && curl -fsSL "$latest_url" -o /usr/local/bin/wgcf
-        fi
-
-        if [ -n "$wgcf_sha" ]; then
-            if ! verify_sha256 "/usr/local/bin/wgcf" "$wgcf_sha"; then
-                echo -e "${C_RED} Ошибка: SHA256 для wgcf не совпал! Файл удален.${C_RESET}"
-                rm -f /usr/local/bin/wgcf
-                return 1
-            fi
-        fi
-        chmod +x /usr/local/bin/wgcf
-    fi
-
-    mkdir -p /etc/wireguard
-    local need_patch=false
-    if [ ! -f /etc/wireguard/warp.conf ] || prompt_yn "Профиль /etc/wireguard/warp.conf уже существует. Сгенерировать новый профиль WARP?" "false"; then
-        echo -e "${C_BLUE} Регистрация аккаунта Cloudflare WARP и создание конфигурации...${C_RESET}"
-        (
-            cd /root
-            rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null || true
-            /usr/local/bin/wgcf register --accept-tos
-            /usr/local/bin/wgcf generate --keepalive
-            cp /root/wgcf-profile.conf /etc/wireguard/warp.conf
-        )
-        need_patch=true
-    elif ! grep -q "MTU = 1280" /etc/wireguard/warp.conf 2>/dev/null; then
-        need_patch=true
-    fi
-
-    if [ "$need_patch" = true ]; then
-        # Безопасная генерация /etc/wireguard/warp.conf без многострочных sed
-        local w_priv=$(awk -F'=' '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | tr -d '[:space:]')
-        local w_addr=$(awk -F'=' '/^[[:space:]]*Address[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | head -n 1 | cut -d',' -f1 | tr -d '[:space:]')
-        local w_pub=$(awk -F'=' '/^[[:space:]]*PublicKey[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | tr -d '[:space:]')
-        local w_end=$(awk -F'=' '/^[[:space:]]*Endpoint[[:space:]]*=/{sub(/^[^=]*=/, ""); print; exit}' /etc/wireguard/warp.conf 2>/dev/null | tr -d '[:space:]')
-        [ -z "$w_addr" ] && w_addr="172.16.0.2/32"
-        [ -z "$w_end" ] && w_end="engage.cloudflareclient.com:2408"
-
-        cat << EOF > /etc/wireguard/warp.conf
-[Interface]
-PrivateKey = $w_priv
-Address = $w_addr
-MTU = 1280
-Table = 51820
-PostUp = ip rule del from 172.16.0.2 lookup 51820 priority 5998 2>/dev/null || true
-PostUp = ip rule add from 172.16.0.2 lookup 51820 priority 5998 || true
-PostUp = ip rule del oif warp lookup 51820 priority 5999 2>/dev/null || true
-PostUp = ip rule add oif warp lookup 51820 priority 5999 || true
-PostUp = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
-PostUp = ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 || true
-PostUp = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
-PostUp = ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 || true
-PostUp = ip link set dev warp mtu 1280 txqueuelen 10000 || true
-PostUp = tc qdisc replace dev warp root fq limit 30000 flow_limit 10000 2>/dev/null || true
-PostUp = iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
-PostUp = iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o warp -j ACCEPT
-PostUp = iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostUp = iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg-cascade -o warp -j ACCEPT
-PostUp = iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostUp = iptables -t mangle -C FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I FORWARD 1 -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
-PostDown = ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
-PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-
-[Peer]
-PublicKey = $w_pub
-AllowedIPs = 0.0.0.0/0
-Endpoint = $w_end
-PersistentKeepalive = 25
-EOF
-        chmod 600 /etc/wireguard/warp.conf
-    fi
-
-    ensure_wg_kernel_modules
-    silent_run systemctl daemon-reload
-    silent_run systemctl enable --now wg-quick@warp
-    systemctl restart wg-quick@warp || true
-}
-
 setup_cascade_server2_warp() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> CLOUDFLARE MASQUE / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
     local exit_choice=""
-    if ! smart_menu "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" "\nКак выпускать трафик из Tailscale в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
+    if ! smart_menu "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" "\nКак выпускать трафик из Tailscale в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 "$WT_WIDTH" 2 "exit_choice" \
+    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)" \
+    "2" " Через Cloudflare MASQUE (Usque — чистая репутация IP Cloudflare без капч и блокировок)"; then
         return 0
     fi
 
@@ -2259,30 +2184,24 @@ manage_cascade_naive_ts_warp() {
         MODULE_CANCELED=false
         local c_state="Не активен"
         if is_naive_active; then
-            # shellcheck disable=SC1091
-            [ -f /etc/default/bobarev-cascade ] && source /etc/default/bobarev-cascade
-            if [ "${CASCADE_ROLE:-}" = "ru_wg_entry" ]; then
-                c_state="Сервер 1 (РФ: NaiveProxy -> Прямой WG мост)"
-            else
-                c_state="Сервер 1 (РФ: NaiveProxy -> Tailscale)"
-            fi
+            c_state="Сервер 1 (РФ: NaiveProxy -> Tailscale)"
         elif [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
-            if is_warp_active; then
-                c_state="Сервер 2 (Зарубеж: Tailscale -> Cloudflare WARP)"
+            if is_usque_active; then
+                c_state="Сервер 2 (Зарубеж: Tailscale -> Cloudflare MASQUE)"
             else
                 c_state="Сервер 2 (Зарубеж: Tailscale -> Чистый IP сервера)"
             fi
         fi
 
         local c_choice
-        if ! smart_menu "Каскад: NaiveProxy + Tailscale + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 18 $WT_WIDTH 6 "c_choice" \
+        if ! smart_menu "Каскад: NaiveProxy + Tailscale (2 сервера + Cloudflare MASQUE)" "\nСтатус моста: $c_state\nВыберите действие:" 18 "$WT_WIDTH" 6 "c_choice" \
         "1" " Сервер 1 (РФ): NaiveProxy -> Tailscale" \
-        "2" " Сервер 2 (Зарубеж): Tailscale -> Выход" \
+        "2" " Сервер 2 (Зарубеж): Tailscale -> Выход (Чистый IP / MASQUE)" \
         "3" " Управление пользователями NaiveProxy" \
         "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
+        "5" " Переключить выход: Чистый IP <-> Cloudflare MASQUE" \
         "6" " Остановить компоненты каскада" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
@@ -2310,10 +2229,11 @@ manage_cascade_naive_ts_warp() {
                 pause_enter
                 ;;
             6)
-                if prompt_yn "Остановить и отключить службы каскада (NaiveProxy Caddy / WARP) на этом сервере?" "false"; then
-                    silent_run systemctl stop caddy.service bobarev-cascade-ru.service wg-quick@warp.service wg-quick@wg-cascade.service
+                if prompt_yn "Остановить и отключить службы каскада (NaiveProxy Caddy / Cloudflare MASQUE) на этом сервере?" "false"; then
+                    silent_run systemctl stop caddy.service bobarev-cascade-ru.service usque.service
+                    while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
                     silent_run tailscale set --exit-node=
-                    rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /etc/wireguard/wg-cascade.conf
+                    rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
                     silent_run systemctl daemon-reload
                     echo -e "${C_GREEN} Службы каскада остановлены и отключены.${C_RESET}"
                 fi
@@ -2323,36 +2243,18 @@ manage_cascade_naive_ts_warp() {
     done
 }
 
-# ==============================================================================
-# МОДУЛЬ 20: ПРЯМОЙ СКОРОСТНОЙ КАСКАД (NAIVEPROXY -> WG + UDP2RAW -> WARP)
-# ==============================================================================
 check_required_ports_free() {
-    # Проверяет, не заняты ли целевые порты СТОРОННИМИ процессами (игнорируя наши собственные caddy, udp2raw и ядерный интерфейс wg-cascade)
+    # Проверяет, не заняты ли целевые порты СТОРОННИМИ процессами (игнорируя наши собственные caddy, hysteria, xray, derper, usque)
     local role="$1" # ru | foreign
     shift
     local ports=("$@")
     local conflict_found=false
 
-    # Определяем текущий порт нашего собственного интерфейса wg-cascade (если он уже запущен в ядре),
-    # так как ядерный модуль WireGuard в ss -tulpn не имеет поля users:(...)
-    local own_wg_port=""
-    if ip link show wg-cascade >/dev/null 2>&1; then
-        own_wg_port=$(wg show wg-cascade listen-port 2>/dev/null | tr -d '[:space:]' || echo "")
-    fi
-
     for p in "${ports[@]}"; do
         [ -z "$p" ] && continue
-        # Если этот порт занят нашим же ядерным интерфейсом wg-cascade — пропускаем (он будет штатно перезапущен)
-        if [ -n "$own_wg_port" ] && [ "$p" = "$own_wg_port" ]; then
-            continue
-        fi
         local line=""
-        line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|udp2raw|hysteria|xray|derper)"' | head -n 1 || echo "")
+        line=$({ ss -tulpnH "sport = :$p" 2>/dev/null || true; } | grep -vE '"(caddy|hysteria|xray|derper|usque)"' | head -n 1 || echo "")
         if [ -n "$line" ]; then
-            # Если на порту 51889 или порту из /etc/wireguard/wg-cascade.conf висит ядерный сокет без users:(...), это наш wg-cascade
-            if ! echo "$line" | grep -q "users:(" && { [ "$p" = "51889" ] || grep -qE "^ListenPort[[:space:]]*=[[:space:]]*${p}\b" /etc/wireguard/wg-cascade.conf 2>/dev/null; }; then
-                continue
-            fi
             local proto=$(echo "$line" | awk '{print $1}')
             local proc_info=$(echo "$line" | grep -oP 'users:\(\("\K[^"]+' || echo "ядерный модуль / неизвестный процесс")
             local pid_info=$(echo "$line" | grep -oP 'pid=\K[0-9]+' || echo "-")
@@ -2365,60 +2267,6 @@ check_required_ports_free() {
         echo -e "${C_YELLOW} Пожалуйста, освободите указанные порты (остановите/удалите конфликтующий процесс) и запустите настройку заново.${C_RESET}"
         return 1
     fi
-    return 0
-}
-
-ensure_udp2raw_installed() {
-    if [ -x "$UDP2RAW_BIN" ]; then
-        return 0
-    fi
-    echo -e "${C_BLUE} Скачивание и установка движка обфускации заголовков udp2raw...${C_RESET}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -yq curl wget tar iptables
-
-    local tmp_u2r=$(mktemp -d /root/.udp2raw-XXXXXX)
-    local u2r_url="https://github.com/wangyu-/udp2raw/releases/download/20230206.0/udp2raw_binaries.tar.gz"
-
-    if ! wget -q --tries=3 --timeout=30 "$u2r_url" -O "${tmp_u2r}/udp2raw.tar.gz"; then
-        rm -rf "$tmp_u2r"
-        echo -e "${C_RED} Ошибка скачивания архива udp2raw с GitHub.${C_RESET}"
-        return 1
-    fi
-
-    # Хеш для версии 20230206.0 (рекомендуется уточнить актуальный SHA256)
-    local u2r_sha="${BOBAREV_UDP2RAW_SHA256:-}"
-    if [ -n "$u2r_sha" ]; then
-        if ! verify_sha256 "${tmp_u2r}/udp2raw.tar.gz" "$u2r_sha"; then
-            rm -rf "$tmp_u2r"
-            return 1
-        fi
-    fi
-
-    if ! tar -xzf "${tmp_u2r}/udp2raw.tar.gz" -C "$tmp_u2r" 2>/dev/null; then
-        rm -rf "$tmp_u2r"
-        echo -e "${C_RED} Ошибка распаковки архива udp2raw!${C_RESET}"
-        return 1
-    fi
-    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-    local bin_name="udp2raw_amd64"
-    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
-        if [ -f "${tmp_u2r}/udp2raw_arm64" ]; then
-            bin_name="udp2raw_arm64"
-        else
-            bin_name="udp2raw_arm"
-        fi
-    fi
-
-    if [ -f "${tmp_u2r}/${bin_name}" ]; then
-        install -m 755 "${tmp_u2r}/${bin_name}" "$UDP2RAW_BIN"
-    else
-        rm -rf "$tmp_u2r"
-        echo -e "${C_RED} Не найден подходящий бинарник udp2raw (${bin_name}) для архитектуры ${arch}!${C_RESET}"
-        return 1
-    fi
-    rm -rf "$tmp_u2r"
-    echo -e "${C_GREEN} Движок побитовой маскировки udp2raw успешно установлен.${C_RESET}"
     return 0
 }
 
@@ -2443,168 +2291,123 @@ ensure_hysteria_installed() {
     return 0
 }
 
-clean_udp2raw_iptables() {
-    local rline=""
-    local -a rule_args=()
-    while read -r rline; do
-        [ -z "$rline" ] && continue
-        read -r -a rule_args <<< "${rline/-A /-D }"
-        iptables -w 5 "${rule_args[@]}" 2>/dev/null || true
-    done < <(iptables -S INPUT 2>/dev/null | grep "udp2rawDwrW_" || true)
-
-    local cname=""
-    while read -r cname; do
-        [ -z "$cname" ] && continue
-        iptables -w 5 -F "$cname" 2>/dev/null || true
-        iptables -w 5 -X "$cname" 2>/dev/null || true
-    done < <(iptables -S 2>/dev/null | awk '/^-N udp2rawDwrW_/{print $2}' || true)
-}
-
 clean_duplicate_cascade_iptables() {
-    clean_udp2raw_iptables
-    if command -v ip6tables &>/dev/null; then
-        : # Общая IPv6-цепочка не принадлежит скрипту; не очищаем.
-    fi
     local wan_dev=$(get_wan_if)
-    while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
-    if [ -n "$wan_dev" ]; then
-        while iptables -D FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
-        while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
-    fi
+    while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
     for mss_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
-        while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D POSTROUTING -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D FORWARD -i warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
     done
     while iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
     while iptables -t mangle -D OUTPUT -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-    while iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null; do :; done
-    while iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null; do :; done
     [ -n "$wan_dev" ] && while iptables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null; do :; done
 }
 
 apply_foreign_exit_mode() {
-    local exit_mode="${1:-warp}" # warp | direct
+    local exit_mode="${1:-warp}" # warp (Cloudflare MASQUE) | direct
     local wan_dev=$(get_wan_if)
     [ -z "$wan_dev" ] && wan_dev="ens3"
 
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     disable_ufw_strict_rpfilter
-
-    # Очищаем старые правила маршрутизации в таблицу 51820 (WARP), дубликаты FORWARD и старые правила TCPMSS
-    while ip rule del from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null; do :; done
-    while ip rule del from 100.64.0.0/10 lookup 51820 2>/dev/null; do :; done
-    while ip rule del from 10.200.200.0/30 lookup 51820 priority 6001 2>/dev/null; do :; done
-    while ip rule del from 10.200.200.0/30 lookup 51820 2>/dev/null; do :; done
-    while ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null; do :; done
-    while ip rule del from 10.200.200.0/24 lookup 51820 2>/dev/null; do :; done
-    while iptables -t nat -D POSTROUTING -o warp -j MASQUERADE 2>/dev/null; do :; done
     tune_fq_qdisc_interfaces
-    while iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null; do :; done
-    while iptables -D FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
+
+    while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
     while iptables -D FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null; do :; done
     while iptables -D FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do :; done
     for mss_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
-        while iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D FORWARD -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
-        while iptables -t mangle -D POSTROUTING -o warp -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
         while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$mss_val" 2>/dev/null; do :; done
     done
 
     if [ "$exit_mode" = "direct" ]; then
-        echo -e "${C_BLUE} Включение режима ПРЯМОГО ВЫХОДА (Чистый IP зарубежного сервера без WARP)...${C_RESET}"
-        silent_run systemctl stop wg-quick@warp.service
-        silent_run systemctl disable wg-quick@warp.service
+        echo -e "${C_BLUE} Включение режима ПРЯМОГО ВЫХОДА (Чистый IP зарубежного сервера без Cloudflare MASQUE)...${C_RESET}"
+        silent_run systemctl stop usque.service wg-quick@warp.service
+        silent_run systemctl disable usque.service wg-quick@warp.service
         if command -v tailscale &>/dev/null; then
             silent_run tailscale set --exit-node=
         fi
-        ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
 
-        iptables -C FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg-cascade -o "$wan_dev" -j ACCEPT
-        iptables -C FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT
         iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         apply_wan_exit_nat "$wan_dev" "true"
 
-        # Для прямого WG-моста: MSS 1200; для Tailscale (с учетом заголовка Disco): MSS 1140
-        iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
 
         if command -v ufw &>/dev/null; then
-            silent_run ufw route allow in on wg-cascade out on "$wan_dev" comment 'WG Cascade to WAN Direct'
-            silent_run ufw route allow in on "$wan_dev" out on wg-cascade comment 'WAN Direct to WG Cascade'
             silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'Tailscale to WAN Direct'
             silent_run ufw route allow in on "$wan_dev" out on tailscale0 comment 'WAN Direct to Tailscale'
         fi
     else
-        echo -e "${C_BLUE} Включение режима CLOUDFLARE WARP на выходе Зарубежного сервера...${C_RESET}"
-        ensure_warp_installed_and_configured
-        ip link set dev wg-cascade mtu 1280 txqueuelen 10000 2>/dev/null || true
+        echo -e "${C_BLUE} Включение режима CLOUDFLARE MASQUE (Usque socks 127.0.0.1:1080) на выходе Зарубежного сервера...${C_RESET}"
+        silent_run systemctl stop wg-quick@warp.service 2>/dev/null || true
+        silent_run systemctl disable wg-quick@warp.service 2>/dev/null || true
+        install_and_setup_usque "socks" "false" || return 1
+
         ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
-        ip rule add from 100.64.0.0/10 lookup 51820 priority 6000 2>/dev/null || true
-        ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
-
-        iptables -C FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg-cascade -o warp -j ACCEPT
-        iptables -C FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-        iptables -C FORWARD -i tailscale0 -o warp -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o warp -j ACCEPT
-        iptables -C FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i warp -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-        iptables -t nat -C POSTROUTING -o warp -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o warp -j MASQUERADE
-
-        iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
+        iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT
+        iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        apply_wan_exit_nat "$wan_dev" "true"
         iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
         iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-
-        if command -v ufw &>/dev/null; then
-            silent_run ufw route allow in on wg-cascade out on warp comment 'WG Cascade to WARP'
-            silent_run ufw route allow in on warp out on wg-cascade comment 'WARP to WG Cascade'
-            silent_run ufw route allow in on tailscale0 out on warp comment 'Tailscale to WARP'
-            silent_run ufw route allow in on warp out on tailscale0 comment 'WARP to Tailscale'
-            ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
-        fi
     fi
 
     if [ -f /etc/default/bobarev-cascade ]; then
         sed -i '/^FOREIGN_EXIT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
         echo "FOREIGN_EXIT_MODE=\"$exit_mode\"" >> /etc/default/bobarev-cascade
-    fi
-    if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         if [ "${CASCADE_ROLE:-}" = "foreign_xray_exit" ] && [ -n "${XRAY_PORT:-}" ]; then
             render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$exit_mode"
             silent_run systemctl restart bobarev-xray.service
-        fi
-        if [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] && [ -n "${HYSTERIA_PORT:-}" ]; then
+        elif [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] && [ -n "${HYSTERIA_PORT:-}" ]; then
             render_hysteria_server_config "$HYSTERIA_PORT" "${HYSTERIA_PASS:-SecretPass2026}" "$exit_mode"
             silent_run systemctl restart hysteria-server.service
+        elif [ "${CASCADE_ROLE:-}" = "foreign_warp_exit" ]; then
+            if [ "$exit_mode" != "direct" ]; then
+                ensure_xray_installed || true
+                if [ -x /usr/local/bin/xray ]; then
+                    mkdir -p /etc/xray
+                    cat << 'TS_MASQUE_EOF' > /etc/xray/config.json
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "tag": "ts-redir-in",
+      "listen": "0.0.0.0",
+      "port": 10809,
+      "protocol": "dokodemo-door",
+      "settings": { "network": "tcp", "followRedirect": true }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "masque-out",
+      "protocol": "socks",
+      "settings": { "servers": [{ "address": "127.0.0.1", "port": 1080 }] }
+    }
+  ]
+}
+TS_MASQUE_EOF
+                    chmod 600 /etc/xray/config.json
+                    write_xray_service
+                    silent_run systemctl enable --now bobarev-xray.service
+                    silent_run systemctl restart bobarev-xray.service
+                    iptables -t nat -I PREROUTING 1 -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null || true
+                fi
+            else
+                silent_run systemctl stop bobarev-xray.service
+                silent_run systemctl disable bobarev-xray.service
+            fi
         fi
     fi
-
 }
 
 toggle_foreign_warp_menu() {
@@ -2614,20 +2417,17 @@ toggle_foreign_warp_menu() {
         source /etc/default/bobarev-cascade
         cur_mode="${FOREIGN_EXIT_MODE:-warp}"
     fi
-    if ! is_warp_active && [ "$cur_mode" = "warp" ]; then
+    if ! is_usque_active && [ "$cur_mode" != "direct" ]; then
         cur_mode="direct"
     fi
 
-    local cur_human="Cloudflare WARP (защищенный IP Cloudflare)"
+    local cur_human="Cloudflare MASQUE (Usque — чистый IP CDN Cloudflare без капч)"
     [ "$cur_mode" = "direct" ] && cur_human="Прямой выход (Чистый собственный IP зарубежного сервера)"
 
     local m_choice=""
-    local def_item="1"
-    [ "$cur_mode" = "warp" ] && def_item="2"
-
-    if ! smart_menu "Переключение выхода на Сервере 2 (WARP <-> Чистый IP)" "\nТекущий режим выхода: $cur_human\n\nРаботает для всех каскадов (WG-мост, Hysteria 2, Xray REALITY и Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 $WT_WIDTH 2 "m_choice" \
-    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" " Cloudflare WARP (Маскировка выходного IP под Cloudflare)"; then
+    if ! smart_menu "Переключение выхода на Сервере 2 (Cloudflare MASQUE <-> Чистый IP)" "\nТекущий режим выхода: $cur_human\n\nРаботает для всех каскадов (Xray REALITY, Hysteria 2 и Tailscale)!\nВыберите, как выпускать трафик в интернет с этого зарубежного сервера (переключение за 2 секунды, менять настройки на РФ-сервере НЕ нужно):" 18 "$WT_WIDTH" 2 "m_choice" \
+    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)" \
+    "2" " Cloudflare MASQUE (Usque — выход через CDN Cloudflare без капч и блокировок ChatGPT)"; then
         return 0
     fi
 
@@ -2640,520 +2440,11 @@ toggle_foreign_warp_menu() {
     [ -z "$wan_dev" ] && wan_dev="ens3"
     if [ "$target_mode" = "direct" ]; then
         local my_ip=$(curl -4 -s --interface "$wan_dev" --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-        echo -e "\n${C_GREEN} WARP отключен! Теперь трафик (и из WG-моста, и из Tailscale) выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-Прямой IP сервера}${C_RESET}"
-        echo -e "${C_BLUE} Подсказка: Без двойного шифрования WARP сайт speed.cloudflare.com и Speedtest работают на полной скорости канала!${C_RESET}"
+        echo -e "\n${C_GREEN} Cloudflare MASQUE отключен! Теперь трафик выходит напрямую с чистого зарубежного IP: ${C_BOLD}${my_ip:-Прямой IP сервера}${C_RESET}"
     else
-        local w_ip=$(curl -4 -s --interface warp --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-        echo -e "\n${C_GREEN} Cloudflare WARP включен! Выходной IP каскада: ${C_BOLD}${w_ip:-Cloudflare WARP}${C_RESET}"
+        echo ""
+        verify_usque_masque_ip
     fi
-}
-
-configure_udp2raw_service() {
-    local role="$1"       # server | client
-    local r_addr="$2"     # remote/target addr:port (-r)
-    local l_addr="$3"     # local listen addr:port (-l)
-    local obfs_mode="$4"  # udp | faketcp | none
-    local obfs_key="$5"
-
-    if [ "$obfs_mode" = "none" ]; then
-        silent_run systemctl stop bobarev-udp2raw.service
-        silent_run systemctl disable bobarev-udp2raw.service
-        clean_udp2raw_iptables
-        rm -f "$UDP2RAW_SERVICE"
-        silent_run systemctl daemon-reload
-        return 0
-    fi
-
-    ensure_udp2raw_installed || return 1
-    silent_run systemctl stop bobarev-udp2raw.service
-    clean_udp2raw_iptables
-
-    local mode_flag="-s"
-    if [ "$role" = "client" ]; then
-        mode_flag="-c"
-    fi
-    local addr_flags="-l ${l_addr} -r ${r_addr}"
-
-    # Флаг -a отключает переполнение буфера ядра (Recv-Q 2MB) на сокете-заглушке,
-    # а --fix-gro предотвращает отбрасывание склеенных GRO-пакетов (>1500 байт) при высоких скоростях!
-    local extra_flags="-a --sock-buf 10240 --seq-mode 4"
-
-    cat << EOF > "$UDP2RAW_SERVICE"
-[Unit]
-Description=Bobarev Shell udp2raw Anti-DPI Obfuscator ($obfs_mode)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-Nice=-15
-CPUSchedulingPolicy=rr
-CPUSchedulingPriority=50
-LimitNOFILE=1048576
-LimitMEMLOCK=infinity
-ExecStart=${UDP2RAW_BIN} ${mode_flag} ${addr_flags} -k "${obfs_key}" --raw-mode ${obfs_mode} --cipher-mode none --auth-mode none ${extra_flags}
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    local wan_if=$(get_wan_if)
-    if [ -n "$wan_if" ] && command -v ethtool &>/dev/null; then
-        ethtool -K "$wan_if" tso off gso off gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
-    fi
-
-    silent_run systemctl daemon-reload
-    systemctl reset-failed bobarev-udp2raw.service 2>/dev/null || true
-    systemctl enable --now bobarev-udp2raw.service >/dev/null 2>&1 || true
-    systemctl restart bobarev-udp2raw.service || true
-    sleep 3
-    if ! systemctl is-active --quiet bobarev-udp2raw.service; then
-        echo -e "${C_RED} Служба udp2raw НЕ запустилась! Последние строки журнала:${C_RESET}"
-        journalctl -u bobarev-udp2raw.service -n 15 --no-pager 2>/dev/null | sed "s/\x1b\[[0-9;]*m//g" || true
-        return 1
-    fi
-    echo -e "${C_GREEN} Служба udp2raw запущена (режим: $obfs_mode).${C_RESET}"
-}
-
-setup_direct_wg_server2_foreign() {
-    echo -e "${C_CYAN} === ШАГ 1: НАСТРОЙКА ЗАРУБЕЖНОГО СЕРВЕРА 2 (WG-BRIDGE + ANTI-DPI) ===${C_RESET}"
-    enable_routing_optimizations || true
-    apply_naive_tcp_tuning_profile "balanced"
-
-    local ext_port="51888"
-    prompt_default "1/3. Введите внешний порт на этом сервере для приема каскадного моста:" "51888" ext_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$ext_port" ]; then return 0; fi
-    ext_port="${ext_port//[^0-9]/}"
-    if ! check_required_ports_free "foreign" "$ext_port" "51889"; then
-        return 0
-    fi
-
-    local obfs_choice=""
-    if ! smart_menu "2/3. Защита заголовков WireGuard от ТСПУ" "\nВыберите режим обхода шейпинга ТСПУ между серверами (автоматически передастся на Сервер 1 внутри токена):" 16 $WT_WIDTH 3 "obfs_choice" \
-    "1" " FakeTCP Маскировка (Рекомендуется — полностью мимикрирует под TCP-поток)" \
-    "2" " UDP-XOR Маскировка (Резервный вариант)" \
-    "3" " Чистый WireGuard без маскировки (Только если ТСПУ не режет WG)"; then
-        return 0
-    fi
-
-    local obfs_mode="faketcp"
-    case "$obfs_choice" in
-        1) obfs_mode="faketcp" ;;
-        2) obfs_mode="udp" ;;
-        3) obfs_mode="none" ;;
-    esac
-
-    local exit_choice=""
-    if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2" "\nКак выпускать трафик в интернет с этого зарубежного сервера?\n(Вы сможете переключать этот режим в любой момент в Пункте 5 меню каскада):" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)" \
-    "2" " Через Cloudflare WARP (Скрывает IP сервера за IP Cloudflare)"; then
-        return 0
-    fi
-
-    local exit_mode="direct"
-    if [ "$exit_choice" = "2" ]; then
-        exit_mode="warp"
-    else
-        silent_run systemctl stop wg-quick@warp.service
-        silent_run systemctl disable wg-quick@warp.service
-    fi
-
-    echo -e "${C_BLUE} Очистка предыдущих настроек моста wg-cascade и старых правил...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run wg-quick down wg-cascade
-    ip link del dev wg-cascade 2>/dev/null || true
-    while ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null; do :; done
-    clean_duplicate_cascade_iptables
-    disable_ufw_strict_rpfilter
-
-    mkdir -p /etc/wireguard
-    local s2_priv=$(wg genkey)
-    local s2_pub=$(echo "$s2_priv" | wg pubkey)
-
-    # Генерируем 3 независимых слота (пира) для одновременного подключения до 3 российских серверов без конфликта ключей и IP!
-    local s1_priv_1=$(wg genkey); local s1_pub_1=$(echo "$s1_priv_1" | wg pubkey); local psk_1=$(wg genpsk)
-    local s1_priv_2=$(wg genkey); local s1_pub_2=$(echo "$s1_priv_2" | wg pubkey); local psk_2=$(wg genpsk)
-    local s1_priv_3=$(wg genkey); local s1_pub_3=$(echo "$s1_priv_3" | wg pubkey); local psk_3=$(wg genpsk)
-    local obfs_key=$(openssl rand -hex 8 2>/dev/null || echo "mysecretkey2026")
-
-    local wg_listen_port="$ext_port"
-    if [ "$obfs_mode" != "none" ]; then
-        wg_listen_port="51889"
-    fi
-
-    local wan_dev=$(get_wan_if)
-    [ -z "$wan_dev" ] && wan_dev="ens3"
-
-    local warp_rule_postup=""
-    if [ "$exit_mode" = "warp" ]; then
-        warp_rule_postup="PostUp = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
-PostUp = ip rule add from 10.200.200.0/24 lookup 51820 priority 6001 || true"
-    fi
-
-    cat << EOF > /etc/wireguard/wg-cascade.conf
-[Interface]
-Address = 10.200.200.1/24
-ListenPort = $wg_listen_port
-PrivateKey = $s2_priv
-MTU = 1280
-Table = off
-PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
-PostUp = tc qdisc replace dev wg-cascade root fq limit 30000 flow_limit 10000 2>/dev/null || true
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
-${warp_rule_postup}
-PostUp = iptables -t mangle -C FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I FORWARD 1 -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 || true
-PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 || true
-PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 || true
-PostDown = ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null || true
-PostDown = iptables -D FORWARD -i wg-cascade -o warp -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i warp -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i wg-cascade -o $wan_dev -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i $wan_dev -o wg-cascade -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -i wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-
-[Peer]
-# RU Entry Server #1 (10.200.200.2)
-PublicKey = $s1_pub_1
-PresharedKey = $psk_1
-AllowedIPs = 10.200.200.2/32
-
-[Peer]
-# RU Entry Server #2 (10.200.200.3)
-PublicKey = $s1_pub_2
-PresharedKey = $psk_2
-AllowedIPs = 10.200.200.3/32
-
-[Peer]
-# RU Entry Server #3 (10.200.200.4)
-PublicKey = $s1_pub_3
-PresharedKey = $psk_3
-AllowedIPs = 10.200.200.4/32
-EOF
-    chmod 600 /etc/wireguard/wg-cascade.conf
-
-    ensure_wg_kernel_modules
-    silent_run systemctl daemon-reload
-    systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
-    systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
-    if ! systemctl restart wg-quick@wg-cascade.service; then
-        echo -e "${C_YELLOW} Повторная инициализация интерфейса wg-cascade после принудительной зачистки...${C_RESET}"
-        ip link del dev wg-cascade 2>/dev/null || true
-        systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
-        systemctl start wg-quick@wg-cascade.service
-    fi
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${ext_port}/udp" comment 'WG Direct Cascade UDP'
-        silent_run ufw allow "${ext_port}/tcp" comment 'WG Direct Cascade FakeTCP'
-        silent_run ufw route allow in on wg-cascade out on "$wan_dev" comment 'WG Cascade to WAN Direct'
-        silent_run ufw route allow in on "$wan_dev" out on wg-cascade comment 'WAN Direct to WG Cascade'
-        silent_run ufw route allow in on wg-cascade out on warp comment 'WG Cascade to WARP'
-        silent_run ufw route allow in on warp out on wg-cascade comment 'WARP to WG Cascade'
-        ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
-        silent_run ufw reload
-        while iptables -t mangle -D FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-        while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-    fi
-
-    apply_foreign_exit_mode "$exit_mode"
-
-    if [ "$obfs_mode" != "none" ]; then
-        configure_udp2raw_service "server" "127.0.0.1:${wg_listen_port}" "0.0.0.0:${ext_port}" "$obfs_mode" "$obfs_key"
-    else
-        configure_udp2raw_service "server" "" "" "none" ""
-    fi
-    disable_ufw_strict_rpfilter
-
-    local ext_ip=""
-    ext_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
-    if [ -z "$ext_ip" ]; then
-        ext_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
-    fi
-
-    local raw_1="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv_1}|${psk_1}|${obfs_mode}|${obfs_key}|10.200.200.2"
-    local raw_2="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv_2}|${psk_2}|${obfs_mode}|${obfs_key}|10.200.200.3"
-    local raw_3="${ext_ip}|${ext_port}|${s2_pub}|${s1_priv_3}|${psk_3}|${obfs_mode}|${obfs_key}|10.200.200.4"
-
-    local bridge_token_1=$(printf '%s' "$raw_1" | base64 -w0 2>/dev/null || printf '%s' "$raw_1" | base64 | tr -d '\n\r ')
-    local bridge_token_2=$(printf '%s' "$raw_2" | base64 -w0 2>/dev/null || printf '%s' "$raw_2" | base64 | tr -d '\n\r ')
-    local bridge_token_3=$(printf '%s' "$raw_3" | base64 -w0 2>/dev/null || printf '%s' "$raw_3" | base64 | tr -d '\n\r ')
-
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="foreign_wg_warp_exit"
-FOREIGN_EXIT_MODE="$exit_mode"
-WG_CASCADE_PORT="$ext_port"
-WG_OBFS_MODE="$obfs_mode"
-WG_OBFS_KEY="$obfs_key"
-WG_BRIDGE_TOKEN="$bridge_token_1"
-WG_BRIDGE_TOKEN_2="$bridge_token_2"
-WG_BRIDGE_TOKEN_3="$bridge_token_3"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    echo -e "\n${C_GREEN} Зарубежный Сервер 2 (Мост wg-cascade [MTU 1280, MSS 1240, обфускация: $obfs_mode, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "\n${C_CYAN} === ИНДИВИДУАЛЬНЫЕ ТОКЕНЫ ДЛЯ ПОДКЛЮЧЕНИЯ РОССИЙСКИХ СЕРВЕРОВ ===${C_RESET}"
-    echo -e "${C_YELLOW} Используйте свой отдельный токен для каждого РФ-сервера, чтобы они работали одновременно без конфликта IP!${C_RESET}"
-    echo -e "\n   ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
-    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_1}${C_RESET}"
-    echo -e "\n   ${C_BOLD}Токен #2 (для 2-го РФ-сервера, IP 10.200.200.3):${C_RESET}"
-    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_2}${C_RESET}"
-    echo -e "\n   ${C_BOLD}Токен #3 (резервный для 3-го РФ-сервера, IP 10.200.200.4):${C_RESET}"
-    echo -e "    ${C_BOLD}${C_GREEN}${bridge_token_3}${C_RESET}\n"
-    echo -e "${C_BLUE} Как подключить РФ-серверы:${C_RESET}"
-    echo -e "  1. На первом РФ-сервере -> Пункт 19 -> Пункт 2 -> вставьте Токен #1."
-    echo -e "  2. На втором РФ-сервере -> Пункт 19 -> Пункт 2 -> вставьте Токен #2."
-}
-
-setup_direct_wg_server1_ru() {
-    echo -e "${C_CYAN} === ШАГ 2: НАСТРОЙКА РОССИЙСКОГО СЕРВЕРА 1 (NAIVEPROXY -> WG + ANTI-DPI) ===${C_RESET}"
-    if ! check_required_ports_free "ru" "80" "443" "51889"; then
-        return 0
-    fi
-    enable_routing_optimizations || true
-
-    if ! command -v wg &>/dev/null || ! command -v iptables &>/dev/null || ! command -v curl &>/dev/null || ! command -v python3 &>/dev/null; then
-        echo -e "${C_BLUE} Установка пакетов wireguard-tools, iptables, curl и python3...${C_RESET}"
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -yq wireguard-tools iptables curl python3 >/dev/null 2>&1
-    fi
-
-    local saved_dom=""
-    local saved_email=""
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        saved_dom="${NAIVE_DOMAIN:-}"
-        saved_email="${NAIVE_EMAIL:-}"
-    fi
-
-    local token_in=""
-    prompt_clean "1/4. Вставьте Токен соединения, полученный на Зарубежном Сервере 2:" token_in
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ]; then return 0; fi
-
-    local decoded=""
-    decoded=$(python3 -c '
-import sys, base64, re
-try:
-    raw = "".join(sys.argv[1].split())
-    pad = len(raw) % 4
-    if pad:
-        raw += "=" * (4 - pad)
-    txt = base64.b64decode(raw.encode("utf-8")).decode("utf-8", errors="ignore")
-    if "ip=" in txt and "\n" in txt:
-        m = re.search(r"ip=([0-9.]+)", txt)
-        ip = m.group(1) if m else ""
-        parts = txt.splitlines()[-1].split("|")
-        parts[0] = ip
-        txt = "|".join(parts)
-    print(txt.strip())
-except Exception:
-    print("")
-' "$token_in" 2>/dev/null || echo "")
-
-    if [ -z "$decoded" ]; then
-        local clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
-        decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\n\r' || echo "")
-    fi
-
-    local s2_ip="" s2_port="" s2_pub="" s1_priv="" psk="" obfs_mode="none" obfs_key="mysecretkey2026" s1_tun_ip="10.200.200.2"
-    IFS="|" read -r s2_ip s2_port s2_pub s1_priv psk obfs_mode obfs_key s1_tun_ip <<< "$decoded"
-    s2_ip=$(printf '%s' "$s2_ip" | tr -d '[:space:]')
-    s2_port=$(printf '%s' "$s2_port" | tr -dc '0-9')
-    s2_pub=$(printf '%s' "$s2_pub" | tr -d '[:space:]')
-    s1_priv=$(printf '%s' "$s1_priv" | tr -d '[:space:]')
-    psk=$(printf '%s' "$psk" | tr -d '[:space:]')
-    obfs_mode=$(printf '%s' "${obfs_mode:-none}" | tr -d '[:space:]')
-    obfs_key=$(printf '%s' "${obfs_key:-bobarev2026key}" | tr -d '[:space:]')
-    s1_tun_ip=$(printf '%s' "${s1_tun_ip:-10.200.200.2}" | tr -d '[:space:]')
-    [ -z "$s1_tun_ip" ] && s1_tun_ip="10.200.200.2"
-
-    if [ -z "${s2_ip:-}" ] || [ -z "${s2_port:-}" ] || [ -z "${s2_pub:-}" ] || [ -z "${s1_priv:-}" ] || [ -z "${psk:-}" ]; then
-        echo -e "${C_RED} Ошибка: Неверный формат Токена соединения! Скопируйте свежий токен с Сервера 2 целиком.${C_RESET}"
-        return 1
-    fi
-
-    # Режим маскировки берется строго из токена Сервера 2: у обоих концов моста он обязан совпадать,
-    # иначе рукопожатие WireGuard никогда не состоится.
-    case "$obfs_mode" in
-        udp|faketcp|none) ;;
-        *) obfs_mode="udp" ;;
-    esac
-    local obfs_human="UDP-XOR"
-    [ "$obfs_mode" = "faketcp" ] && obfs_human="FakeTCP"
-    [ "$obfs_mode" = "none" ] && obfs_human="Чистый WireGuard (без udp2raw)"
-    echo -e "${C_BLUE} Режим маскировки взят из токена Сервера 2: ${obfs_human} (${obfs_mode}).${C_RESET}"
-    local n_dom=""
-    prompt_default "2/4. Введите ваш домен на этом РФ-сервере (A-запись DNS):" "${saved_dom:-ru.yourdomain.com}" n_dom
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_dom" ]; then return 0; fi
-
-    local n_email=""
-    prompt_default "3/4. Введите ваш Email для SSL-сертификата Let's Encrypt:" "${saved_email:-admin@${n_dom}}" n_email
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$n_email" ]; then return 0; fi
-
-    if [ ! -s "$NAIVE_PASS_FILE" ]; then
-        local n_user=""
-        prompt_default "4/4. Введите имя пользователя для Shadowrocket:" "user1" n_user
-        if [ "$MODULE_CANCELED" = true ] || [ -z "$n_user" ]; then return 0; fi
-        n_user=$(echo "$n_user" | tr -dc 'a-zA-Z0-9_-')
-
-        local rand_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16 || { echo -e "${C_RED} Ошибка генератора паролей.${C_RESET}" >&2; return 1; })
-        local n_pass=""
-        prompt_default "Пароль для пользователя $n_user:" "$rand_pass" n_pass
-        if [ "$MODULE_CANCELED" = true ] || [ -z "$n_pass" ]; then return 0; fi
-        add_or_update_naive_user "$n_user" "$n_pass"
-    else
-        echo -e "${C_GREEN} Существующие пользователи NaiveProxy сохранены!${C_RESET}"
-    fi
-
-    ensure_go_and_build_caddy_naive || return 1
-
-    echo -e "${C_BLUE} Очистка предыдущих настроек моста wg-cascade и старых маршрутов...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run wg-quick down wg-cascade
-    ip link del dev wg-cascade 2>/dev/null || true
-    ip route flush table 51888 2>/dev/null || true
-    while ip rule del priority 100 2>/dev/null; do :; done
-    while ip rule del priority 101 2>/dev/null; do :; done
-    while ip rule del priority 30000 2>/dev/null; do :; done
-    while ip rule del lookup 51888 2>/dev/null; do :; done
-    clean_duplicate_cascade_iptables
-    disable_ufw_strict_rpfilter
-
-    local wan_dev=$(get_wan_if)
-    local pub_ip=""
-    if [ -n "$wan_dev" ]; then
-        pub_ip=$(ip -4 -o addr show dev "$wan_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || echo "")
-    fi
-    if [ -z "$pub_ip" ]; then
-        pub_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n 1 | tr -d '[:space:]' || echo "")
-    fi
-    if [ -z "$pub_ip" ]; then
-        pub_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-    fi
-
-    if command -v tailscale &>/dev/null; then
-        silent_run tailscale set --exit-node=
-    fi
-
-    local wg_endpoint="${s2_ip}:${s2_port}"
-    if [ "$obfs_mode" != "none" ]; then
-        configure_udp2raw_service "client" "${s2_ip}:${s2_port}" "127.0.0.1:51889" "$obfs_mode" "$obfs_key"
-        wg_endpoint="127.0.0.1:51889"
-    else
-        configure_udp2raw_service "client" "" "" "none" ""
-    fi
-
-    local ssh_p="22"
-    local sshd_c=$(get_sshd_cmd)
-    if [ -n "$sshd_c" ]; then
-        ssh_p=$($sshd_c -T 2>/dev/null | grep -i "^port " | awk '{print $2}' | head -n 1 || echo "22")
-    fi
-    ssh_p="${ssh_p//[^0-9]/}"
-    [ -z "$ssh_p" ] && ssh_p="22"
-
-    mkdir -p /etc/wireguard
-    cat << EOF > /etc/wireguard/wg-cascade.conf
-[Interface]
-Address = ${s1_tun_ip}/24
-PrivateKey = $s1_priv
-MTU = 1280
-Table = 51888
-PostUp = ip link set dev wg-cascade mtu 1280 txqueuelen 10000 || true
-PostUp = tc qdisc replace dev wg-cascade root fq limit 30000 flow_limit 10000 2>/dev/null || true
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
-PostUp = ip route flush table 51888 2>/dev/null || true
-PostUp = ip route replace default dev wg-cascade table 51888 || true
-PostUp = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
-PostUp = ip rule add to $s2_ip lookup main priority 101 || true
-PostUp = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
-PostUp = ip rule add sport 443 lookup main priority 102 || true
-PostUp = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
-PostUp = ip rule add sport 80 lookup main priority 103 || true
-PostUp = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
-PostUp = ip rule add sport $ssh_p lookup main priority 104 || true
-PostUp = ip rule del lookup 51888 priority 30000 2>/dev/null || true
-PostUp = ip rule add lookup 51888 priority 30000 || true
-PostUp = iptables -t nat -C POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wg-cascade -j MASQUERADE || true
-PostUp = iptables -t mangle -C FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I FORWARD 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 || true
-PostUp = iptables -t mangle -C OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I OUTPUT 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 || true
-PostUp = iptables -t mangle -C POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || iptables -t mangle -I POSTROUTING 1 -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 || true
-PostDown = ip rule del lookup 51888 priority 30000 2>/dev/null || true
-PostDown = ip rule del to $s2_ip lookup main priority 101 2>/dev/null || true
-PostDown = ip rule del sport 443 lookup main priority 102 2>/dev/null || true
-PostDown = ip rule del sport 80 lookup main priority 103 2>/dev/null || true
-PostDown = ip rule del sport $ssh_p lookup main priority 104 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -o wg-cascade -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t mangle -D FORWARD -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D OUTPUT -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-PostDown = iptables -t mangle -D POSTROUTING -o wg-cascade -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || true
-
-[Peer]
-# Foreign Server 2 (WG -> Exit)
-PublicKey = $s2_pub
-PresharedKey = $psk
-Endpoint = $wg_endpoint
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-EOF
-    chmod 600 /etc/wireguard/wg-cascade.conf
-
-    ensure_wg_kernel_modules
-    silent_run systemctl daemon-reload
-    systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
-    systemctl enable wg-quick@wg-cascade.service >/dev/null 2>&1 || true
-    if ! systemctl restart wg-quick@wg-cascade.service; then
-        echo -e "${C_YELLOW} Повторная инициализация интерфейса wg-cascade после глубокой зачистки...${C_RESET}"
-        ip link del dev wg-cascade 2>/dev/null || true
-        systemctl reset-failed wg-quick@wg-cascade.service 2>/dev/null || true
-        systemctl start wg-quick@wg-cascade.service
-    fi
-
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="ru_wg_entry"
-NAIVE_DOMAIN="$n_dom"
-NAIVE_EMAIL="$n_email"
-SERVER_PUB_IP="$pub_ip"
-FOREIGN_WG_ENDPOINT="${s2_ip}:${s2_port}"
-WG_OBFS_MODE="$obfs_mode"
-WG_OBFS_KEY="$obfs_key"
-TCP_TUNE_PROFILE="balanced"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    apply_naive_tcp_tuning_profile "balanced"
-    render_naive_caddyfile
-    write_bobarev_cascade_ru_script
-    /usr/local/bin/bobarev-cascade-ru.sh
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow 80/tcp comment 'NaiveProxy ACME HTTP'
-        silent_run ufw allow 443/tcp comment 'NaiveProxy HTTPS'
-        silent_run ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC'
-    fi
-    disable_ufw_strict_rpfilter
-
-    echo -e "\n${C_GREEN} Каскад 1: Naiveproxy - Wireguard - Warp (NaiveProxy -> WG [MTU 1280, MSS 1240 + Anti-DPI: $obfs_mode]) запущен!${C_RESET}"
-    echo -e "${C_BLUE} Проверка рукопожатия WireGuard и внешнего IP через мост...${C_RESET}"
-    for i in {1..10}; do
-        ping -c 1 -W 1 10.200.200.1 >/dev/null 2>&1 || true
-        if wg show wg-cascade latest-handshakes 2>/dev/null | grep -qE "[1-9][0-9]{2,}"; then
-            break
-        fi
-        sleep 1
-    done
-    local test_ip=$(curl -4 -s --interface wg-cascade --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
-    if [ -z "$test_ip" ]; then
-        test_ip=$(curl -4 -s --max-time 6 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || echo "Установка рукопожатия...")
-    fi
-    [ -z "$test_ip" ] && test_ip="Установка рукопожатия..."
-    echo -e "   Выходной IP каскада: ${C_GREEN}${test_ip}${C_RESET}"
-    print_naive_shadowrocket_links
 }
 
 render_hysteria_server_config() {
@@ -3169,17 +2460,12 @@ render_hysteria_server_config() {
     chmod 600 /etc/hysteria/server.key
 
     local outbound_block=""
-    if [ "$exit_mode" = "warp" ]; then
-        ip rule del from 172.16.0.2 lookup 51820 priority 5998 2>/dev/null || true
-        ip rule add from 172.16.0.2 lookup 51820 priority 5998 2>/dev/null || true
-        ip rule del oif warp lookup 51820 priority 5999 2>/dev/null || true
-        ip rule add oif warp lookup 51820 priority 5999 2>/dev/null || true
+    if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
         outbound_block="outbounds:
-  - name: warp_out
-    type: direct
-    direct:
-      mode: 4
-      bindDevice: warp"
+  - name: masque_out
+    type: socks5
+    socks5:
+      addr: 127.0.0.1:1080"
     else
         outbound_block="outbounds:
   - name: direct_out
@@ -3220,7 +2506,7 @@ EOF
 }
 
 setup_cascade_hysteria_server2_foreign() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): HYSTERIA 2 -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): HYSTERIA 2 -> CLOUDFLARE MASQUE / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_hysteria_installed || return 1
     enable_routing_optimizations || true
     apply_naive_tcp_tuning_profile "balanced"
@@ -3238,8 +2524,8 @@ setup_cascade_hysteria_server2_foreign() {
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Hysteria 2)" "\nКак выпускать трафик из Hysteria 2 в интернет?" 16 $WT_WIDTH 2 "exit_choice" \
-    "1" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)" \
-    "2" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"; then
+    "1" " Через Cloudflare MASQUE (Usque — чистый IP CDN Cloudflare без капч и блокировок)" \
+    "2" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)"; then
         return 0
     fi
 
@@ -3385,18 +2671,11 @@ setup_cascade_hysteria_server1_ru() {
         echo -e "${C_GREEN} Существующие пользователи NaiveProxy сохранены!${C_RESET}"
     fi
 
-    ensure_go_and_build_caddy_naive || return 1
-
-    # Отключаем перехват маршрутов от Каскада 1 (wg-cascade / udp2raw) и Tailscale Exit Node,
+    # Отключаем конфликтующие службы на порту 1080 и Tailscale Exit Node,
     # чтобы трафик шел строго по цепочке: Caddy (NaiveProxy) -> socks5://127.0.0.1:1080 (Hysteria 2 Client) -> Сервер 2
-    echo -e "${C_BLUE} Очистка конфликтующих маршрутов wg-cascade и старых экземпляров Hysteria...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run wg-quick down wg-cascade
-    ip link del dev wg-cascade 2>/dev/null || true
-    ip route flush table 51888 2>/dev/null || true
-    while ip rule del priority 30000 2>/dev/null; do :; done
-    while ip rule del lookup 51888 2>/dev/null; do :; done
+    echo -e "${C_BLUE} Очистка конфликтующих служб и запуск клиентского моста Hysteria 2 (127.0.0.1:1080)...${C_RESET}"
+    silent_run systemctl stop usque.service hysteria-server.service hysteria-client.service bobarev-xray.service
+    silent_run systemctl disable usque.service hysteria-server.service hysteria-client.service bobarev-xray.service
     clean_duplicate_cascade_iptables
     if command -v tailscale &>/dev/null; then
         silent_run tailscale set --exit-node=
@@ -3467,6 +2746,8 @@ SVC_EOF
         return 1
     fi
 
+    ensure_go_and_build_caddy_naive || return 1
+
     # Сначала записываем CASCADE_ROLE="ru_hysteria_entry", чтобы render_naive_caddyfile()
     # гарантированно добавил директиву `upstream socks5://127.0.0.1:1080` в блок forward_proxy!
     cat << EOF > /etc/default/bobarev-cascade
@@ -3510,7 +2791,7 @@ manage_cascade_hysteria_menu() {
         local c_state="Не активен"
         if systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
             if is_warp_active; then
-                c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Cloudflare WARP)"
+                c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Cloudflare MASQUE)"
             else
                 c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Чистый IP сервера)"
             fi
@@ -3519,12 +2800,12 @@ manage_cascade_hysteria_menu() {
         fi
 
         local c_choice
-        if ! smart_menu " Каскад 2: NaiveProxy + Hysteria 2 + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
+        if ! smart_menu " Каскад: NaiveProxy + Hysteria 2 (+ Cloudflare MASQUE)" "\nСтатус моста: $c_state\nВыберите действие:" 19 $WT_WIDTH 7 "c_choice" \
         "1" " Сервер 2 (Зарубеж): Hysteria 2 -> Выход" \
         "2" " Сервер 1 (РФ): NaiveProxy -> Hysteria 2" \
         "3" " Управление пользователями NaiveProxy" \
         "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
+        "5" " Переключить выход: Чистый IP <-> Cloudflare MASQUE" \
         "6" " Показать токен подключения" \
         "7" " Остановить службу Hysteria 2" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
@@ -3652,24 +2933,40 @@ render_xray_server_config() {
     local exit_mode="${6:-direct}"
 
     mkdir -p /etc/xray
-    local outbound_sockopt=""
-    if [ "$exit_mode" = "warp" ]; then
-        outbound_sockopt=',
-      "streamSettings": {
-        "sockopt": {
-          "interface": "warp"
-        }
-      }'
-    elif [ "$exit_mode" = "direct" ]; then
-        local wan_dev=$(get_wan_if)
-        if [ -n "$wan_dev" ] && [ -d "/sys/class/net/$wan_dev" ]; then
-            outbound_sockopt=',
+    local outbound_json=""
+    if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
+        outbound_json='{
+      "tag": "direct",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "127.0.0.1",
+            "port": 1080
+          }
+        ]
+      }
+    }'
+    else
+        local outbound_sockopt=""
+        if [ "$exit_mode" = "direct" ]; then
+            local wan_dev=$(get_wan_if)
+            if [ -n "$wan_dev" ] && [ -d "/sys/class/net/$wan_dev" ]; then
+                outbound_sockopt=',
       "streamSettings": {
         "sockopt": {
           "interface": "'"$wan_dev"'"
         }
       }'
+            fi
         fi
+        outbound_json='{
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIPv4"
+      }'"${outbound_sockopt}"'
+    }'
     fi
 
     cat << EOF > /etc/xray/config.json
@@ -3714,13 +3011,7 @@ render_xray_server_config() {
     }
   ],
   "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "UseIPv4"
-      }${outbound_sockopt}
-    }
+    ${outbound_json}
   ],
   "routing": {
     "domainStrategy": "AsIs",
@@ -3844,97 +3135,11 @@ render_xray_client_config() {
 }
 EOF
 
-    # Если установлен Xray старой версии (< 26.x), не знающий finalmask.tcp, откатываемся на классический settings.fragment:
-    if [ -x /usr/local/bin/xray ] && ! /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
-        cat << EOF > /etc/xray/config.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "socks-in",
-      "listen": "127.0.0.1",
-      "port": 10808,
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": true
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "proxy",
-      "protocol": "vless",
-      "settings": {
-        "vnext": [
-          {
-            "address": "${s2_ip}",
-            "port": ${s2_port},
-            "users": [
-              {
-                "id": "${s2_uuid}",
-                "encryption": "none"
-              }
-            ]
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "fingerprint": "chrome",
-          "serverName": "${s2_sni}",
-          "publicKey": "${s2_pub}",
-          "shortId": "${s2_short_id}",
-          "spiderX": ""
-        },
-        "sockopt": {
-          "dialerProxy": "fragment",
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "fragment",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "AsIs",
-        "fragment": {
-          "packets": "1-3",
-          "length": "100-200",
-          "interval": "10-20"
-        }
-      },
-      "streamSettings": {
-        "sockopt": {
-          ${frag_iface_line}
-          "tcpNoDelay": true
-        }
-      }
-    }
-  ],
-  "routing": {
-    "domainStrategy": "AsIs",
-    "rules": [
-      {
-        "type": "field",
-        "inboundTag": ["socks-in"],
-        "outboundTag": "proxy"
-      }
-    ]
-  }
-}
-EOF
-    fi
     chmod 600 /etc/xray/config.json
 }
 
 setup_cascade_xray_server2_foreign() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): XRAY REALITY -> WARP / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): XRAY REALITY -> CLOUDFLARE MASQUE / ЧИСТЫЙ IP ===${C_RESET}"
     ensure_xray_installed || return 1
     enable_routing_optimizations || true
     apply_naive_tcp_tuning_profile "balanced"
@@ -3950,7 +3155,7 @@ setup_cascade_xray_server2_foreign() {
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Xray REALITY)" "
-Как выпускать трафик из Xray в интернет?" 16 $WT_WIDTH 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ WARP, макс. скорость!)"     "2" " Через Cloudflare WARP (Маскирует выходной IP под Cloudflare)"; then
+Как выпускать трафик из Xray в интернет?" 16 $WT_WIDTH 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)"     "2" " Через Cloudflare MASQUE (Usque — чистый IP CDN Cloudflare без капч и блокировок)"; then
         return 0
     fi
 
@@ -4085,12 +3290,8 @@ setup_cascade_xray_server1_ru() {
     fi
 
     echo -e "${C_BLUE} Очистка маршрутов и запуск клиентского моста Xray REALITY (127.0.0.1:10808)...${C_RESET}"
-    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-    silent_run wg-quick down wg-cascade 2>/dev/null || true
-    ip link del dev wg-cascade 2>/dev/null || true
-    ip route flush table 51888 2>/dev/null || true
-    while ip rule del lookup 51888 2>/dev/null; do :; done
+    silent_run systemctl stop hysteria-server.service hysteria-client.service bobarev-xray.service
+    silent_run systemctl disable hysteria-server.service hysteria-client.service bobarev-xray.service
     clean_duplicate_cascade_iptables
     rm -f /etc/naiveproxy/mesh-paused /etc/naiveproxy/mesh-upstream.port 2>/dev/null || true
     if [[ "$s2_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -4222,7 +3423,7 @@ cleanup_foreign_xray_exit() {
 
     local -a candidates=()
     local unit
-    for unit in caddy.service hysteria-client.service 'wg-quick@wg-cascade.service' bobarev-udp2raw.service; do
+    for unit in caddy.service hysteria-client.service; do
         if systemctl is-active --quiet "$unit" 2>/dev/null || systemctl is-enabled --quiet "$unit" 2>/dev/null || [ -f "/etc/systemd/system/$unit" ]; then
             candidates+=("$unit")
         fi
@@ -4297,7 +3498,7 @@ manage_cascade_xray_menu() {
                 source /etc/default/bobarev-cascade
                 if [ "${CASCADE_ROLE:-}" = "foreign_xray_exit" ]; then
                     if is_warp_active; then
-                        c_state="Активен Сервер 2 (Зарубеж: Xray REALITY -> Cloudflare WARP)"
+                        c_state="Активен Сервер 2 (Зарубеж: Xray REALITY -> Cloudflare MASQUE)"
                     else
                         c_state="Активен Сервер 2 (Зарубеж: Xray REALITY -> Чистый IP сервера)"
                     fi
@@ -4308,12 +3509,12 @@ manage_cascade_xray_menu() {
         fi
 
         local c_choice
-        if ! smart_menu " Каскад 3: NaiveProxy + Xray REALITY + WARP" "\nСтатус моста: $c_state\nВыберите действие:" 21 $WT_WIDTH 9 "c_choice" \
+        if ! smart_menu " Каскад: NaiveProxy + Xray REALITY (+ Cloudflare MASQUE)" "\nСтатус моста: $c_state\nВыберите действие:" 21 $WT_WIDTH 9 "c_choice" \
         "1" " Сервер 2 (Зарубеж): Xray REALITY -> Выход" \
         "2" " Сервер 1 (РФ): NaiveProxy -> Xray REALITY" \
         "3" " Управление пользователями NaiveProxy" \
         "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
+        "5" " Переключить выход: Чистый IP <-> Cloudflare MASQUE" \
         "6" " Показать токен подключения" \
         "7" " Остановить службы Xray" \
         "8" " Очистить неиспользуемые компоненты (только Сервер 2, порт 443 сохраняется)" \
@@ -4357,113 +3558,6 @@ manage_cascade_xray_menu() {
                         render_naive_caddyfile 2>/dev/null || true
                     fi
                     echo -e "${C_GREEN} Службы Xray остановлены и отключены.${C_RESET}"
-                fi
-                pause_enter
-                ;;
-        esac
-    done
-}
-
-mod_direct_wg_cascade() {
-    while true; do
-        MODULE_CANCELED=false
-        local d_status="Не активен"
-        if is_wg_cascade_active; then
-            local ob_str="прямой"
-            if is_udp2raw_active; then
-                ob_str="Anti-DPI udp2raw активен"
-            fi
-            # shellcheck disable=SC1091
-            [ -f /etc/default/bobarev-cascade ] && source /etc/default/bobarev-cascade
-            if [ "${CASCADE_ROLE:-}" = "foreign_wg_warp_exit" ]; then
-                if is_warp_active; then
-                    d_status="Активен Сервер 2 (Зарубеж: WG-Мост [$ob_str] -> Cloudflare WARP)"
-                else
-                    d_status="Активен Сервер 2 (Зарубеж: WG-Мост [$ob_str] -> Чистый IP сервера)"
-                fi
-            else
-                d_status="Активен Сервер 1 (РФ: NaiveProxy -> WG-Мост [$ob_str])"
-            fi
-        fi
-
-        local dc_choice
-        if ! smart_menu " Каскад 1: NaiveProxy + WireGuard + WARP" "\nСтатус моста: $d_status\nВыберите действие:" 18 $WT_WIDTH 7 "dc_choice" \
-        "1" " Сервер 2 (Зарубеж): WG-мост + Anti-DPI" \
-        "2" " Сервер 1 (РФ): NaiveProxy -> WG-мост" \
-        "3" " Управление пользователями NaiveProxy" \
-        "4" " Показать ссылки Shadowrocket" \
-        "5" " Переключить выход: Чистый IP <-> WARP" \
-        "6" " Показать токен подключения" \
-        "7" " Остановить каскад и мост" \
-        "0" " Вернуться в главное меню" || [ "$dc_choice" = "0" ]; then
-            break
-        fi
-
-        clear
-        case "$dc_choice" in
-            1)
-                setup_direct_wg_server2_foreign || true
-                pause_enter
-                ;;
-            2)
-                setup_direct_wg_server1_ru || true
-                pause_enter
-                ;;
-            3)
-                manage_naive_users_menu
-                ;;
-            4)
-                print_naive_shadowrocket_links
-                pause_enter
-                ;;
-            5)
-                toggle_foreign_warp_menu
-                pause_enter
-                ;;
-            6)
-                if [ -f /etc/default/bobarev-cascade ]; then
-                    # shellcheck disable=SC1091
-                    source /etc/default/bobarev-cascade
-                    if [ -n "${WG_BRIDGE_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN} Токены соединения Зарубежного Сервера 2 (Режим обфускации: ${WG_OBFS_MODE:-udp}):${C_RESET}"
-                        echo -e "${C_YELLOW} Используйте отдельный токен для каждого РФ-сервера:${C_RESET}"
-                        echo -e "\n   ${C_BOLD}Токен #1 (для 1-го РФ-сервера, IP 10.200.200.2):${C_RESET}"
-                        echo -e "    ${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN}${C_RESET}"
-                        if [ -n "${WG_BRIDGE_TOKEN_2:-}" ]; then
-                            echo -e "\n   ${C_BOLD}Токен #2 (для 2-го РФ-сервера, IP 10.200.200.3):${C_RESET}"
-                            echo -e "    ${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN_2}${C_RESET}"
-                        fi
-                        if [ -n "${WG_BRIDGE_TOKEN_3:-}" ]; then
-                            echo -e "\n   ${C_BOLD}Токен #3 (резервный для 3-го РФ-сервера, IP 10.200.200.4):${C_RESET}"
-                            echo -e "    ${C_BOLD}${C_GREEN}${WG_BRIDGE_TOKEN_3}${C_RESET}"
-                        fi
-                        echo ""
-                    else
-                        echo -e "${C_YELLOW} На этом сервере еще не генерировался токен Сервера 2 (выполните Шаг 1).${C_RESET}"
-                    fi
-                else
-                    echo -e "${C_YELLOW} Каскад еще не настроен.${C_RESET}"
-                fi
-                pause_enter
-                ;;
-            7)
-                if prompt_yn "Остановить и отключить прямой ядерный мост wg-cascade и службу маскировки udp2raw?" "false"; then
-                    silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-                    silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
-                    silent_run wg-quick down wg-cascade
-                    ip link del dev wg-cascade 2>/dev/null || true
-                    ip route flush table 51888 2>/dev/null || true
-                    while ip rule del priority 100 2>/dev/null; do :; done
-                    while ip rule del priority 101 2>/dev/null; do :; done
-                    while ip rule del priority 102 2>/dev/null; do :; done
-                    while ip rule del priority 103 2>/dev/null; do :; done
-                    while ip rule del priority 104 2>/dev/null; do :; done
-                    while ip rule del priority 30000 2>/dev/null; do :; done
-                    while ip rule del from 10.200.200.0/24 lookup 51820 priority 6001 2>/dev/null; do :; done
-                    clean_duplicate_cascade_iptables
-                    rm -f /etc/wireguard/wg-cascade.conf "$UDP2RAW_SERVICE"
-                    silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN} Прямой мост wg-cascade, хвосты интерфейса и служба udp2raw полностью зачищены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -4791,7 +3885,7 @@ configure_rps_for_interfaces() {
     local wan_if=$(get_wan_if)
     local cpu_mask=$(get_cpu_rps_mask)
     [ -n "$wan_if" ] && ip link set dev "$wan_if" txqueuelen 10000 2>/dev/null || true
-    for iface in wg-cascade warp tailscale0 $wan_if; do
+    for iface in wg0 tailscale0 $wan_if; do
         [ -z "$iface" ] && continue
         for qdir in /sys/class/net/"$iface"/queues/rx-*; do
             [ -d "$qdir" ] && echo "$cpu_mask" > "$qdir/rps_cpus" 2>/dev/null || true
@@ -4808,20 +3902,15 @@ enable_routing_optimizations() {
     cat << 'ETHTOOL_SCRIPT_EOF' > /usr/local/bin/tailscale-gro.sh
 #!/bin/bash
 tries=0
-while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" >/dev/null 2>&1; do
+while ! ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" >/dev/null 2>&1; do
     tries=$((tries + 1))
     [ "$tries" -ge 15 ] && exit 0
     sleep 2
 done
-NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
+NETDEV=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
 if [ -n "$NETDEV" ]; then
-    if systemctl is-active --quiet bobarev-udp2raw.service 2>/dev/null || [ -f /etc/systemd/system/bobarev-udp2raw.service ]; then
-        # Для сырых сокетов udp2raw (PF_PACKET) склейка UDP GRO и аппаратный оффлоад TCP вызывают сбои инкапсуляции и дропы пакетов > MTU на virtio_net
-        ethtool -K "$NETDEV" tso off gso off gro off rx-udp-gro-forwarding off rx-gro-list off 2>/dev/null || true
-    else
-        ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off tso on gso on gro on 2>/dev/null || true
-        ethtool -G "$NETDEV" rx 1024 tx 1024 2>/dev/null || true
-    fi
+    ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off tso on gso on gro on 2>/dev/null || true
+    ethtool -G "$NETDEV" rx 1024 tx 1024 2>/dev/null || true
 fi
 ETHTOOL_SCRIPT_EOF
     chmod +x /usr/local/bin/tailscale-gro.sh
@@ -5880,14 +4969,6 @@ mod_ufw() {
         echo -e "${C_BLUE} Восстановлены правила UFW для личного ретранслятора DERP (443/tcp и 3478/udp).${C_RESET}"
     fi
 
-    if [ -f /etc/wireguard/warp.conf ] || is_warp_active; then
-        silent_run ufw route allow in on tailscale0 out on warp comment 'Tailscale to WARP'
-        silent_run ufw route allow in on warp out on tailscale0 comment 'WARP to Tailscale'
-        silent_run ufw route allow in on wg-cascade out on warp comment 'WG Cascade to WARP'
-        silent_run ufw route allow in on warp out on wg-cascade comment 'WARP to WG Cascade'
-        ensure_ufw_nat_rule "-A POSTROUTING -o warp -j MASQUERADE"
-        echo -e "${C_BLUE} Восстановлены правила транзита UFW для туннеля Cloudflare WARP.${C_RESET}"
-    fi
 
     if [ -f /etc/wireguard/wg0.conf ] || is_wg0_active; then
         silent_run ufw route allow in on tailscale0 out on wg0 comment 'Tailscale to wg0 exit'
@@ -5899,10 +4980,6 @@ mod_ufw() {
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
-        if [ -n "${WG_CASCADE_PORT:-}" ]; then
-            silent_run ufw allow "${WG_CASCADE_PORT}/udp" comment 'WG Direct Cascade UDP'
-            silent_run ufw allow "${WG_CASCADE_PORT}/tcp" comment 'WG Direct Cascade FakeTCP'
-        fi
         if [ -n "${HYSTERIA_PORT:-}" ] && { [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] || systemctl is-active --quiet hysteria-server.service 2>/dev/null; }; then
             silent_run ufw allow "${HYSTERIA_PORT}/udp" comment 'Hysteria 2 QUIC UDP'
             silent_run ufw allow "${HYSTERIA_PORT}/tcp" comment 'Hysteria 2 TCP'
@@ -7214,7 +6291,7 @@ bobarev_network_human_audit() {
         esac
         audit_human_row 'Подбор размера TCP-пакетов:' "${C_BLUE}$value${C_RESET}"
     elif [ "$mode" = scheme ]; then
-        for link in wg0 wg-cascade warp tailscale0; do
+        for link in wg0 tailscale0; do
             [ -r "/sys/class/net/$link/mtu" ] || continue
             mtu=$(cat "/sys/class/net/$link/mtu" 2>/dev/null || true)
             flags=$(cat "/sys/class/net/$link/flags" 2>/dev/null || true)
@@ -7794,8 +6871,6 @@ mod_server_audit() {
         cascade_status="${C_GREEN}Сервер 2: XRayMesh — локальные службы запущены${C_RESET}"
     elif is_naive_active && { systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; }; then
         cascade_status="${C_GREEN} Гибридный шлюз (NaiveProxy + Tailscale Exit Node -> WireGuard wg0 активен)${C_RESET}"
-    elif is_naive_active && is_wg_cascade_active; then
-        cascade_status="${C_GREEN} Сервер 1 (Каскад 1: Naiveproxy - Wireguard - Warp: NaiveProxy -> WG-Мост активен)${C_RESET}"
     elif is_naive_active; then
         local audit_saved_role=""
         if [[ -r /etc/default/bobarev-cascade ]]; then
@@ -7842,23 +6917,19 @@ mod_server_audit() {
             *) cascade_status="${C_BLUE}NaiveProxy запущен; направление выхода по этой проверке не определено${C_RESET}" ;;
         esac
     elif systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
-        if is_warp_active; then
-            cascade_status="${C_GREEN} Сервер 2 (Каскад 3: Xray REALITY -> Cloudflare WARP активен)${C_RESET}"
+        if is_usque_active; then
+            cascade_status="${C_GREEN} Сервер 2 (Каскад 3: Xray REALITY -> Cloudflare MASQUE активен)${C_RESET}"
         else
             cascade_status="${C_GREEN} Сервер 2 (Каскад 3: Xray REALITY -> Чистый IP активен)${C_RESET}"
         fi
     elif systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
-        if is_warp_active; then
-            cascade_status="${C_GREEN} Сервер 2 (Каскад 2: Hysteria 2 -> Cloudflare WARP активен)${C_RESET}"
+        if is_usque_active; then
+            cascade_status="${C_GREEN} Сервер 2 (Каскад 4: Hysteria 2 -> Cloudflare MASQUE активен)${C_RESET}"
         else
-            cascade_status="${C_GREEN} Сервер 2 (Каскад 2: Hysteria 2 -> Чистый IP активен)${C_RESET}"
+            cascade_status="${C_GREEN} Сервер 2 (Каскад 4: Hysteria 2 -> Чистый IP активен)${C_RESET}"
         fi
-    elif is_wg_cascade_active && is_warp_active; then
-        cascade_status="${C_GREEN} Сервер 2 (Каскад 1: WG-Мост -> Cloudflare WARP активен)${C_RESET}"
-    elif is_wg_cascade_active; then
-        cascade_status="${C_GREEN} Сервер 2 (Каскад 1: WG-Мост -> Чистый IP активен)${C_RESET}"
-    elif is_warp_active; then
-        cascade_status="${C_GREEN} Сервер 2 (Tailscale-выход: Tailscale -> WARP активен)${C_RESET}"
+    elif is_usque_active; then
+        cascade_status="${C_GREEN} Выход через Cloudflare MASQUE (Usque 127.0.0.1:1080 активен)${C_RESET}"
     elif systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; then
         cascade_status="${C_GREEN} Шлюз WireGuard wg0 активен (таблица 150)${C_RESET}"
     fi
@@ -7873,9 +6944,7 @@ mod_server_audit() {
         ts_exit=$(tailscale get exit-node 2>/dev/null || echo "")
         local ts_exit_human
         if [ -z "$ts_exit" ] || [ "$ts_exit" = "none" ] || [ "$ts_exit" = "false" ]; then
-            if is_wg_cascade_active; then
-                ts_exit_human="Отключен (трафик идет через скоростной ядерный мост wg-cascade)"
-            elif [ -f /etc/default/bobarev-router ]; then
+            if [ -f /etc/default/bobarev-router ]; then
                 # shellcheck disable=SC1091
                 source /etc/default/bobarev-router
                 if [ "${ROUTER_ROUTE_HOST:-false}" = "true" ] && [ -n "${ROUTER_OUT_IF:-}" ] && [ "${ROUTER_OUT_IF:-}" != "tailscale0" ]; then
@@ -8108,14 +7177,12 @@ mod_server_audit() {
         audit_human_row 'Cloudflare MASQUE (Usque):' "$feat_off"
     fi
 
-    # 5. Каскадные протоколы (Xray / Hysteria 2 / WG-каскад / XRayMesh)
+    # 5. Каскадные протоколы (Xray / Hysteria 2 / XRayMesh)
     local casc_feat="$feat_off"
     if systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
         casc_feat="${C_GREEN}✔ Настроено (Xray VLESS REALITY)${C_RESET}"
     elif systemctl is-active --quiet hysteria-client.service 2>/dev/null || systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
         casc_feat="${C_GREEN}✔ Настроено (Hysteria 2 QUIC)${C_RESET}"
-    elif is_wg_cascade_active; then
-        casc_feat="${C_GREEN}✔ Настроено (WireGuard / udp2raw)${C_RESET}"
     elif systemctl is-active --quiet xraymesh.service 2>/dev/null; then
         casc_feat="${C_GREEN}✔ Настроено (XRayMesh)${C_RESET}"
     elif [ -f /etc/default/bobarev-cascade ]; then
@@ -8126,21 +7193,13 @@ mod_server_audit() {
     fi
     audit_human_row 'Каскадный мост (Сервер 1↔2):' "$casc_feat"
 
-    # 6. WireGuard wg0 и Cloudflare WARP
+    # 6. WireGuard wg0 (Dual-Gateway)
     if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip link show wg0 >/dev/null 2>&1; then
         audit_human_row 'WireGuard wg0 (свой туннель):' "${C_GREEN}✔ Настроено (активен)${C_RESET}"
     elif [ -f /etc/wireguard/wg0.conf ]; then
         audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_on"
     else
         audit_human_row 'WireGuard wg0 (свой туннель):' "$feat_off"
-    fi
-
-    if is_warp_active; then
-        audit_human_row 'Cloudflare WARP (WireGuard):' "${C_GREEN}✔ Настроено (активен)${C_RESET}"
-    elif [ -f /etc/wireguard/warp.conf ]; then
-        audit_human_row 'Cloudflare WARP (WireGuard):' "$feat_on"
-    else
-        audit_human_row 'Cloudflare WARP (WireGuard):' "$feat_off"
     fi
 
     # 7. Tailscale и личный DERP
@@ -10270,7 +9329,7 @@ mod_network_reset() {
  echo '--- NAT / MASQUERADE ---'
  iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' || true
  echo '--- Активные сетевые службы ---'
- for unit in bobarev-router-v2 bobarev-router-dhcp bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server usque naive-mesh-bridge xray-mesh-socks xraymesh; do
+ for unit in bobarev-router-v2 bobarev-router-dhcp bobarev-cascade-ru bobarev-xray hysteria-client hysteria-server usque naive-mesh-bridge xray-mesh-socks xraymesh; do
   [[ -f "/etc/systemd/system/$unit.service" ]] || continue
   printf '%-32s %s\n' "$unit" "$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
  done
@@ -10295,7 +9354,7 @@ mod_network_reset() {
    items+=('TS_ADV' 'Отключить анонсирование сервера как exit node' OFF)
   fi
  fi
- for unit in bobarev-cascade-ru bobarev-udp2raw bobarev-xray hysteria-client hysteria-server usque naive-mesh-bridge xray-mesh-socks xraymesh; do
+ for unit in bobarev-cascade-ru bobarev-xray hysteria-client hysteria-server usque naive-mesh-bridge xray-mesh-socks xraymesh; do
   [[ -f "/etc/systemd/system/$unit.service" ]] || continue
   local state
   state="$(systemctl is-active "$unit.service" 2>/dev/null || echo unknown)"
@@ -10352,7 +9411,7 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /var/lib/bobarev-shell-mullvad/client-links.txt /var/lib/bobarev-shell-mullvad/vless-links.txt /usr/local/lib/bobarev-shell /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/usque /etc/hysteria /etc/xray /etc/systemd/system/usque.service /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /etc/systemd/system/bobarev-udp2raw.service /usr/local/bin/udp2raw /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /var/lib/bobarev-shell-mullvad/client-links.txt /var/lib/bobarev-shell-mullvad/vless-links.txt /usr/local/lib/bobarev-shell /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/usque /etc/hysteria /etc/xray /etc/systemd/system/usque.service /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -10381,9 +9440,7 @@ mod_backup_manager() {
             [ -x /usr/local/bin/bobarev-cascade-ru.sh ] && /usr/local/bin/bobarev-cascade-ru.sh
             [ -f /etc/systemd/system/derper.service ] && [ -x /usr/local/bin/derper ] && silent_run systemctl restart derper.service
             is_naive_active && silent_run systemctl restart caddy.service
-            is_warp_active && silent_run systemctl restart wg-quick@warp
-            [ -f /etc/systemd/system/bobarev-udp2raw.service ] && [ -x /usr/local/bin/udp2raw ] && silent_run systemctl restart bobarev-udp2raw.service
-            [ -f /etc/wireguard/wg-cascade.conf ] && silent_run systemctl restart wg-quick@wg-cascade
+            [ -f /etc/systemd/system/usque.service ] && [ -s /etc/usque/config.json ] && silent_run systemctl restart usque.service
             silent_run systemctl restart systemd-journald
             silent_run systemctl restart sshd || silent_run systemctl restart ssh
             command -v ufw &>/dev/null && flush_and_reload_nat
@@ -12091,7 +11148,7 @@ bobarev_cli_status() {
     echo "=== BOBAREV CLI STATUS ==="
     echo "Версия: $SCRIPT_VERSION"
     if command -v systemctl >/dev/null 2>&1; then
-        for u in caddy.service hysteria-server.service hysteria-client.service bobarev-xray.service wg-quick@wg0 wg-quick@wg-cascade.service derper.service bobarev-router-v2.service; do
+        for u in caddy.service usque.service hysteria-server.service hysteria-client.service bobarev-xray.service wg-quick@wg0 derper.service bobarev-router-v2.service; do
             if systemctl list-unit-files "$u" >/dev/null 2>&1; then
                 printf '%-32s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
             fi
@@ -12266,15 +11323,14 @@ menu_connections_proxies() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (NAIVEPROXY)" "Выберите топологию подключения:" 20 "$WT_WIDTH" 9 sub_choice \
+        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ" "Выберите режим работы:" 19 "$WT_WIDTH" 8 sub_choice \
             "1" "Автономный NaiveProxy (Один сервер + WG Dual-Gateway)" \
             "2" "Автономный NaiveProxy (Один сервер + Cloudflare MASQUE)" \
-            "3" "Каскад: NaiveProxy + Xray REALITY (+ WARP)" \
-            "4" "Каскад: NaiveProxy + Hysteria 2 (+ WARP)" \
-            "5" "Каскад: NaiveProxy + WireGuard / udp2raw (+ WARP)" \
-            "6" "Каскад: NaiveProxy + Tailscale / Mullvad (+ VLESS-REALITY)" \
-            "7" "Каскад: NaiveProxy + XRayMesh" \
-            "8" "Каскад: NaiveProxy + Tailscale (2 сервера + WARP)" \
+            "3" "Каскад: NaiveProxy + Xray REALITY (+ Cloudflare MASQUE)" \
+            "4" "Каскад: NaiveProxy + Hysteria 2 (+ Cloudflare MASQUE)" \
+            "5" "Каскад: NaiveProxy + Tailscale / Mullvad (+ VLESS-REALITY)" \
+            "6" "Каскад: NaiveProxy + XRayMesh" \
+            "7" "Каскад: NaiveProxy + Tailscale (2 сервера + Cloudflare MASQUE)" \
             "0" "⬅ Назад"; then
             return 0
         fi
@@ -12285,10 +11341,9 @@ menu_connections_proxies() {
             2) setup_standalone_naive_masque || true ;;
             3) manage_cascade_xray_menu || true ;;
             4) manage_cascade_hysteria_menu || true ;;
-            5) mod_direct_wg_cascade || true ;;
-            6) manage_naive_mullvad_menu || true ;;
-            7) manage_naive_mesh_menu || true ;;
-            8) manage_cascade_naive_ts_warp || true ;;
+            5) manage_naive_mullvad_menu || true ;;
+            6) manage_naive_mesh_menu || true ;;
+            7) manage_cascade_naive_ts_warp || true ;;
         esac
     done
 }

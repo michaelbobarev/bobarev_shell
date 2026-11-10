@@ -3,50 +3,9 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.22 (Universal Simplified Menu Edition)
+# Версия: 3.18.23 (Universal Simplified Menu Edition)
 # ------------------------------------------------------------------------------
-# Изменения 3.18.22:
-#   * Защита от перебора паролей SSH вынесена в отдельный наглядный пункт меню
-#     «7. Защита от перебора паролей SSH (SSHGuard / Fail2Ban)» в разделе 1
-#     (поддержка быстрой установки SSHGuard или Fail2Ban с systemd-backend,
-#     просмотра журнала атак и заблокированных IP), а также предлагается в п. 6
-#     независимо от выбранного режима Tailscale.
-#   * Переработан раздел 10 аудита («Профиль Bobarev Shell — что настроено скриптом»):
-#     две строки роутера объединены в единый понятный статус «Роутер SBC (раздача в LAN)»,
-#     добавлены индикаторы «Защита SSH от перебора» и «Cloudflare MASQUE (Usque)»,
-#     обновлена ссылка на разделы главного меню (разделы 1–5).
-#   * Добавлен новый режим «2. Автономный NaiveProxy (Один сервер + Cloudflare MASQUE)»
-#     в разделе 2 (на базе клиента Diniboy1123/usque по протоколу HTTP/3 QUIC MASQUE):
-#     маскировка входящего трафика под Chrome (защита от DPI) + выход в интернет
-#     через CDN Cloudflare (чистая репутация IP без капч, блокировок ChatGPT/OpenAI
-#     и ограничений стриминговых сервисов).
-# Изменения 3.18.21:
-#   * Исправлена ошибка синтаксиса awk в модуле аудита (раздел 8, открытые порты),
-#     приводившая к обрыву аудита ("awk: line 2: missing } near end of file")
-#     и аварийному выбросу из скрипта в терминал при активном set -euo pipefail.
-#   * Устранены все потенциальные точки аварийного выхода ("выброса в терминал")
-#     в меню, подменю, диалогах whiptail (авто-адаптация высоты smart_menu под
-#     размер окна терминала) и функции pause_enter (очистка буфера ввода).
-#   * Исправлено определение и маршрутизация выходного IP в Каскаде 3 (Xray REALITY):
-#     устранён флаг --noproxy '*' при проверке через --socks5-hostname 127.0.0.1:10808
-#     (из-за которого curl игнорировал SOCKS5-прокси и показывал IP Сервера 1 вместо
-#     Сервера 2), добавлена жёсткая привязка интерфейсов и перезапуск Caddy.
-#   * Устранено дублирование dhcp-option 3 и 6 в существующем dnsmasq на роутере.
-# Изменения 3.18.20:
-#   * Вопрос про Tailscale задаётся ОДИН РАЗ за запуск мастера: ответ в модуле
-#     SSH («Скрыть доступ через закрытую сеть?») запоминается в
-#     /etc/default/bobarev-answers и больше не дублируется в модуле Tailscale.
-#   * Аудит: выровненный формат «строка к строке» (единая колонка значений),
-#     заголовки разделов с линиями, шапка с хостом/версией/uptime.
-#   * Аудит: новые показатели — ОС и ядро, ожидающие обновления, необходимость
-#     перезагрузки, процессор и занятость ОЗУ, неудачные попытки входа SSH,
-#     последний вход, службы на открытых портах.
-#   * Аудит: раздел 10 «Профиль Bobarev Shell» — что уже настроено скриптом
-#     (роутер, каскады, NaiveProxy, Xray, WARP, WireGuard, Tailscale, DERP...).
-#   * Аудит: итоговая сводка — список пунктов, отмеченных жёлтым/красным.
-# ==============================================================================
-
-SCRIPT_VERSION="3.18.22"
+SCRIPT_VERSION="3.18.23"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -580,18 +539,34 @@ ensure_go_and_build_caddy_naive() {
     # Используем динамическую временную папку, чтобы сборка не падала с "no space left on device"
     local build_tmp_dir=$(mktemp -d /root/.caddy-build-XXXXXX)
 
+    local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+    local exp_sha="$GO_SHA256_AMD64"
+    if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
+        arch="arm64"
+        exp_sha="$GO_SHA256_ARM64"
+    else
+        arch="amd64"
+    fi
+
     if [ "$need_go" = true ]; then
         echo -e "${C_BLUE} Установка компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
-        local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-        local exp_sha="$GO_SHA256_AMD64"
-        if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
-            arch="arm64"
-            exp_sha="$GO_SHA256_ARM64"
-        else
-            arch="amd64"
-        fi
         local go_tmp="${build_tmp_dir}/go_${GO_VERSION_PIN}.tar.gz"
-        wget -q --tries=3 --timeout=30 "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" -O "$go_tmp"
+        local go_dl_ok=false
+        local go_url
+        for go_url in \
+            "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" \
+            "https://golang.google.cn/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" \
+            "https://mirrors.aliyun.com/golang/go${GO_VERSION_PIN}.linux-${arch}.tar.gz"; do
+            if curl -4 -fsSL --connect-timeout 8 --max-time 180 "$go_url" -o "$go_tmp" 2>/dev/null && [ -s "$go_tmp" ]; then
+                go_dl_ok=true
+                break
+            fi
+        done
+        if [ "$go_dl_ok" != true ]; then
+            rm -rf "$build_tmp_dir"
+            echo -e "${C_RED} Ошибка: не удалось скачать архив Go ${GO_VERSION_PIN} ни с основного узла, ни с зеркал.${C_RESET}"
+            return 1
+        fi
         local act_sha=$(sha256sum "$go_tmp" | awk '{print $1}')
         if [ "$act_sha" != "$exp_sha" ]; then
             rm -rf "$build_tmp_dir"
@@ -612,12 +587,60 @@ ensure_go_and_build_caddy_naive() {
     export GOTMPDIR="$build_tmp_dir"
     export TMPDIR="$build_tmp_dir"
 
-    go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}"
+    # Защита от блокировки ТСПУ подсетей Google (sum.golang.org / proxy.golang.org) на серверах в РФ:
+    if ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://sum.golang.org" >/dev/null 2>&1 || \
+       ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://proxy.golang.org" >/dev/null 2>&1; then
+        echo -e "${C_YELLOW} Узлы sum.golang.org / proxy.golang.org недоступны (блокировка ТСПУ подсетей Google). Включаю обход GOPROXY + GOSUMDB=off...${C_RESET}"
+        export GOPROXY="https://goproxy.io,https://goproxy.cn,direct"
+        export GOSUMDB="off"
+    fi
+
+    if [ ! -x "$GOPATH/bin/xcaddy" ]; then
+        go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" || \
+            GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" || \
+            GOPROXY="direct" GOSUMDB="off" go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" || true
+    fi
+
+    # Резерв: если сборка xcaddy через go install не прошла, скачиваем официальный релиз xcaddy с GitHub
+    if [ ! -x "$GOPATH/bin/xcaddy" ]; then
+        echo -e "${C_BLUE} Скачивание готового бинарника xcaddy ${XCADDY_VERSION_PIN} с GitHub Releases...${C_RESET}"
+        mkdir -p "$GOPATH/bin"
+        local xc_ver="${XCADDY_VERSION_PIN#v}"
+        local xc_tar="${build_tmp_dir}/xcaddy.tar.gz"
+        if curl -4 -fsSL --connect-timeout 10 --max-time 60 "https://github.com/caddyserver/xcaddy/releases/download/${XCADDY_VERSION_PIN}/xcaddy_${xc_ver}_linux_${arch}.tar.gz" -o "$xc_tar" 2>/dev/null; then
+            tar -C "$build_tmp_dir" -xzf "$xc_tar" xcaddy 2>/dev/null || true
+            [ -f "${build_tmp_dir}/xcaddy" ] && install -m 755 "${build_tmp_dir}/xcaddy" "$GOPATH/bin/xcaddy"
+            rm -f "$xc_tar"
+        fi
+    fi
 
     local tmp_caddy_bin="${build_tmp_dir}/caddy_built"
-    "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
-        --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
-        --output "$tmp_caddy_bin" || true
+    if [ -x "$GOPATH/bin/xcaddy" ]; then
+        "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
+            --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
+            --output "$tmp_caddy_bin" || \
+        GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
+            --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
+            --output "$tmp_caddy_bin" || true
+
+        # Если прямая сборка и зеркала заблокированы, но на Сервере 1 уже поднят локальный SOCKS5-мост (10808 или 1080) — собираем через него:
+        if [ ! -f "$tmp_caddy_bin" ]; then
+            local local_socks=""
+            if ss -Hltn 2>/dev/null | awk '$4 ~ /:10808$/ {found=1} END{exit !found}'; then
+                local_socks="socks5h://127.0.0.1:10808"
+            elif ss -Hltn 2>/dev/null | awk '$4 ~ /:1080$/ {found=1} END{exit !found}'; then
+                local_socks="socks5h://127.0.0.1:1080"
+            fi
+            if [ -n "$local_socks" ]; then
+                echo -e "${C_YELLOW} Повторная сборка Caddy через активный локальный SOCKS5-туннель ($local_socks)...${C_RESET}"
+                ALL_PROXY="$local_socks" HTTPS_PROXY="$local_socks" HTTP_PROXY="$local_socks" \
+                    GOPROXY="https://proxy.golang.org,https://goproxy.io,direct" GOSUMDB="off" \
+                    "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
+                    --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
+                    --output "$tmp_caddy_bin" || true
+            fi
+        fi
+    fi
 
     if [ -f "$tmp_caddy_bin" ]; then
         install -m 755 "$tmp_caddy_bin" "$CADDY_BIN"
@@ -1615,9 +1638,7 @@ install_and_setup_usque() {
             if /usr/local/bin/usque register --help 2>&1 | grep -q -- "--accept-tos"; then
                 /usr/local/bin/usque register --accept-tos -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
             else
-                printf 'y
-
-' | /usr/local/bin/usque register -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
+                printf 'y\n\n' | /usr/local/bin/usque register -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
             fi
         )
         if [ ! -s /etc/usque/config.json ]; then
@@ -1677,12 +1698,9 @@ verify_usque_masque_ip() {
     local cf_trace="" cf_ip="" cf_warp="" cf_loc=""
     cf_trace=$(curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
     if [ -n "$cf_trace" ]; then
-        cf_ip=$(printf '%s
-' "$cf_trace" | awk -F= '$1=="ip"{print $2;exit}')
-        cf_warp=$(printf '%s
-' "$cf_trace" | awk -F= '$1=="warp"{print $2;exit}')
-        cf_loc=$(printf '%s
-' "$cf_trace" | awk -F= '$1=="loc"{print $2;exit}')
+        cf_ip=$(printf '%s\n' "$cf_trace" | awk -F= '$1=="ip"{print $2;exit}')
+        cf_warp=$(printf '%s\n' "$cf_trace" | awk -F= '$1=="warp"{print $2;exit}')
+        cf_loc=$(printf '%s\n' "$cf_trace" | awk -F= '$1=="loc"{print $2;exit}')
     fi
     if [ -z "$cf_ip" ]; then
         cf_ip=$(curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)
@@ -1723,9 +1741,9 @@ enable_masque_for_existing_naive() {
             echo 'NAIVE_OUT_MODE="masque"' >> /etc/default/bobarev-cascade
         fi
         if grep -q "^USQUE_MODE=" /etc/default/bobarev-cascade; then
-            sed -i "s/^USQUE_MODE=.*/USQUE_MODE="${proxy_mode}"/" /etc/default/bobarev-cascade
+            sed -i "s/^USQUE_MODE=.*/USQUE_MODE=\"${proxy_mode}\"/" /etc/default/bobarev-cascade
         else
-            echo "USQUE_MODE="${proxy_mode}"" >> /etc/default/bobarev-cascade
+            echo "USQUE_MODE=\"${proxy_mode}\"" >> /etc/default/bobarev-cascade
         fi
     fi
 
@@ -1898,8 +1916,7 @@ setup_standalone_naive_masque() {
                 if ! n_pass=$(whiptail --title "Пароль NaiveProxy" --passwordbox "4/4. Пароль для подключения (минимум 8 символов):" 10 "$WT_WIDTH" "$generated_pass" 3>&1 1>&2 2>&3); then
                     continue
                 fi
-                if [ "${#n_pass}" -lt 8 ] || [[ "$n_pass" == *:* ]] || [[ "$n_pass" == *$'
-'* ]]; then
+                if [ "${#n_pass}" -lt 8 ] || [[ "$n_pass" == *:* ]] || [[ "$n_pass" == *$'\n'* ]]; then
                     echo -e "${C_RED} Пароль: не менее 8 символов, без двоеточия и перевода строки.${C_RESET}"; pause_enter; continue
                 fi
                 if ! prompt_yn "Развернуть связку NaiveProxy + Cloudflare MASQUE (Usque) для домена $n_dom?" "true"; then
@@ -1945,18 +1962,12 @@ setup_standalone_naive_masque() {
                 config_tmp=$(mktemp /etc/default/.bobarev-cascade.XXXXXXXX)
                 chmod 600 "$config_tmp"
                 {
-                    printf 'CASCADE_ROLE=%q
-' standalone_naive
-                    printf 'NAIVE_DOMAIN=%q
-' "$n_dom"
-                    printf 'NAIVE_EMAIL=%q
-' "$n_email"
-                    printf 'SERVER_PUB_IP=%q
-' "$pub_ip"
-                    printf 'NAIVE_OUT_MODE=%q
-' masque
-                    printf 'USQUE_MODE=%q
-' "${cur_usque_mode:-l4-socks}"
+                    printf 'CASCADE_ROLE=%q\n' standalone_naive
+                    printf 'NAIVE_DOMAIN=%q\n' "$n_dom"
+                    printf 'NAIVE_EMAIL=%q\n' "$n_email"
+                    printf 'SERVER_PUB_IP=%q\n' "$pub_ip"
+                    printf 'NAIVE_OUT_MODE=%q\n' masque
+                    printf 'USQUE_MODE=%q\n' "${cur_usque_mode:-l4-socks}"
                 } > "$config_tmp"
                 mv -f "$config_tmp" /etc/default/bobarev-cascade
 
@@ -3741,7 +3752,101 @@ render_xray_client_config() {
     fi
 
     mkdir -p /etc/xray
+    # Конфигурация для Xray 26+ (использует streamSettings.finalmask.tcp вместо устаревшего settings.fragment)
     cat << EOF > /etc/xray/config.json
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "${s2_ip}",
+            "port": ${s2_port},
+            "users": [
+              {
+                "id": "${s2_uuid}",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "fingerprint": "chrome",
+          "serverName": "${s2_sni}",
+          "publicKey": "${s2_pub}",
+          "shortId": "${s2_short_id}",
+          "spiderX": ""
+        },
+        "sockopt": {
+          "dialerProxy": "fragment",
+          "tcpNoDelay": true
+        }
+      }
+    },
+    {
+      "tag": "fragment",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "AsIs"
+      },
+      "streamSettings": {
+        "finalmask": {
+          "tcp": [
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "1-3",
+                "length": "100-200",
+                "delay": "10-20"
+              }
+            }
+          ]
+        },
+        "sockopt": {
+          ${frag_iface_line}
+          "tcpNoDelay": true
+        }
+      }
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["socks-in"],
+        "outboundTag": "proxy"
+      }
+    ]
+  }
+}
+EOF
+
+    # Если установлен Xray старой версии (< 26.x), не знающий finalmask.tcp, откатываемся на классический settings.fragment:
+    if [ -x /usr/local/bin/xray ] && ! /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
+        cat << EOF > /etc/xray/config.json
 {
   "log": {
     "loglevel": "warning"
@@ -3824,6 +3929,7 @@ render_xray_client_config() {
   }
 }
 EOF
+    fi
     chmod 600 /etc/xray/config.json
 }
 
@@ -3978,9 +4084,7 @@ setup_cascade_xray_server1_ru() {
         echo -e "${C_GREEN} Существующие пользователи NaiveProxy сохранены!${C_RESET}"
     fi
 
-    ensure_go_and_build_caddy_naive || return 1
-
-    echo -e "${C_BLUE} Очистка маршрутов и служб этого каскада...${C_RESET}"
+    echo -e "${C_BLUE} Очистка маршрутов и запуск клиентского моста Xray REALITY (127.0.0.1:10808)...${C_RESET}"
     silent_run systemctl stop wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run systemctl disable wg-quick@wg-cascade.service bobarev-udp2raw.service hysteria-server.service hysteria-client.service bobarev-xray.service
     silent_run wg-quick down wg-cascade 2>/dev/null || true
@@ -4014,6 +4118,8 @@ setup_cascade_xray_server1_ru() {
         journalctl -u bobarev-xray.service -n 15 --no-pager || true
         return 1
     fi
+
+    ensure_go_and_build_caddy_naive || return 1
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_xray_entry"
@@ -4492,9 +4598,16 @@ manage_custom_derp() {
                 export GOPATH="/root/go"
                 export GOTMPDIR="$derp_tmp_dir"
                 export TMPDIR="$derp_tmp_dir"
+                if ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://sum.golang.org" >/dev/null 2>&1 || \
+                   ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://proxy.golang.org" >/dev/null 2>&1; then
+                    echo -e "${C_YELLOW} Узлы sum.golang.org / proxy.golang.org недоступны. Включаю обход GOPROXY + GOSUMDB=off...${C_RESET}"
+                    export GOPROXY="https://goproxy.io,https://goproxy.cn,direct"
+                    export GOSUMDB="off"
+                fi
 
-                GOBIN=/usr/local/bin go install tailscale.com/cmd/derper@latest || {
-                    go install tailscale.com/cmd/derper@latest
+                GOBIN=/usr/local/bin go install tailscale.com/cmd/derper@latest || \
+                GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" GOBIN=/usr/local/bin go install tailscale.com/cmd/derper@latest || {
+                    GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" go install tailscale.com/cmd/derper@latest
                     if [ -f "/root/go/bin/derper" ]; then
                         cp /root/go/bin/derper /usr/local/bin/derper
                     elif [ -f "$HOME/go/bin/derper" ]; then
@@ -9688,13 +9801,23 @@ build_caddy(){
   if (( gmaj > 1 || (gmaj == 1 && gmin >= 25) ));then need_go_dl=0;fi
  fi
  if (( need_go_dl == 1 ));then
-  curl -q --proto '=https' -fSL --retry 2 --connect-timeout 10 --max-time 300 "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" -o "$temp/go.tar.gz"
+  local go_url_m=""
+  for go_url_m in "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" "https://golang.google.cn/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" "https://mirrors.aliyun.com/golang/go${GO_VERSION_PIN}.linux-${arch}.tar.gz"; do
+   if curl -q --proto '=https' -fSL --retry 2 --connect-timeout 8 --max-time 240 "$go_url_m" -o "$temp/go.tar.gz" 2>/dev/null && [[ -s "$temp/go.tar.gz" ]]; then
+    break
+   fi
+  done
   actual=$(sha256sum "$temp/go.tar.gz" | awk '{print $1}')
   [[ $actual == "$sha" ]] || die 'SHA256 Go не совпал с pin исходника; сборка остановлена.'
   mkdir "$temp/toolchain";tar -C "$temp/toolchain" -xzf "$temp/go.tar.gz"
   export PATH="$temp/toolchain/go/bin:$PATH"
  fi
  export GOPATH=/root/go GOCACHE=/root/.cache/go-build GOTMPDIR=$temp TMPDIR=$temp
+ if ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://sum.golang.org" >/dev/null 2>&1 || ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://proxy.golang.org" >/dev/null 2>&1; then
+  log 'sum.golang.org / proxy.golang.org недоступны (блокировка ТСПУ). Включаю GOPROXY=https://goproxy.io,https://goproxy.cn,direct и GOSUMDB=off.'
+  export GOPROXY="https://goproxy.io,https://goproxy.cn,direct"
+  export GOSUMDB="off"
+ fi
  local caddy_cache="$BASE/caddy/caddy"
  if [[ ! -x /usr/local/bin/caddy ]] || ! /usr/local/bin/caddy list-modules 2>/dev/null | grep -F 'http.handlers.forward_proxy' >/dev/null;then
   if [[ -x "$caddy_cache" ]] && "$caddy_cache" list-modules 2>/dev/null | grep -F 'http.handlers.forward_proxy' >/dev/null;then
@@ -9704,11 +9827,13 @@ build_caddy(){
  fi
  if [[ ! -x /usr/local/bin/caddy ]] || ! /usr/local/bin/caddy list-modules | grep -F 'http.handlers.forward_proxy' >/dev/null;then
   log 'Сборка Caddy с NaiveProxy: это может занять несколько минут.'
-  if ! go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" >"$TX/caddy-build.log" 2>&1;then
+  if ! go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" >"$TX/caddy-build.log" 2>&1 && \
+     ! GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" >>"$TX/caddy-build.log" 2>&1;then
    tail -n 40 "$TX/caddy-build.log" >&2
    die 'Не удалось установить xcaddy. Полный лог: '"$TX/caddy-build.log"
   fi
-  if ! "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" --output "$temp/caddy" >>"$TX/caddy-build.log" 2>&1;then
+  if ! "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" --output "$temp/caddy" >>"$TX/caddy-build.log" 2>&1 && \
+     ! GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" --output "$temp/caddy" >>"$TX/caddy-build.log" 2>&1;then
    tail -n 60 "$TX/caddy-build.log" >&2
    die 'Не удалось собрать Caddy. Полный лог: '"$TX/caddy-build.log"
   fi

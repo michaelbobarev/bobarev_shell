@@ -3,8 +3,25 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.28 (Universal Simplified Menu Edition — Dual-Stack IPv4/IPv6 & Shadowrocket Fix)
+# Версия: 3.18.29 (Universal Simplified Menu Edition — Fix Usque L4-SOCKS DNS & Clean Klzgrad Caddy Build)
 # ------------------------------------------------------------------------------
+# Изменения 3.18.29:
+#   * Полное исправление по результатам расследования логов `bobarev-servhost`:
+#     - Устранена ошибка `SOCKS client 127.0.0.1:... failed during request parsing: Unsupport Command`
+#       в `usque` и `[Error] transport/internet: failed to resolve ip > app/dns: returning nil` в `xray`:
+#       в режиме `l4-socks` клиент Usque поддерживает только TCP CONNECT и отклоняет SOCKS5 UDP ASSOCIATE,
+#       поэтому в `/etc/xray/naive-masque-bridge.json` убран блок UDP DNS и установлено `"domainStrategy": "AsIs"`
+#       (передача доменного имени напрямую в Usque по TCP без локального UDP DNS-резолва в Xray), а также
+#       добавлена обязательная самопроверка порта `10808` (при любой ошибке Caddy автоматически переключается
+#       напрямую на `socks5://127.0.0.1:1080`).
+#     - Исправлена подмена бинарника Caddy на сервере: в логе обнаружено, что `/usr/local/bin/caddy` имел
+#       версию `v2.11.9` (скачанную ранее сторонним скриптом `Naiveproxy_usque.sh` с `caddyserver.com`
+#       с обычным модулем `caddyserver/forwardproxy` вместо патченного `klzgrad/forwardproxy` для NaiveProxy).
+#       Теперь функция `ensure_go_and_build_caddy_naive()` проверяет наличие сигнатуры `klzgrad/forwardproxy`
+#       внутри `/usr/local/bin/caddy` (`build-info`), и при обнаружении стороннего бинарника выполняет
+#       чистую прямую сборку `Caddy v2.11.7 + klzgrad/forwardproxy@naive` без лишних РФ-обходов по умолчанию.
+#     - В `render_naive_caddyfile()` убрана лишняя глобальная опция `default_sni`, возвращена эталонная
+#       конфигурация `Caddyfile` с поддержкой как `https://` (HTTP/1.1 и HTTP/2), так и NaivePadding.
 # Изменения 3.18.28:
 #   * Полная поддержка Dual-Stack VPS (IPv4 + IPv6 одновременно) и устранение всех причин
 #     отсутствия интернета в iOS Shadowrocket по логу `Настройка Naiveproxy.txt`:
@@ -172,7 +189,7 @@ set -euo pipefail
 #   * Аудит: итоговая сводка — список пунктов, отмеченных жёлтым/красным.
 # ==============================================================================
 
-SCRIPT_VERSION="3.18.28"
+SCRIPT_VERSION="3.18.29"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -653,15 +670,28 @@ CAMO_EOF
     chmod 644 "$WEBROOT/index.html"
 }
 
-ensure_go_and_build_caddy_naive() {
-    local caddy_cache="/var/lib/bobarev-shell-mullvad/caddy/caddy"
-    if [ -x "$CADDY_BIN" ] && { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
-        echo -e "${C_GREEN} Бинарник Caddy с модулем NaiveProxy (forward_proxy) уже скомпилирован.${C_RESET}"
+is_valid_klzgrad_caddy() {
+    local bin="$1"
+    [ -x "$bin" ] || return 1
+    { "$bin" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy" || return 1
+    if { "$bin" build-info 2>/dev/null || true; } | grep -qi "klzgrad/forwardproxy" || grep -a -qi "klzgrad/forwardproxy" "$bin" 2>/dev/null; then
         return 0
     fi
-    if [ -x "$caddy_cache" ] && { "$caddy_cache" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
+    return 1
+}
+
+ensure_go_and_build_caddy_naive() {
+    local caddy_cache="/var/lib/bobarev-shell-mullvad/caddy/caddy"
+    if is_valid_klzgrad_caddy "$CADDY_BIN"; then
+        echo -e "${C_GREEN} Бинарник Caddy (${CADDY_VERSION_PIN} + klzgrad/forwardproxy) уже установлен.${C_RESET}"
+        return 0
+    fi
+    if [ -x "$CADDY_BIN" ]; then
+        echo -e "${C_YELLOW} Обнаружен сторонний бинарник Caddy ($( "$CADDY_BIN" version 2>/dev/null | head -n 1 || echo 'unknown' )) без патча klzgrad/forwardproxy. Заменяю на эталонную сборку NaiveProxy...${C_RESET}"
+    fi
+    if is_valid_klzgrad_caddy "$caddy_cache"; then
         install -m 755 "$caddy_cache" "$CADDY_BIN"
-        echo -e "${C_GREEN} Восстановлен ранее собранный Caddy с NaiveProxy из локального кэша.${C_RESET}"
+        echo -e "${C_GREEN} Восстановлен ранее собранный Caddy с klzgrad/forwardproxy из локального кэша.${C_RESET}"
         return 0
     fi
 
@@ -683,7 +713,6 @@ ensure_go_and_build_caddy_naive() {
         fi
     fi
 
-    # Используем динамическую временную папку, чтобы сборка не падала с "no space left on device"
     local build_tmp_dir=$(mktemp -d /root/.caddy-build-XXXXXX)
 
     local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
@@ -696,22 +725,19 @@ ensure_go_and_build_caddy_naive() {
     fi
 
     if [ "$need_go" = true ]; then
-        echo -e "${C_BLUE} Установка компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
+        echo -e "${C_BLUE} Установка официального компилятора Go ${GO_VERSION_PIN} с проверкой SHA256...${C_RESET}"
         local go_tmp="${build_tmp_dir}/go_${GO_VERSION_PIN}.tar.gz"
         local go_dl_ok=false
         local go_url
-        for go_url in \
-            "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" \
-            "https://golang.google.cn/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz" \
-            "https://mirrors.aliyun.com/golang/go${GO_VERSION_PIN}.linux-${arch}.tar.gz"; do
-            if curl -4 -fsSL --connect-timeout 8 --max-time 180 "$go_url" -o "$go_tmp" 2>/dev/null && [ -s "$go_tmp" ]; then
+        for go_url in             "https://go.dev/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz"             "https://dl.google.com/go/go${GO_VERSION_PIN}.linux-${arch}.tar.gz"             "https://golang.google.cn/dl/go${GO_VERSION_PIN}.linux-${arch}.tar.gz"; do
+            if curl -4 -fsSL --connect-timeout 10 --max-time 240 "$go_url" -o "$go_tmp" 2>/dev/null && [ -s "$go_tmp" ]; then
                 go_dl_ok=true
                 break
             fi
         done
         if [ "$go_dl_ok" != true ]; then
             rm -rf "$build_tmp_dir"
-            echo -e "${C_RED} Ошибка: не удалось скачать архив Go ${GO_VERSION_PIN} ни с основного узла, ни с зеркал.${C_RESET}"
+            echo -e "${C_RED} Ошибка: не удалось скачать архив Go ${GO_VERSION_PIN}.${C_RESET}"
             return 1
         fi
         local act_sha=$(sha256sum "$go_tmp" | awk '{print $1}')
@@ -728,29 +754,20 @@ ensure_go_and_build_caddy_naive() {
         echo -e "${C_GREEN} Компилятор Go ${GO_VERSION_PIN} успешно установлен.${C_RESET}"
     fi
 
-    echo -e "${C_BLUE} Сборка Caddy ${CADDY_VERSION_PIN} с модулем klzgrad/forwardproxy@naive (занимает 3-10 минут)...${C_RESET}"
+    echo -e "${C_BLUE} Чистая сборка Caddy ${CADDY_VERSION_PIN} с модулем klzgrad/forwardproxy@naive (занимает 2-5 минут)...${C_RESET}"
     export GOPATH="/root/go"
     export GOCACHE="/root/.cache/go-build"
     export GOTMPDIR="$build_tmp_dir"
     export TMPDIR="$build_tmp_dir"
+    unset GOPROXY GOSUMDB
 
-    # Защита от блокировки ТСПУ подсетей Google (sum.golang.org / proxy.golang.org) на серверах в РФ:
-    if ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://sum.golang.org" >/dev/null 2>&1 || \
-       ! curl -4 -fsSL --connect-timeout 3 --max-time 5 "https://proxy.golang.org" >/dev/null 2>&1; then
-        echo -e "${C_YELLOW} Узлы sum.golang.org / proxy.golang.org недоступны (блокировка ТСПУ подсетей Google). Включаю обход GOPROXY + GOSUMDB=off...${C_RESET}"
-        export GOPROXY="https://goproxy.io,https://goproxy.cn,direct"
-        export GOSUMDB="off"
+    # Чистая прямая установка xcaddy (фоллбэк на зеркало только если прямой запрос не прошел)
+    if [ ! -x "$GOPATH/bin/xcaddy" ]; then
+        go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" ||             GOPROXY="https://goproxy.io,direct" GOSUMDB="off" go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" || true
     fi
 
     if [ ! -x "$GOPATH/bin/xcaddy" ]; then
-        go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" || \
-            GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" || \
-            GOPROXY="direct" GOSUMDB="off" go install "github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION_PIN}" || true
-    fi
-
-    # Резерв: если сборка xcaddy через go install не прошла, скачиваем официальный релиз xcaddy с GitHub
-    if [ ! -x "$GOPATH/bin/xcaddy" ]; then
-        echo -e "${C_BLUE} Скачивание готового бинарника xcaddy ${XCADDY_VERSION_PIN} с GitHub Releases...${C_RESET}"
+        echo -e "${C_BLUE} Скачивание официального релиза xcaddy ${XCADDY_VERSION_PIN} с GitHub Releases...${C_RESET}"
         mkdir -p "$GOPATH/bin"
         local xc_ver="${XCADDY_VERSION_PIN#v}"
         local xc_tar="${build_tmp_dir}/xcaddy.tar.gz"
@@ -763,46 +780,24 @@ ensure_go_and_build_caddy_naive() {
 
     local tmp_caddy_bin="${build_tmp_dir}/caddy_built"
     if [ -x "$GOPATH/bin/xcaddy" ]; then
-        "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
-            --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
-            --output "$tmp_caddy_bin" || \
-        GOPROXY="https://goproxy.io,https://goproxy.cn,direct" GOSUMDB="off" "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
-            --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
-            --output "$tmp_caddy_bin" || true
-
-        # Если прямая сборка и зеркала заблокированы, но на Сервере 1 уже поднят локальный SOCKS5-мост (10808 или 1080) — собираем через него:
-        if [ ! -f "$tmp_caddy_bin" ]; then
-            local local_socks=""
-            if ss -Hltn 2>/dev/null | awk '$4 ~ /:10808$/ {found=1} END{exit !found}'; then
-                local_socks="socks5h://127.0.0.1:10808"
-            elif ss -Hltn 2>/dev/null | awk '$4 ~ /:1080$/ {found=1} END{exit !found}'; then
-                local_socks="socks5h://127.0.0.1:1080"
-            fi
-            if [ -n "$local_socks" ]; then
-                echo -e "${C_YELLOW} Повторная сборка Caddy через активный локальный SOCKS5-туннель ($local_socks)...${C_RESET}"
-                ALL_PROXY="$local_socks" HTTPS_PROXY="$local_socks" HTTP_PROXY="$local_socks" \
-                    GOPROXY="https://proxy.golang.org,https://goproxy.io,direct" GOSUMDB="off" \
-                    "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN" \
-                    --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}" \
-                    --output "$tmp_caddy_bin" || true
-            fi
-        fi
+        "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN"             --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}"             --output "$tmp_caddy_bin" ||         GOPROXY="https://goproxy.io,direct" GOSUMDB="off" "$GOPATH/bin/xcaddy" build "$CADDY_VERSION_PIN"             --with "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@${FORWARDPROXY_REF_PIN}"             --output "$tmp_caddy_bin" || true
     fi
 
     if [ -f "$tmp_caddy_bin" ]; then
+        systemctl stop caddy.service 2>/dev/null || true
         install -m 755 "$tmp_caddy_bin" "$CADDY_BIN"
         mkdir -p "$(dirname "$caddy_cache")"
         install -m 755 "$tmp_caddy_bin" "$caddy_cache" 2>/dev/null || true
     fi
 
     rm -rf "$build_tmp_dir"
-    unset GOTMPDIR TMPDIR
+    unset GOTMPDIR TMPDIR GOPROXY GOSUMDB
 
     if [ ! -x "$CADDY_BIN" ] || ! { "$CADDY_BIN" list-modules 2>/dev/null || true; } | grep -q "http.handlers.forward_proxy"; then
         echo -e "${C_RED} Ошибка сборки: модуль http.handlers.forward_proxy не найден в Caddy.${C_RESET}"
         return 1
     fi
-    echo -e "${C_GREEN} Caddy ${CADDY_VERSION_PIN} + NaiveProxy успешно собран!${C_RESET}"
+    echo -e "${C_GREEN} Caddy $( "$CADDY_BIN" version 2>/dev/null | head -n 1 ) + NaiveProxy успешно собран!${C_RESET}"
     return 0
 }
 
@@ -883,7 +878,6 @@ render_naive_caddyfile() {
 {
     order forward_proxy before file_server
     email ${email}
-    default_sni ${dom}
     servers {
         protocols h1 h2
     }
@@ -933,7 +927,6 @@ Requires=network-online.target
 Type=notify
 User=root
 Group=root
-Environment="GODEBUG=netdns=cgo"
 ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile --adapter caddyfile
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
 TimeoutStopSec=5s
@@ -1888,15 +1881,13 @@ USQUE_SVC_EOF
 }
 
 setup_naive_masque_xray_bridge() {
-    # Поднимает локальный Dual-Stack (IPv4 + IPv6) мост Xray на 127.0.0.1:10808 -> Usque (127.0.0.1:1080):
-    # 1) Sniffing (destOverride: http, tls, quic) восстанавливает доменное имя из TLS SNI,
-    #    если iOS Shadowrocket разрешил домен локально на телефоне в заблокированный IP провайдера РФ;
-    # 2) Полная поддержка Dual-Stack (IPv4 + IPv6): НЕТ правила block-ipv6 (blackhole), поэтому
-    #    как IPv4, так и IPv6 соединения (включая прямые запросы от iPhone в сетях с IPv6) свободно
-    #    проходят через туннель Cloudflare MASQUE (который выдает и IPv4, и IPv6 адреса).
-    echo -e "${C_BLUE} Настройка локального Dual-Stack моста Xray (IPv4/IPv6 + TLS SNI на 127.0.0.1:10808 -> Usque 127.0.0.1:1080)...${C_RESET}"
+    # Поднимает локальный мост Xray на 127.0.0.1:10808 -> Usque (127.0.0.1:1080) в режиме domainStrategy: "AsIs":
+    # Важно: в режиме l4-socks клиент Usque принимает только TCP CONNECT и отклоняет SOCKS5 UDP ASSOCIATE
+    # с ошибкой 'Unsupport Command'. Поэтому в Xray НЕ включается локальный UDP DNS и ставится 'domainStrategy: AsIs',
+    # чтобы Xray восстанавливал домен из TLS SNI (sniffing) и передавал hostname напрямую в Usque по TCP!
+    echo -e "${C_BLUE} Настройка локального моста Xray (domainStrategy: AsIs + TLS SNI на 127.0.0.1:10808 -> Usque 127.0.0.1:1080)...${C_RESET}"
     if ! ensure_xray_installed; then
-        echo -e "${C_YELLOW} Не удалось установить Xray-core, Caddy будет подключен напрямую к 127.0.0.1:1080.${C_RESET}"
+        echo -e "${C_YELLOW} Не удалось установить Xray-core, Caddy будет подключен напрямую к Usque (127.0.0.1:1080).${C_RESET}"
         return 1
     fi
 
@@ -1905,14 +1896,6 @@ setup_naive_masque_xray_bridge() {
 {
   "log": {
     "loglevel": "warning"
-  },
-  "dns": {
-    "servers": [
-      "1.1.1.1",
-      "8.8.8.8",
-      "2606:4700:4700::1111"
-    ],
-    "queryStrategy": "UseIP"
   },
   "inbounds": [
     {
@@ -1928,8 +1911,7 @@ setup_naive_masque_xray_bridge() {
         "enabled": true,
         "destOverride": [
           "http",
-          "tls",
-          "quic"
+          "tls"
         ],
         "routeOnly": false
       }
@@ -1940,7 +1922,7 @@ setup_naive_masque_xray_bridge() {
       "tag": "masque-dualstack-out",
       "protocol": "freedom",
       "settings": {
-        "domainStrategy": "UseIPv4v6"
+        "domainStrategy": "AsIs"
       },
       "streamSettings": {
         "sockopt": {
@@ -1981,55 +1963,18 @@ setup_naive_masque_xray_bridge() {
   }
 }
 XBRIDGE_EOF
+    chmod 600 /etc/xray/naive-masque-bridge.json
 
     if ! /usr/local/bin/xray run -test -c /etc/xray/naive-masque-bridge.json >/dev/null 2>&1; then
-        cat << 'XBRIDGE_FB_EOF' > /etc/xray/naive-masque-bridge.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "naive-socks-in",
-      "listen": "127.0.0.1",
-      "port": 10808,
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": true
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls"
-        ],
-        "routeOnly": false
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "usque-raw-socks",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "127.0.0.1",
-            "port": 1080
-          }
-        ]
-      }
-    }
-  ]
-}
-XBRIDGE_FB_EOF
+        echo -e "${C_YELLOW} Конфиг моста 10808 не прошел валидацию, Caddy будет подключен напрямую к Usque (127.0.0.1:1080).${C_RESET}"
+        silent_run systemctl stop bobarev-naive-masque-bridge.service 2>/dev/null || true
+        silent_run systemctl disable bobarev-naive-masque-bridge.service 2>/dev/null || true
+        return 1
     fi
-    chmod 600 /etc/xray/naive-masque-bridge.json
 
     cat << 'XBRIDGE_SVC_EOF' > /etc/systemd/system/bobarev-naive-masque-bridge.service
 [Unit]
-Description=Bobarev Shell Dual-Stack Bridge for NaiveProxy -> Usque MASQUE (127.0.0.1:10808 -> 127.0.0.1:1080)
+Description=Bobarev Shell Bridge for NaiveProxy -> Usque MASQUE (127.0.0.1:10808 -> 127.0.0.1:1080)
 After=network.target usque.service
 Wants=usque.service
 
@@ -2050,15 +1995,25 @@ XBRIDGE_SVC_EOF
     systemctl restart bobarev-naive-masque-bridge.service >/dev/null 2>&1 || true
 
     local w_i=0
-    while [ "$w_i" -lt 8 ]; do
+    while [ "$w_i" -lt 6 ]; do
         if ss -Hltn 2>/dev/null | awk '$4 ~ /:10808$/ {found=1} END{exit !found}'; then
-            echo -e "${C_GREEN} Локальный Dual-Stack мост (IPv4/IPv6 + TLS SNI на 127.0.0.1:10808) активен!${C_RESET}"
-            return 0
+            break
         fi
         sleep 1
         w_i=$((w_i + 1))
     done
-    echo -e "${C_YELLOW} Предупреждение: порт 127.0.0.1:10808 не ответил, используется прямое подключение к 127.0.0.1:1080.${C_RESET}"
+
+    # Обязательная проверка реального прохождения трафика через 127.0.0.1:10808 (защита от таймаута):
+    local test_bridge_ip=""
+    test_bridge_ip=$(curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:10808 https://ifconfig.me 2>/dev/null | tr -d '[:space:]'         || curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:10808 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -n "$test_bridge_ip" ]; then
+        echo -e "${C_GREEN} Локальный мост Xray (domainStrategy: AsIs на 127.0.0.1:10808 -> 127.0.0.1:1080) активен (IP: ${test_bridge_ip})!${C_RESET}"
+        return 0
+    fi
+
+    echo -e "${C_YELLOW} Мост 127.0.0.1:10808 не ответил вовремя — отключаю промежуточный мост и подключаю Caddy напрямую к Usque (127.0.0.1:1080)!${C_RESET}"
+    silent_run systemctl stop bobarev-naive-masque-bridge.service 2>/dev/null || true
+    silent_run systemctl disable bobarev-naive-masque-bridge.service 2>/dev/null || true
     return 1
 }
 
@@ -2289,6 +2244,7 @@ verify_usque_masque_ip() {
                 echo -e "   5) Сквозной тест Caddy (:443) -> Выход: ${C_GREEN}✔ УСПЕШНО (Shadowrocket получит IP: ${e2e_ip})${C_RESET}"
             else
                 echo -e "   5) Сквозной тест Caddy (:443) -> Выход: ${C_YELLOW}⚠ Не прошел (проверьте journalctl -u caddy -n 20)${C_RESET}"
+                echo -e "      ${C_CYAN}Команда ручной проверки (обязательно https:// в --proxy): curl -4 -v --proxy 'https://${t_u}:${t_p}@${t_dom}:443' https://ifconfig.me${C_RESET}"
             fi
 
             local page_code=""
@@ -2377,6 +2333,7 @@ enable_masque_for_existing_naive() {
         fi
     fi
 
+    ensure_go_and_build_caddy_naive || true
     apply_naive_tcp_tuning_profile "balanced"
 
     if [ -f "$CADDYFILE" ]; then

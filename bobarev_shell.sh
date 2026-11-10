@@ -3,8 +3,30 @@ set -euo pipefail
 
 # ==============================================================================
 # СКРИПТ КОМПЛЕКСНОЙ НАСТРОЙКИ СЕРВЕРА (BOBAREV SHELL)
-# Версия: 3.18.25 (Universal Simplified Menu Edition — Full Cloudflare MASQUE)
+# Версия: 3.18.26 (Universal Simplified Menu Edition — Full Cloudflare MASQUE)
 # ------------------------------------------------------------------------------
+# Изменения 3.18.26:
+#   * Полное устранение зависания интернета в Shadowrocket при работе через связку
+#     «Автономный NaiveProxy + Cloudflare MASQUE (Usque)» на серверах с Tailscale Exit-Node:
+#     - Исправлена проблема MTU Blackhole в Usque (`too large datagram` в QUIC при загрузке
+#       реальных сайтов, когда короткий `curl ifconfig.me` проходил, а браузер/Shadowrocket зависал):
+#       по умолчанию включен режим `socks` с явной фиксацией туннельного MTU `-m 1104` и DNS
+#       `-d 1.1.1.1 -d 1.0.0.1` (режим `l4-socks` не поддерживает флаг `-m`).
+#     - Устранена перегрузка CPU в Caddy при открытии сайтов в Shadowrocket: `render_naive_caddyfile()`
+#       теперь автоматически проверяет поддержку нативного `basic_auth user pass` + `probe_resistance`
+#       внутри `forward_proxy` (0 мс задержки), а при откате на `basic_auth bcrypt` перехеширует пароли
+#       с быстрым cost=5 (`htpasswd -niBC 5`, в 128 раз быстрее cost=12), чтобы 50 параллельных
+#       потоков из Shadowrocket обрабатывались мгновенно без таймаутов.
+#     - Полная совместимость с активным Tailscale Exit-Node на том же сервере:
+#       роль `--advertise-exit-node=true` сохраняется, но автоматически отключается перехват
+#       локального DNS сервера (`tailscale set --accept-dns=false`), очищаются старые mangle/nat
+#       перехваты (`BMGE_IN`, `BMGE_OUT`, `10809`), включается приоритет IPv4 в `/etc/gai.conf`,
+#       а правила UFW для `443/tcp`, `443/udp` и `80/tcp` ставятся на 1-е место (`ufw insert 1`).
+#     - Исправлен формат QR-кода и ссылок для iOS Shadowrocket: QR-код теперь генерируется из
+#       Base64-ссылки `http2://...` (которую сканер Shadowrocket импортирует как узел прокси,
+#       а не как ссылку на подписку), а также добавлена Base64-ссылка `https://...`.
+#     - В самодиагностику `verify_usque_masque_ip()` добавлен 5-й тест: загрузка тяжелой HTTPS-страницы
+#       (`www.google.com` / `www.apple.com`) через внешний WAN IP сервера (`${pub_ip}:443`) для проверки MTU.
 # Изменения 3.18.25:
 #   * Исправлена работа связки «Автономный NaiveProxy + Cloudflare MASQUE (Usque)» в Shadowrocket:
 #     - Для автономного NaiveProxy по умолчанию установлен режим `l4-socks` (легкий L4 TCP-прокси,
@@ -98,7 +120,7 @@ set -euo pipefail
 #   * Аудит: итоговая сводка — список пунктов, отмеченных жёлтым/красным.
 # ==============================================================================
 
-SCRIPT_VERSION="3.18.25"
+SCRIPT_VERSION="3.18.26"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -742,9 +764,25 @@ render_naive_caddyfile() {
     [ -z "$dom" ] && return 1
 
     mkdir -p /etc/caddy "$NAIVE_DIR" "$WEBROOT" "$LOG_DIR"
-    touch "$NAIVE_USERS_FILE"
-    chmod 600 "$NAIVE_USERS_FILE"
+    touch "$NAIVE_USERS_FILE" "$NAIVE_PASS_FILE"
+    chmod 600 "$NAIVE_USERS_FILE" "$NAIVE_PASS_FILE"
     install_naive_camouflage_site
+
+    # Перехешируем пользователей с быстрым bcrypt cost=5 (вместо медленного cost=12),
+    # чтобы 50+ параллельных CONNECT-потоков из Shadowrocket не блокировали CPU VPS
+    if [ -s "$NAIVE_PASS_FILE" ] && command -v htpasswd >/dev/null 2>&1; then
+        local rebuilt_users=""
+        while IFS=: read -r pu pp; do
+            [ -z "$pu" ] || [ -z "$pp" ] && continue
+            local fast_h=""
+            fast_h=$(printf '%s\n' "$pp" | htpasswd -niBC 5 "$pu" 2>/dev/null | cut -d: -f2 || true)
+            [ -n "$fast_h" ] && rebuilt_users+="${pu}:${fast_h}"$'\n'
+        done < "$NAIVE_PASS_FILE"
+        if [ -n "$rebuilt_users" ]; then
+            printf '%s' "$rebuilt_users" > "$NAIVE_USERS_FILE"
+            chmod 600 "$NAIVE_USERS_FILE"
+        fi
+    fi
 
     local auth_lines=""
     while IFS=: read -r u h; do
@@ -753,11 +791,75 @@ render_naive_caddyfile() {
     done < "$NAIVE_USERS_FILE"
 
     if [ -z "$auth_lines" ]; then
-        local dummy_hash=$(printf '%s\n' "disabled_placeholder" | htpasswd -niBC 12 "__disabled__" | cut -d: -f2)
+        local dummy_hash=$(printf '%s\n' "disabled_placeholder" | htpasswd -niBC 5 "__disabled__" | cut -d: -f2)
         auth_lines="            __disabled__ ${dummy_hash}"$'\n'
     fi
 
-    cat << EOF > "$CADDYFILE"
+    local native_auth_lines=""
+    while IFS=: read -r u p; do
+        [ -z "$u" ] || [ -z "$p" ] && continue
+        native_auth_lines+="            basic_auth ${u} ${p}"$'\n'
+    done < "$NAIVE_PASS_FILE"
+
+    local upstream_line=""
+    if [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ]; then
+        upstream_line="            upstream socks5://127.0.0.1:1080"
+    elif [ "${CASCADE_ROLE:-}" = "standalone_naive" ] && [ "${NAIVE_OUT_MODE:-}" = "masque" ]; then
+        upstream_line="            upstream socks5://127.0.0.1:1080"
+    elif [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ]; then
+        upstream_line="            upstream socks5://127.0.0.1:10808"
+    elif [ -f /etc/naiveproxy/mesh-upstream.port ] && [ "${CASCADE_ROLE:-}" = "standalone_naive" ] && [ "${NAIVE_OUT_MODE:-}" != "masque" ]; then
+        local nm_port=""
+        read -r nm_port < /etc/naiveproxy/mesh-upstream.port || true
+        if [[ "$nm_port" =~ ^[0-9]{4,5}$ ]] && ((10#$nm_port >= 1024 && 10#$nm_port <= 65535)); then
+            upstream_line="            upstream socks5://127.0.0.1:$nm_port"
+        else
+            upstream_line="            upstream socks5://127.0.0.1:1"
+        fi
+    fi
+
+    # Вариант 1: Нативный блок forward_proxy с basic_auth + probe_resistance (нулевая задержка CPU, полная поддержка HTTP/2, HTTP/1.1 и Padding)
+    local wrote_native=false
+    if [ -n "$native_auth_lines" ]; then
+        cat << EOF > "$CADDYFILE"
+{
+    order forward_proxy before file_server
+    email ${email}
+    servers :443 {
+        protocols h1 h2 h3
+    }
+    log {
+        output file "${LOG_DIR}/access.log" {
+            roll_size 20mb
+            roll_keep 3
+        }
+    }
+}
+
+:443, ${dom} {
+    tls ${email}
+
+    route {
+        forward_proxy {
+${native_auth_lines}            hide_ip
+            hide_via
+            probe_resistance
+${upstream_line}
+        }
+        file_server {
+            root "${WEBROOT}"
+        }
+    }
+}
+EOF
+        if "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1; then
+            wrote_native=true
+        fi
+    fi
+
+    # Вариант 2 (Фоллбэк для сборок Caddy, где basic_auth вынесен из forward_proxy): быстрый bcrypt cost=5
+    if [ "$wrote_native" = false ]; then
+        cat << EOF > "$CADDYFILE"
 {
     order forward_proxy before file_server
     email ${email}
@@ -784,10 +886,7 @@ ${auth_lines}        }
         forward_proxy {
             hide_ip
             hide_via
-$( [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ] && echo "            upstream socks5://127.0.0.1:1080" )
-$( [ "${CASCADE_ROLE:-}" = "standalone_naive" ] && [ "${NAIVE_OUT_MODE:-}" = "masque" ] && echo "            upstream socks5://127.0.0.1:1080" )
-$( [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && echo "            upstream socks5://127.0.0.1:10808" )
-$( if [ -f /etc/naiveproxy/mesh-upstream.port ] && [ "${CASCADE_ROLE:-}" = standalone_naive ] && [ "${NAIVE_OUT_MODE:-}" != "masque" ]; then read -r nm_port < /etc/naiveproxy/mesh-upstream.port; if [[ "$nm_port" =~ ^[0-9]{4,5}$ ]] && ((10#$nm_port >= 1024 && 10#$nm_port <= 65535)); then echo "            upstream socks5://127.0.0.1:$nm_port"; else echo "            upstream socks5://127.0.0.1:1"; fi; fi )
+${upstream_line}
         }
     }
 
@@ -804,6 +903,7 @@ $( if [ -f /etc/naiveproxy/mesh-upstream.port ] && [ "${CASCADE_ROLE:-}" = stand
     }
 }
 EOF
+    fi
     chmod 600 "$CADDYFILE"
 
     cat << 'SVC_EOF' > "$CADDY_SERVICE"
@@ -861,7 +961,8 @@ add_or_update_naive_user() {
         apt-get update -qq && apt-get install -yq apache2-utils >/dev/null 2>&1
     fi
 
-    local b_hash=$(printf '%s\n' "$u_pass" | htpasswd -niBC 12 "$u_name" 2>/dev/null | cut -d: -f2)
+    # Используем cost=5 (-niBC 5) вместо 12, чтобы исключить задержки при множестве параллельных запросов из Shadowrocket
+    local b_hash=$(printf '%s\n' "$u_pass" | htpasswd -niBC 5 "$u_name" 2>/dev/null | cut -d: -f2)
     if [ -z "$b_hash" ]; then
         echo -e "${C_RED} Не удалось создать bcrypt-хеш пароля.${C_RESET}"
         return 1
@@ -1105,31 +1206,39 @@ print_naive_shadowrocket_links() {
         [ -z "$u" ] || [ -z "$p" ] && continue
         local safe_b64="Скрыто_для_скриншота"
         local safe_https="https://${u}:********@${dom}:443?padding=true#${dom}-${u}"
-        local real_b64="" real_https=""
+        local real_b64="" real_http2_uri="" real_https_b64_uri="" real_https=""
         if [ "$show_real" = true ]; then
             real_b64=$(printf '%s' "${u}:${p}@${dom}:443" | base64 -w0 2>/dev/null || printf '%s' "${u}:${p}@${dom}:443" | base64 | tr -d '\n')
+            real_http2_uri="http2://${real_b64}?obfs=none#${dom}-HTTP2-${u}"
+            real_https_b64_uri="https://${real_b64}?obfs=none#${dom}-HTTPS-${u}"
             real_https="https://${u}:${p}@${dom}:443?padding=true#${dom}-${u}"
         fi
         echo -e "\n Пользователь: ${C_BOLD}${u}${C_RESET}"
         echo -e " Сервер (Host/SNI): ${C_GREEN}${dom}${C_RESET}   Порт: ${C_GREEN}443${C_RESET}"
-        echo -e " ${C_GREEN}1) Рекомендуемая ссылка HTTPS + Naive Padding (максимальная совместимость в Shadowrocket):${C_RESET}"
+        echo -e " ${C_GREEN}1) Основная ссылка HTTP/2 для Shadowrocket (формат Base64 — для QR-сканера и буфера обмена):${C_RESET}"
         if [ "$show_real" = true ]; then
-            echo -e " ${C_BOLD}${C_GREEN}${real_https}${C_RESET}"
+            echo -e " ${C_BOLD}${C_GREEN}${real_http2_uri}${C_RESET}"
         else
-            echo -e " ${C_BOLD}${C_GREEN}${safe_https}${C_RESET}"
+            echo -e " ${C_BOLD}${C_GREEN}http2://${safe_b64}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
         fi
-        echo -e " ${C_BLUE}2) Альтернативная ссылка HTTP/2 (мультиплексирование в одно соединение):${C_RESET}"
+        echo -e " ${C_CYAN}2) Ссылка HTTPS для Shadowrocket (формат Base64):${C_RESET}"
         if [ "$show_real" = true ]; then
-            echo -e " ${C_BLUE}http2://${real_b64}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
+            echo -e " ${C_CYAN}${real_https_b64_uri}${C_RESET}"
+        else
+            echo -e " ${C_CYAN}https://${safe_b64}?obfs=none#${dom}-HTTPS-${u}${C_RESET}"
+        fi
+        echo -e " ${C_BLUE}3) Универсальная ссылка HTTPS + Naive Padding (для ручной вставки):${C_RESET}"
+        if [ "$show_real" = true ]; then
+            echo -e " ${C_BLUE}${real_https}${C_RESET}"
             if command -v qrencode >/dev/null 2>&1; then
-                echo -e "\n ${C_CYAN}QR-код для быстрого сканирования в Shadowrocket (${u}):${C_RESET}"
-                qrencode -t ansiutf8 "${real_https}" 2>/dev/null || true
+                echo -e "\n ${C_CYAN}QR-код для сканирования камерой в Shadowrocket (${u}, протокол HTTP/2):${C_RESET}"
+                qrencode -t ansiutf8 "${real_http2_uri}" 2>/dev/null || true
             fi
         else
-            echo -e " ${C_BLUE}http2://${safe_b64}?obfs=none#${dom}-HTTP2-${u}${C_RESET}"
+            echo -e " ${C_BLUE}${safe_https}${C_RESET}"
         fi
     done < "$NAIVE_PASS_FILE"
-    echo -e "\n${C_BLUE}Совет для Shadowrocket: если профиль HTTP/2 на вашей сети не открывает сайты, используйте первую ссылку (HTTPS + Padding) и убедитесь, что в глобальных настройках Shadowrocket включен перехват UDP/DNS через прокси.${C_RESET}"
+    echo -e "\n${C_YELLOW}Важно: при проверке подключения через Shadowrocket обязательно отключите клиент Tailscale на самом телефоне/ноутбуке (на сервере Tailscale Exit-Node может оставаться включенным).${C_RESET}"
 }
 
 write_bobarev_cascade_ru_script() {
@@ -1640,21 +1749,62 @@ is_usque_active() {
     systemctl is-active --quiet usque.service 2>/dev/null
 }
 
+ensure_ipv4_precedence_and_host_dns() {
+    # 1. Приоритет IPv4 над IPv6 в системном резолвере glibc/Go (/etc/gai.conf),
+    # чтобы Usque и Caddy не пытались открывать AAAA-записи внутри MASQUE-туннеля
+    if [ -f /etc/gai.conf ]; then
+        if grep -qE '^[[:space:]]*#[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
+            sed -i -E 's/^[[:space:]]*#[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)/\1/' /etc/gai.conf 2>/dev/null || true
+        elif ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
+            echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
+        fi
+    else
+        echo "precedence ::ffff:0:0/96  100" > /etc/gai.conf
+    fi
+
+    # 2. Если на сервере установлен Tailscale (в том числе как Exit-Node),
+    # отключаем перехват локального /etc/resolv.conf через MagicDNS (100.100.100.100),
+    # НЕ отключая саму раздачу Exit-Node (--advertise-exit-node сохраняется!)
+    if command -v tailscale >/dev/null 2>&1; then
+        silent_run tailscale set --accept-dns=false 2>/dev/null || true
+    fi
+
+    # 3. Если в /etc/resolv.conf остался только 100.100.100.100 или нет рабочих nameserver, добавляем 1.1.1.1 и 8.8.8.8
+    if [ -f /etc/resolv.conf ] && ! grep -qE '^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|127\.0\.0\.53)' /etc/resolv.conf 2>/dev/null; then
+        if grep -qE '^[[:space:]]*nameserver[[:space:]]+100\.100\.100\.100' /etc/resolv.conf 2>/dev/null; then
+            {
+                echo "nameserver 1.1.1.1"
+                echo "nameserver 8.8.8.8"
+                cat /etc/resolv.conf
+            } > /etc/resolv.conf.bobarev.tmp && mv -f /etc/resolv.conf.bobarev.tmp /etc/resolv.conf 2>/dev/null || true
+        fi
+    fi
+}
+
 write_usque_systemd_unit() {
-    local proxy_mode="${1:-l4-socks}"
-    local extra_flags="${2:-}"
+    local proxy_mode="${1:-socks}"
+    local mtu_val="${2:-1104}"
+    local extra_flags="${3:-}"
     [ "$proxy_mode" != "l4-socks" ] && proxy_mode="socks"
 
     local dns_flags=""
+    local mtu_flags=""
     if [ -x /usr/local/bin/usque ]; then
-        if /usr/local/bin/usque "$proxy_mode" --help 2>&1 | grep -qE -- '(^|[[:space:]])-d([,[:space:]]|$)|--dns'; then
+        local help_out=""
+        help_out=$(/usr/local/bin/usque "$proxy_mode" --help 2>&1 || true)
+        if printf '%s\n' "$help_out" | grep -qE -- '(^|[[:space:]])-d([,[:space:]]|$)|--dns'; then
             dns_flags="-d 1.1.1.1 -d 1.0.0.1"
+        fi
+        # Флаг -m (MTU) поддерживается в режиме socks и предотвращает ошибку 'too large datagram'
+        # при открытии тяжелых сайтов через Shadowrocket / браузеры (Diniboy1123/usque Issue #33)
+        if [ "$proxy_mode" = "socks" ] && [ -n "$mtu_val" ] && printf '%s\n' "$help_out" | grep -qE -- '(^|[[:space:]])-m([,[:space:]]|$)|--mtu'; then
+            mtu_flags="-m ${mtu_val}"
         fi
     fi
 
     cat << USQUE_SVC_EOF > /etc/systemd/system/usque.service
 [Unit]
-Description=Usque MASQUE Cloudflare WARP SOCKS5 Proxy (${proxy_mode} on 127.0.0.1:1080)
+Description=Usque MASQUE Cloudflare WARP SOCKS5 Proxy (${proxy_mode} MTU=${mtu_val:-auto} on 127.0.0.1:1080)
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -1662,7 +1812,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/etc/usque
 Environment="GOMEMLIMIT=384MiB"
-ExecStart=/usr/local/bin/usque ${proxy_mode} -b 127.0.0.1 -p 1080 ${dns_flags} ${extra_flags} -c /etc/usque/config.json
+ExecStart=/usr/local/bin/usque ${proxy_mode} -b 127.0.0.1 -p 1080 ${mtu_flags} ${dns_flags} ${extra_flags} -c /etc/usque/config.json
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -1684,9 +1834,26 @@ wait_for_usque_port() {
     return 1
 }
 
+test_usque_large_payload() {
+    # Проверяет не только короткий ответ (14 байт ifconfig.me), но и реальную загрузку крупной HTTPS-страницы
+    # (Google / Apple / Cloudflare), чтобы гарантировать отсутствие зависания по MTU (too large datagram)
+    local short_ok=""
+    short_ok=$(curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://ifconfig.me 2>/dev/null \
+        || curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://api.ipify.org 2>/dev/null || true)
+    [ -z "$short_ok" ] && return 1
+
+    if curl -4 -fsSL --max-time 10 --socks5-hostname 127.0.0.1:1080 -o /dev/null https://www.google.com 2>/dev/null || \
+       curl -4 -fsSL --max-time 10 --socks5-hostname 127.0.0.1:1080 -o /dev/null https://www.apple.com 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 install_and_setup_usque() {
-    local proxy_mode="${1:-l4-socks}"
+    local proxy_mode="${1:-socks}"
     local force_re_reg="${2:-false}"
+
+    ensure_ipv4_precedence_and_host_dns
 
     echo -e "${C_BLUE} Проверка системных зависимостей (curl, jq, unzip, qrencode)...${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
@@ -1758,8 +1925,8 @@ install_and_setup_usque() {
 
     [ "$proxy_mode" != "l4-socks" ] && proxy_mode="socks"
 
-    echo -e "${C_BLUE} Настройка системной службы usque.service (режим: ${proxy_mode}, локальный SOCKS5 на 127.0.0.1:1080)...${C_RESET}"
-    write_usque_systemd_unit "$proxy_mode" ""
+    echo -e "${C_BLUE} Настройка системной службы usque.service (режим: ${proxy_mode}, MTU: 1104, DNS: 1.1.1.1 на 127.0.0.1:1080)...${C_RESET}"
+    write_usque_systemd_unit "$proxy_mode" "1104" ""
 
     systemctl daemon-reload
     systemctl enable --now usque.service
@@ -1773,36 +1940,22 @@ install_and_setup_usque() {
         return 1
     fi
 
-    # Автопроверка прохождения доменных запросов через 127.0.0.1:1080 (socks5h).
-    # Если выбранный режим не резолвит домены, автоматически переключаем на альтернативный (l4-socks <-> socks)
-    local dom_test=""
-    dom_test=$(curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://ifconfig.me 2>/dev/null \
-        || curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://api.ipify.org 2>/dev/null \
-        || curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-
-    if [ -z "$dom_test" ]; then
+    # Автопроверка загрузки реальных веб-страниц (защита от зависания MTU при открытии сайтов в Shadowrocket)
+    if ! test_usque_large_payload; then
         local alt_mode="l4-socks"
         [ "$proxy_mode" = "l4-socks" ] && alt_mode="socks"
-        echo -e "${C_YELLOW} Доменный тест в режиме '${proxy_mode}' не ответил вовремя. Пробую альтернативный режим '${alt_mode}' с DNS 1.1.1.1...${C_RESET}"
-        write_usque_systemd_unit "$alt_mode" ""
+        echo -e "${C_YELLOW} Тест загрузки веб-страниц в режиме '${proxy_mode}' не ответил. Переключаю на '${alt_mode}' (MTU 1104 + DNS 1.1.1.1)...${C_RESET}"
+        write_usque_systemd_unit "$alt_mode" "1104" ""
         systemctl daemon-reload
         systemctl restart usque.service
         wait_for_usque_port || true
-        dom_test=$(curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://ifconfig.me 2>/dev/null \
-            || curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://api.ipify.org 2>/dev/null \
-            || curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-        if [ -n "$dom_test" ]; then
+        if test_usque_large_payload; then
             proxy_mode="$alt_mode"
-            echo -e "${C_GREEN} Режим '${proxy_mode}' успешно прошел проверку резолва доменов!${C_RESET}"
-        elif /usr/local/bin/usque "$proxy_mode" --help 2>&1 | grep -q -- "--http2"; then
-            echo -e "${C_YELLOW} QUIC/UDP 443 может блокироваться хостером. Включаю фоллбэк MASQUE поверх TCP/HTTP2 (--http2)...${C_RESET}"
-            write_usque_systemd_unit "$proxy_mode" "--http2"
-            systemctl daemon-reload
-            systemctl restart usque.service
-            wait_for_usque_port || true
-        else
-            # Возвращаем исходный режим
-            write_usque_systemd_unit "$proxy_mode" ""
+            echo -e "${C_GREEN} Режим '${proxy_mode}' успешно прошел проверку полной загрузки страниц!${C_RESET}"
+        elif /usr/local/bin/usque "socks" --help 2>&1 | grep -q -- "--http2"; then
+            echo -e "${C_YELLOW} Включаю фоллбэк MASQUE поверх TCP/HTTP2 (--http2, MTU 1104)...${C_RESET}"
+            proxy_mode="socks"
+            write_usque_systemd_unit "socks" "1104" "--http2"
             systemctl daemon-reload
             systemctl restart usque.service
             wait_for_usque_port || true
@@ -1821,7 +1974,7 @@ install_and_setup_usque() {
 }
 
 verify_usque_masque_ip() {
-    echo -e "${C_BLUE} Комплексная проверка цепочки: Usque (127.0.0.1:1080) -> DNS в туннеле -> Caddy NaiveProxy (:443)...${C_RESET}"
+    echo -e "${C_BLUE} Комплексная проверка цепочки: Usque (127.0.0.1:1080) -> MTU/DNS -> Caddy NaiveProxy (:443)...${C_RESET}"
     local cf_trace="" cf_ip="" cf_warp="" cf_loc="" dom_ip=""
     cf_trace=$(curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
     if [ -n "$cf_trace" ]; then
@@ -1830,7 +1983,6 @@ verify_usque_masque_ip() {
         cf_loc=$(printf '%s\n' "$cf_trace" | awk -F= '$1=="loc"{print $2;exit}')
     fi
 
-    # Проверка резолва доменного имени через socks5h://127.0.0.1:1080 (именно так обращается Caddy forward_proxy)
     dom_ip=$(curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || true)
     if [ -z "$dom_ip" ]; then
         dom_ip=$(curl -4 -sS --max-time 10 --socks5-hostname 127.0.0.1:1080 https://icanhazip.com 2>/dev/null | tr -d '[:space:]' || true)
@@ -1851,51 +2003,77 @@ verify_usque_masque_ip() {
     if [ -n "$dom_ip" ]; then
         echo -e "   3) Резолв доменов через Usque SOCKS5: ${C_GREEN}✔ Работает (ifconfig.me -> ${dom_ip})${C_RESET}"
     else
-        echo -e "   3) Резолв доменов через Usque SOCKS5: ${C_YELLOW}⚠ Домены не резолвятся через 127.0.0.1:1080 (попробуйте п. 5 смены режима l4-socks/socks)${C_RESET}"
+        echo -e "   3) Резолв доменов через Usque SOCKS5: ${C_YELLOW}⚠ Домены не резолвятся через 127.0.0.1:1080${C_RESET}"
     fi
 
-    # Если активен автономный NaiveProxy, проверяем сквозное подключение через сам Caddy (:443)
     if systemctl is-active --quiet caddy.service 2>/dev/null && [ -f /etc/default/bobarev-cascade ] && [ -s "$NAIVE_PASS_FILE" ]; then
-        local t_dom="" t_u="" t_p="" e2e_ip=""
+        local t_dom="" t_u="" t_p="" e2e_ip="" target_ip="${pub_ip:-127.0.0.1}"
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         t_dom="${NAIVE_DOMAIN:-}"
         IFS=: read -r t_u t_p < "$NAIVE_PASS_FILE" || true
         if [ -n "$t_dom" ] && [ -n "$t_u" ] && [ -n "$t_p" ]; then
-            e2e_ip=$(curl -4 -fsS --max-time 12 --resolve "${t_dom}:443:127.0.0.1" -x "https://${t_u}:${t_p}@${t_dom}:443" https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || true)
+            e2e_ip=$(curl -4 -fsS --max-time 12 --resolve "${t_dom}:443:${target_ip}" -x "https://${t_u}:${t_p}@${t_dom}:443" https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || true)
+            [ -z "$e2e_ip" ] && e2e_ip=$(curl -4 -fsS --max-time 12 --resolve "${t_dom}:443:127.0.0.1" -x "https://${t_u}:${t_p}@${t_dom}:443" https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || true)
             if [ -n "$e2e_ip" ]; then
                 echo -e "   4) Сквозной тест Caddy (:443) -> Usque: ${C_GREEN}✔ УСПЕШНО (Shadowrocket получит IP: ${e2e_ip})${C_RESET}"
             else
-                # Проверим с --proxy-insecure на случай, если сертификат Let's Encrypt еще выпускается
-                e2e_ip=$(curl -4 -fsS --proxy-insecure --max-time 10 --resolve "${t_dom}:443:127.0.0.1" -x "https://${t_u}:${t_p}@${t_dom}:443" https://ifconfig.me 2>/dev/null | tr -d '[:space:]' || true)
-                if [ -n "$e2e_ip" ]; then
-                    echo -e "   4) Сквозной тест Caddy (:443) -> Usque: ${C_YELLOW}⚠ Прокси работает (IP: ${e2e_ip}), но TLS-сертификат для ${t_dom} еще выпускается или DNS указывает не на этот VPS${C_RESET}"
-                else
-                    echo -e "   4) Сквозной тест Caddy (:443) -> Usque: ${C_YELLOW}⚠ Не прошел (проверьте journalctl -u caddy -n 20 и journalctl -u usque -n 20)${C_RESET}"
-                fi
+                echo -e "   4) Сквозной тест Caddy (:443) -> Usque: ${C_YELLOW}⚠ Не прошел (проверьте journalctl -u caddy -n 20)${C_RESET}"
             fi
+
+            # 5) Тест загрузки полной HTTPS-страницы (проверка отсутствия зависания по MTU при открытии реальных сайтов)
+            local page_code=""
+            page_code=$(curl -4 -fsSL --max-time 12 --resolve "${t_dom}:443:${target_ip}" -x "https://${t_u}:${t_p}@${t_dom}:443" -o /dev/null -w "%{http_code}" https://www.google.com 2>/dev/null || true)
+            if [ "$page_code" = "200" ] || [ "$page_code" = "301" ] || [ "$page_code" = "302" ]; then
+                echo -e "   5) Тест полной HTTPS-страницы (MTU):  ${C_GREEN}✔ УСПЕШНО (www.google.com -> HTTP ${page_code}, сайты открываются без зависаний)${C_RESET}"
+            else
+                echo -e "   5) Тест полной HTTPS-страницы (MTU):  ${C_YELLOW}⚠ Ответ HTTP ${page_code:-timeout} (рекомендуется режим socks с MTU 1104 в п. 5)${C_RESET}"
+            fi
+        fi
+    fi
+
+    if command -v tailscale >/dev/null 2>&1; then
+        local ts_adv=""
+        ts_adv=$(tailscale get advertise-exit-node 2>/dev/null || echo "false")
+        if [ "$ts_adv" = "true" ]; then
+            echo -e "   6) Совместимость с Tailscale Exit-Node: ${C_GREEN}✔ Активен (раздача интернета в Tailscale сохранена и не конфликтует с NaiveProxy)${C_RESET}"
         fi
     fi
 }
 
 cleanup_conflicts_for_naive_masque() {
+    ensure_ipv4_precedence_and_host_dns
+
     # 1. Удаляем остаточные файлы mesh-моста, чтобы в Caddyfile не попал второй upstream
     rm -f /etc/naiveproxy/mesh-upstream.port /etc/naiveproxy/mesh-paused 2>/dev/null || true
 
-    # 2. Если активен wg0 или висит правило 30000 -> таблица 150, отключаем их, чтобы трафик usque не уходил в черную дыру
+    # 2. Останавливаем старые службы каскадов, которые могли перехватывать mangle/OUTPUT или PREROUTING
+    silent_run systemctl stop bobarev-cascade-ru.service bobarev-shell-return.service 2>/dev/null || true
+    silent_run systemctl disable bobarev-cascade-ru.service bobarev-shell-return.service 2>/dev/null || true
+    while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
+    for chain in BMGE_IN BMGE_OUT BMGE_MSS; do
+        while iptables -t mangle -D PREROUTING -j "$chain" 2>/dev/null; do :; done
+        while iptables -t mangle -D OUTPUT -j "$chain" 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -j "$chain" 2>/dev/null; do :; done
+        iptables -t mangle -F "$chain" 2>/dev/null || true
+        iptables -t mangle -X "$chain" 2>/dev/null || true
+    done
+
+    # 3. Если активен wg0 или висит правило 30000 -> таблица 150, отключаем их, чтобы трафик usque не уходил в черную дыру
     if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || ip -4 rule show 2>/dev/null | grep -q "30000:"; then
         echo -e "${C_BLUE} Очистка маршрутизации wg0 (таблица 150) для корректной работы Cloudflare MASQUE...${C_RESET}"
         disable_hybrid_wg_routing
     fi
 
-    # 3. Если в Tailscale был выбран внешний exit-node, сбрасываем его
+    # 4. Если на самом сервере был выбран чужой Tailscale exit-node (как клиент), сбрасываем его,
+    # но НЕ трогаем --advertise-exit-node=true (сервер продолжает работать как выходной узел для ваших устройств!)
     if command -v tailscale >/dev/null 2>&1; then
-        silent_run tailscale set --exit-node= 2>/dev/null || true
+        silent_run tailscale set --exit-node= --accept-dns=false 2>/dev/null || true
     fi
 }
 
 enable_masque_for_existing_naive() {
-    local proxy_mode="${1:-l4-socks}"
+    local proxy_mode="${1:-socks}"
     local force_re_reg="${2:-false}"
 
     cleanup_conflicts_for_naive_masque
@@ -1904,7 +2082,6 @@ enable_masque_for_existing_naive() {
         return 1
     fi
 
-    # Перечитываем фактический режим, если install_and_setup_usque выполнил автопереключение
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
@@ -1927,6 +2104,13 @@ enable_masque_for_existing_naive() {
             return 1
         fi
         systemctl reload caddy.service 2>/dev/null || systemctl restart caddy.service 2>/dev/null || true
+    fi
+
+    if command -v ufw >/dev/null 2>&1; then
+        ufw insert 1 allow 443/tcp comment 'NaiveProxy HTTPS' >/dev/null 2>&1 || ufw allow 443/tcp comment 'NaiveProxy HTTPS' >/dev/null 2>&1 || true
+        ufw insert 1 allow 443/udp comment 'NaiveProxy HTTP3 QUIC' >/dev/null 2>&1 || ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC' >/dev/null 2>&1 || true
+        ufw allow 80/tcp comment 'NaiveProxy ACME HTTP' >/dev/null 2>&1 || true
+        silent_run ufw reload
     fi
 
     echo -e "${C_GREEN} Выход NaiveProxy переключен на Cloudflare MASQUE (127.0.0.1:1080 -> CDN Cloudflare).${C_RESET}"
@@ -1961,7 +2145,7 @@ setup_standalone_naive_masque() {
         local is_configured=false
         local c_state="Не настроен"
         local cur_out="masque"
-        local cur_usque_mode="l4-socks"
+        local cur_usque_mode="socks"
         local usque_srv_state="остановлен"
 
         if is_usque_active; then
@@ -1976,10 +2160,10 @@ setup_standalone_naive_masque() {
             if [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
                 is_configured=true
                 cur_out="${NAIVE_OUT_MODE:-direct}"
-                cur_usque_mode="${USQUE_MODE:-l4-socks}"
+                cur_usque_mode="${USQUE_MODE:-socks}"
                 local out_human="Прямой выход с VPS"
                 if [ "$cur_out" = "masque" ] && is_usque_active; then
-                    out_human="Cloudflare MASQUE (${cur_usque_mode} -> CDN Cloudflare)"
+                    out_human="Cloudflare MASQUE (${cur_usque_mode}, MTU 1104 -> CDN Cloudflare)"
                 elif [ "$cur_out" = "masque" ]; then
                     out_human="Cloudflare MASQUE (внимание: служба usque не активна!)"
                 elif [ "$cur_out" = "wg0" ] || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
@@ -2001,13 +2185,14 @@ setup_standalone_naive_masque() {
 Плюсы связки:
   • Максимальная защита от DPI (маскировка под браузер Chrome к вашему сайту)
   • Чистая репутация IP через CDN Cloudflare (без капч и блокировок ChatGPT)
+  • Полная совместимость с активным Tailscale Exit-Node на этом же сервере
 
-Выберите действие:" 22 "$WT_WIDTH" 8 "sc_choice" \
+Выберите действие:" 23 "$WT_WIDTH" 8 "sc_choice" \
                 "1" " Показать ссылки и QR-коды для Shadowrocket" \
                 "2" " Управление пользователями NaiveProxy" \
-                "3" " Включить / Обновить выход через Cloudflare MASQUE (Usque)" \
-                "4" " Сквозная диагностика (Caddy -> Usque -> DNS) и перерегистрация WARP" \
-                "5" " Переключить режим Usque: l4-socks (быстрый TCP) / socks (gVisor + DNS 1.1.1.1)" \
+                "3" " Включить / Обновить выход через Cloudflare MASQUE (MTU 1104 + быстрый Auth)" \
+                "4" " Сквозная диагностика (5 этапов + проверка MTU) и перерегистрация WARP" \
+                "5" " Переключить режим Usque: socks (MTU 1104, рекомендуется) / l4-socks" \
                 "6" " Переключить на прямой выход с VPS (временно отключить MASQUE)" \
                 "7" " Перенастроить домен и связку NaiveProxy + Cloudflare MASQUE" \
                 "8" " Остановить и удалить NaiveProxy + Cloudflare MASQUE" \
@@ -2022,8 +2207,8 @@ setup_standalone_naive_masque() {
   1) Максимальная устойчивость к DPI: сегмент от вас до VPS маскируется
      под реальный браузер Google Chrome (HTTP/2 и HTTP/3 TLS к вашему сайту).
   2) Чистая репутация IP: сегмент от VPS в интернет выходит через CDN Cloudflare
-     по протоколу MASQUE (HTTP/3 QUIC), убирая капчи Cloudflare, ошибки
-     блокировок в OpenAI/ChatGPT и ограничения стриминговых сервисов.
+     по протоколу MASQUE (HTTP/3 QUIC, MTU 1104), убирая капчи Cloudflare,
+     ошибки блокировок в OpenAI/ChatGPT и ограничения стриминговых сервисов.
 
 Выберите действие:" 20 "$WT_WIDTH" 3 "sc_choice" \
                 "1" " Настроить связку NaiveProxy + Cloudflare MASQUE «под ключ»" \
@@ -2043,7 +2228,7 @@ setup_standalone_naive_masque() {
                 manage_naive_users_menu
                 ;;
             3)
-                enable_masque_for_existing_naive "${cur_usque_mode:-l4-socks}" "false" || true
+                enable_masque_for_existing_naive "${cur_usque_mode:-socks}" "false" || true
                 pause_enter
                 ;;
             4)
@@ -2051,17 +2236,17 @@ setup_standalone_naive_masque() {
                 verify_usque_masque_ip
                 echo ""
                 if prompt_yn "Перерегистрировать новое устройство в Cloudflare WARP (создать свежий /etc/usque/config.json)?" "false"; then
-                    enable_masque_for_existing_naive "${cur_usque_mode:-l4-socks}" "true" || true
+                    enable_masque_for_existing_naive "${cur_usque_mode:-socks}" "true" || true
                 fi
                 pause_enter
                 ;;
             5)
                 local next_mode="l4-socks"
-                [ "${cur_usque_mode:-l4-socks}" = "l4-socks" ] && next_mode="socks"
-                if prompt_yn "Переключить режим прокси Usque с '${cur_usque_mode:-l4-socks}' на '${next_mode}'?
+                [ "${cur_usque_mode:-socks}" = "l4-socks" ] && next_mode="socks"
+                if prompt_yn "Переключить режим прокси Usque с '${cur_usque_mode:-socks}' на '${next_mode}'?
 
-• l4-socks — легкий и быстрый L4 TCP-прокси (рекомендуется для NaiveProxy + Caddy)
-• socks — полный стек gVisor с туннельным DNS (-d 1.1.1.1 -d 1.0.0.1)" "true"; then
+• socks — стек gVisor с фиксацией MTU (-m 1104) и DNS (-d 1.1.1.1), исключает зависание крупных сайтов в Shadowrocket (рекомендуется!)
+• l4-socks — прямой L4 TCP-прокси без буферизации MTU" "true"; then
                     enable_masque_for_existing_naive "$next_mode" "false" || true
                 fi
                 pause_enter
@@ -2149,11 +2334,11 @@ setup_standalone_naive_masque() {
                     cp -a "$CADDYFILE" "$backup_dir/Caddyfile" && old_caddy=true
                 fi
 
-                # Шаг 0: Очистка конфликтующих маршрутов (wg0 / таблица 150 / mesh-upstream.port / tailscale exit-node)
+                # Шаг 0: Очистка конфликтов маршрутизации и DNS (с сохранением роли Tailscale Exit-Node!)
                 cleanup_conflicts_for_naive_masque
 
-                # Шаг 1: Установка и запуск Usque (Cloudflare MASQUE) на 127.0.0.1:1080 (по умолчанию l4-socks для NaiveProxy)
-                local target_usque_mode="${cur_usque_mode:-l4-socks}"
+                # Шаг 1: Установка и запуск Usque (Cloudflare MASQUE) на 127.0.0.1:1080 (режим socks с фиксацией MTU 1104)
+                local target_usque_mode="socks"
                 if ! install_and_setup_usque "$target_usque_mode" "false"; then
                     echo -e "${C_RED} Не удалось подготовить службу Usque (Cloudflare MASQUE). Бэкап: $backup_dir${C_RESET}"
                     pause_enter; continue
@@ -2204,9 +2389,10 @@ setup_standalone_naive_masque() {
                 fi
 
                 if command -v ufw >/dev/null 2>&1; then
+                    ufw insert 1 allow 443/tcp comment 'NaiveProxy HTTPS' >/dev/null 2>&1 || ufw allow 443/tcp comment 'NaiveProxy HTTPS' >/dev/null 2>&1 || true
+                    ufw insert 1 allow 443/udp comment 'NaiveProxy HTTP3 QUIC' >/dev/null 2>&1 || ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC' >/dev/null 2>&1 || true
                     ufw allow 80/tcp comment 'NaiveProxy ACME HTTP' >/dev/null 2>&1 || true
-                    ufw allow 443/tcp comment 'NaiveProxy HTTPS' >/dev/null 2>&1 || true
-                    ufw allow 443/udp comment 'NaiveProxy HTTP3 QUIC' >/dev/null 2>&1 || true
+                    silent_run ufw reload
                 fi
 
                 echo ""

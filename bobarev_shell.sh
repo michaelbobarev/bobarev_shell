@@ -1,4 +1,6 @@
 #!/bin/bash
+# Bobarev Shell v3.20.0 — универсальный инструмент безопасности, маршрутизации Tailscale и анти-DPI туннелирования (VLESS-XHTTP + REALITY + Finalmask, Hysteria 2 и Cloudflare MASQUE).
+# Оптимизирован для развертывания на чистом сервере с сохранением приоритетного соединения Tailscale и бережным интерактивным контролем портов.
 
 set -euo pipefail
 

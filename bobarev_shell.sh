@@ -1,7 +1,8 @@
 #!/bin/bash
+
 set -euo pipefail
 
-SCRIPT_VERSION="3.19.00"
+SCRIPT_VERSION="3.20.0"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -247,13 +248,16 @@ ensure_ufw_nat_rule() {
     local rule="$1"
     [ ! -f /etc/ufw/before.rules ] && return 0
     if ! grep -q "^\*nat" /etc/ufw/before.rules; then
-        sed -i '1s/^/*nat\n:PREROUTING ACCEPT [0:0]\n:POSTROUTING ACCEPT [0:0]\nCOMMIT\n\n/' /etc/ufw/before.rules
+        sed -i '1s/^/*nat\n:PREROUTING ACCEPT [0:0]\n:POSTROUTING ACCEPT [0:0]\n-F POSTROUTING\nCOMMIT\n\n/' /etc/ufw/before.rules
     else
         if ! grep -q "^:PREROUTING" /etc/ufw/before.rules; then
             sed -i '/^\*nat/a :PREROUTING ACCEPT [0:0]' /etc/ufw/before.rules
         fi
         if ! grep -q "^:POSTROUTING" /etc/ufw/before.rules; then
             sed -i '/^\*nat/a :POSTROUTING ACCEPT [0:0]' /etc/ufw/before.rules
+        fi
+        if ! grep -q "^-F POSTROUTING" /etc/ufw/before.rules; then
+            sed -i '/^:POSTROUTING ACCEPT/a -F POSTROUTING' /etc/ufw/before.rules 2>/dev/null || true
         fi
     fi
     if ! grep -qF -- "$rule" /etc/ufw/before.rules; then
@@ -531,6 +535,7 @@ generate_xray_reality_credentials() {
     GEN_X_PUB=$(echo "$keys" | awk -F':' 'tolower($1) ~ /public|password/ {print $2; exit}' | tr -d '[:space:]')
     GEN_X_UUID=$(/usr/local/bin/xray uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
     GEN_X_SHORT_ID=$(openssl rand -hex 8)
+    GEN_X_PATH="/xhttp-$(openssl rand -hex 3 2>/dev/null || echo 'a8f3c1')"
     if [ -z "$GEN_X_PRIV" ] || [ -z "$GEN_X_PUB" ]; then
         echo -e "${C_RED} Ошибка генерации ключей x25519 через бинарник xray!${C_RESET}"
         return 1
@@ -540,19 +545,25 @@ generate_xray_reality_credentials() {
 
 rotate_vless_credentials_interactive() {
     if [ ! -f /etc/default/bobarev-cascade ]; then
-        echo -e "${C_YELLOW} Профиль VLESS-REALITY еще не настроен на этом сервере.${C_RESET}"
+        echo -e "${C_YELLOW} Профиль VLESS-XHTTP еще не настроен на этом сервере.${C_RESET}"
         return 0
     fi
     # shellcheck disable=SC1091
     source /etc/default/bobarev-cascade
-    local cur_sni="${XRAY_SNI:-gateway.icloud.com}"
+    local cur_sni="${XRAY_SNI:-www.microsoft.com}"
     local cur_port="${XRAY_PORT:-443}"
-    local new_sni=""
-    prompt_default "Введите целевой SNI-домен для маскировки REALITY (gateway.icloud.com, dl.google.com, www.microsoft.com):" "$cur_sni" new_sni
+    local cur_path="${XRAY_XHTTP_PATH:-/xhttp-stream}"
+    local new_sni="" new_path=""
+    prompt_default "1/2. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, www.amd.com, itunes.apple.com):" "$cur_sni" new_sni
     [ "$MODULE_CANCELED" = true ] && return 0
     [ -z "$new_sni" ] && new_sni="$cur_sni"
 
-    if ! prompt_yn "Перегенерировать UUID, ключи x25519 и ShortId для VLESS-REALITY (порт ${cur_port}/tcp, SNI: ${new_sni})?" "true"; then
+    prompt_default "2/2. Путь XHTTP (начинается с /):" "$cur_path" new_path
+    [ "$MODULE_CANCELED" = true ] && return 0
+    [ -z "$new_path" ] && new_path="$cur_path"
+    [[ "$new_path" != /* ]] && new_path="/${new_path}"
+
+    if ! prompt_yn "Перегенерировать UUID, ключи x25519 и ShortId для VLESS-XHTTP (порт ${cur_port}/tcp, SNI: ${new_sni}, Path: ${new_path})?" "true"; then
         return 0
     fi
 
@@ -562,27 +573,29 @@ rotate_vless_credentials_interactive() {
     XRAY_PUB="$GEN_X_PUB"
     XRAY_SHORT_ID="$GEN_X_SHORT_ID"
     XRAY_SNI="$new_sni"
+    XRAY_XHTTP_PATH="$new_path"
 
-    sed -i '/^XRAY_UUID=/d;/^XRAY_PRIV=/d;/^XRAY_PUB=/d;/^XRAY_SHORT_ID=/d;/^XRAY_SNI=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    sed -i '/^XRAY_UUID=/d;/^XRAY_PRIV=/d;/^XRAY_PUB=/d;/^XRAY_SHORT_ID=/d;/^XRAY_SNI=/d;/^XRAY_XHTTP_PATH=/d' /etc/default/bobarev-cascade 2>/dev/null || true
     {
         printf 'XRAY_UUID=%q\n' "$XRAY_UUID"
         printf 'XRAY_PRIV=%q\n' "$XRAY_PRIV"
         printf 'XRAY_PUB=%q\n' "$XRAY_PUB"
         printf 'XRAY_SHORT_ID=%q\n' "$XRAY_SHORT_ID"
         printf 'XRAY_SNI=%q\n' "$XRAY_SNI"
+        printf 'XRAY_XHTTP_PATH=%q\n' "$XRAY_XHTTP_PATH"
     } >> /etc/default/bobarev-cascade
 
     if [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && [ -n "${S2_XRAY_IP:-}" ]; then
-        render_xray_cascade_s1_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$S2_XRAY_IP" "$S2_XRAY_PORT" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "$S2_XRAY_SNI"
+        render_xray_cascade_s1_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$S2_XRAY_IP" "$S2_XRAY_PORT" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "$S2_XRAY_SNI" "$XRAY_XHTTP_PATH" "${S2_XRAY_PATH:-/}"
     elif [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ]; then
-        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local"
+        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local" "$XRAY_XHTTP_PATH"
     else
         local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
-        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$out_m"
+        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$out_m" "$XRAY_XHTTP_PATH"
     fi
 
     systemctl restart bobarev-xray.service || true
-    echo -e "${C_GREEN} Ключи VLESS-REALITY (XTLS Vision) и SNI (${XRAY_SNI}) успешно обновлены!${C_RESET}"
+    echo -e "${C_GREEN} Ключи VLESS-XHTTP, Path (${XRAY_XHTTP_PATH}) и SNI (${XRAY_SNI}) успешно обновлены!${C_RESET}"
     print_vless_shadowrocket_links
 }
 
@@ -590,9 +603,9 @@ manage_vless_users_menu() {
     while true; do
         MODULE_CANCELED=false
         local u_choice=""
-        if ! smart_menu "Управление ключами VLESS-REALITY и SNI" "\nВыберите действие:" 15 "$WT_WIDTH" 4 "u_choice" \
-            "1" " Показать ссылки и QR-коды для Shadowrocket / V2Box / Streisand" \
-            "2" " Перевыпустить ключи (UUID / x25519 / ShortId) или сменить SNI" \
+        if ! smart_menu "Управление ключами VLESS-XHTTP, Path и SNI" "\nВыберите действие:" 15 "$WT_WIDTH" 4 "u_choice" \
+            "1" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket / V2Box / Streisand" \
+            "2" " Перевыпустить ключи (UUID / x25519 / ShortId) или сменить SNI и Path" \
             "0" " Назад" || [ "$u_choice" = "0" ]; then
             break
         fi
@@ -739,7 +752,7 @@ get_wan_global_ipv6() {
 
 print_vless_shadowrocket_links() {
     if [ ! -f /etc/default/bobarev-cascade ]; then
-        echo -e "${C_YELLOW} Профиль VLESS-REALITY / Hysteria 2 еще не настроен на этом сервере.${C_RESET}"
+        echo -e "${C_YELLOW} Профиль VLESS-XHTTP / Hysteria 2 еще не настроен на этом сервере.${C_RESET}"
         return 0
     fi
     # shellcheck disable=SC1091
@@ -754,51 +767,61 @@ print_vless_shadowrocket_links() {
     local x_uuid="${XRAY_UUID:-}"
     local x_pub="${XRAY_PUB:-}"
     local x_sid="${XRAY_SHORT_ID:-}"
-    local x_sni="${XRAY_SNI:-gateway.icloud.com}"
+    local x_sni="${XRAY_SNI:-www.microsoft.com}"
+    local x_path="${XRAY_XHTTP_PATH:-/xhttp-stream}"
+    [[ "$x_path" != /* ]] && x_path="/${x_path}"
+    local encoded_path="%2F${x_path#/}"
     local hname
     hname=$(hostname -s 2>/dev/null || echo "VPS")
 
-    echo -e "
-${C_CYAN} === ССЫЛКИ, РУЧНЫЕ ПАРАМЕТРЫ И QR-КОДЫ ДЛЯ SHADOWROCKET / V2BOX / STREISAND ===${C_RESET}"
+    echo -e "\n${C_CYAN} === ССЫЛКИ, РУЧНЫЕ ПАРАМЕТРЫ И QR-КОДЫ VLESS-XHTTP (SHADOWROCKET / STREISAND / V2BOX / HAPP) ===${C_RESET}"
     echo -e " Сервер (WAN):         IPv4: ${C_GREEN}${pub_ip4:-нет}${C_RESET} | IPv6: ${C_CYAN}${pub_ip6:-не назначен}${C_RESET}"
 
     if [ -n "$x_uuid" ] && [ -n "$x_pub" ]; then
-        local vless_uri_v4="" vless_uri_v6=""
+        local xhttp_auto_v4="" xhttp_packet_v4="" xhttp_auto_v6=""
         if [ -n "$pub_ip4" ]; then
-            vless_uri_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=tcp#${hname}-VLESS-Vision"
+            xhttp_auto_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto#${hname}-XHTTP-Auto"
+            xhttp_packet_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=firefox&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-XHTTP-PacketUp"
         fi
         if [ -n "$pub_ip6" ]; then
-            vless_uri_v6="vless://${x_uuid}@[${pub_ip6}]:${x_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=tcp#${hname}-VLESS-IPv6"
+            xhttp_auto_v6="vless://${x_uuid}@[${pub_ip6}]:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto#${hname}-XHTTP-IPv6"
         fi
 
-        echo -e "
- ${C_BOLD}Параметры VLESS-REALITY (XTLS Vision) для ручного ввода в Shadowrocket:${C_RESET}"
+        echo -e "\n ${C_BOLD}Параметры VLESS-XHTTP (SplitHTTP + REALITY) для ручного ввода:${C_RESET}"
         echo -e "   • Тип (Type):         ${C_GREEN}VLESS${C_RESET}"
         echo -e "   • Адрес (Address):    ${C_GREEN}${pub_ip4:-$pub_ip6}${C_RESET}"
         echo -e "   • Порт (Port):        ${C_GREEN}${x_port}${C_RESET}"
         echo -e "   • UUID:               ${C_GREEN}${x_uuid}${C_RESET}"
-        echo -e "   • Flow (Поток):       ${C_GREEN}xtls-rprx-vision${C_RESET}"
+        echo -e "   • Транспорт (Network): ${C_GREEN}xhttp (SplitHTTP)${C_RESET}"
+        echo -e "   • Путь (Path):        ${C_GREEN}${x_path}${C_RESET}"
+        echo -e "   • Режим (XHTTP Mode): ${C_GREEN}auto${C_RESET} (или ${C_YELLOW}packet-up${C_RESET} для мобильных сетей)"
+        echo -e "   • Flow (Поток):       ${C_GREEN}none / пусто (для XHTTP используется мультиплексор XMUX)${C_RESET}"
         echo -e "   • TLS / REALITY:      ${C_GREEN}Вкл (REALITY)${C_RESET}"
         echo -e "   • SNI (Peer):         ${C_GREEN}${x_sni}${C_RESET}"
         echo -e "   • Public Key (pbk):   ${C_GREEN}${x_pub}${C_RESET}"
         echo -e "   • ShortId (sid):      ${C_GREEN}${x_sid}${C_RESET}"
-        echo -e "   • Fingerprint (fp):   ${C_GREEN}chrome${C_RESET}"
+        echo -e "   • Fingerprint (fp):   ${C_GREEN}chrome${C_RESET} (или ${C_YELLOW}firefox${C_RESET})"
 
-        if [ -n "$vless_uri_v4" ]; then
-            echo -e "
- ${C_GREEN}1) Основная ссылка VLESS-REALITY (XTLS Vision, IPv4, порт ${x_port}/tcp):${C_RESET}"
-            echo -e " ${C_BOLD}${C_GREEN}${vless_uri_v4}${C_RESET}"
+        if [ -n "$xhttp_auto_v4" ]; then
+            echo -e "\n ${C_GREEN}1) Основная ссылка VLESS-XHTTP (mode=auto, XMUX поток, порт ${x_port}/tcp):${C_RESET}"
+            echo -e " ${C_BOLD}${C_GREEN}${xhttp_auto_v4}${C_RESET}"
         fi
-        if [ -n "$vless_uri_v6" ]; then
-            echo -e "
- ${C_CYAN}2) Резервная ссылка VLESS-REALITY (XTLS Vision, IPv6, порт ${x_port}/tcp):${C_RESET}"
-            echo -e " ${C_CYAN}${vless_uri_v6}${C_RESET}"
+        if [ -n "$xhttp_packet_v4" ]; then
+            echo -e "\n ${C_YELLOW}2) Пробивная ссылка VLESS-XHTTP (mode=packet-up + fp=firefox — разделение HTTP POST против мобильного ТСПУ):${C_RESET}"
+            echo -e " ${C_BOLD}${C_YELLOW}${xhttp_packet_v4}${C_RESET}"
+        fi
+        if [ -n "$xhttp_auto_v6" ]; then
+            echo -e "\n ${C_CYAN}3) Резервная ссылка VLESS-XHTTP (IPv6, порт ${x_port}/tcp):${C_RESET}"
+            echo -e " ${C_CYAN}${xhttp_auto_v6}${C_RESET}"
         fi
 
-        if command -v qrencode >/dev/null 2>&1 && [ -n "$vless_uri_v4" ]; then
-            echo -e "
- ${C_GREEN}QR-код VLESS-REALITY (XTLS Vision — наведите камеру в Shadowrocket):${C_RESET}"
-            qrencode -t ansiutf8 "${vless_uri_v4}" 2>/dev/null || true
+        if command -v qrencode >/dev/null 2>&1 && [ -n "$xhttp_auto_v4" ]; then
+            echo -e "\n ${C_GREEN}QR-код №1 — VLESS-XHTTP (mode=auto):${C_RESET}"
+            qrencode -t ansiutf8 "${xhttp_auto_v4}" 2>/dev/null || true
+            if [ -n "$xhttp_packet_v4" ]; then
+                echo -e "\n ${C_YELLOW}QR-код №2 — VLESS-XHTTP (mode=packet-up + fp=firefox для мобильных операторов):${C_RESET}"
+                qrencode -t ansiutf8 "${xhttp_packet_v4}" 2>/dev/null || true
+            fi
         fi
     fi
 
@@ -810,21 +833,18 @@ ${C_CYAN} === ССЫЛКИ, РУЧНЫЕ ПАРАМЕТРЫ И QR-КОДЫ ДЛ�
         [ -n "$h_pin" ] && pin_param="insecure=0&pinSHA256=${h_pin}"
         if [ -n "$pub_ip4" ]; then
             local hy2_uri="hysteria2://${HYSTERIA_PASS}@${pub_ip4}:${h_port}/?sni=${h_sni}&${pin_param}#${hname}-Hysteria2-UDP"
-            echo -e "
- ${C_YELLOW}3) Скоростная ссылка Hysteria 2 (QUIC UDP, порт ${h_port}/udp):${C_RESET}"
-            echo -e " ${C_BOLD}${C_YELLOW}${hy2_uri}${C_RESET}"
+            echo -e "\n ${C_CYAN}4) Скоростная ссылка Hysteria 2 (QUIC UDP, порт ${h_port}/udp):${C_RESET}"
+            echo -e " ${C_BOLD}${C_CYAN}${hy2_uri}${C_RESET}"
             if command -v qrencode >/dev/null 2>&1; then
-                echo -e "
- ${C_YELLOW}QR-код Hysteria 2 (QUIC UDP):${C_RESET}"
+                echo -e "\n ${C_CYAN}QR-код №3 — Hysteria 2 (QUIC UDP):${C_RESET}"
                 qrencode -t ansiutf8 "${hy2_uri}" 2>/dev/null || true
             fi
         fi
     fi
 
-    echo -e "
-${C_CYAN} Памятка для проверки с iPhone (Shadowrocket / Streisand / V2Box):${C_RESET}"
-    echo -e "   1) Скопируйте ссылку VLESS-REALITY (или отсканируйте QR-код) — домен и сертификаты не требуются!"
-    echo -e "   2) Убедитесь, что в Shadowrocket выбран Global Routing = ${C_GREEN}Proxy (Прокси)${C_RESET}."
+    echo -e "\n${C_CYAN} Памятка для подключения с iPhone (Shadowrocket / Streisand / V2Box / Happ):${C_RESET}"
+    echo -e "   1) Добавьте обе ссылки VLESS-XHTTP (№1 mode=auto и №2 mode=packet-up) — на мобильном интернете часто лучше пробивает №2 (packet-up)!"
+    echo -e "   2) Не полагайтесь на кнопку TCP Ping в списке серверов — включите тумблер VPN и откройте сайт в браузере."
     echo -e "   3) Ваше приоритетное соединение Tailscale на сервере полностью сохранено."
 }
 
@@ -1161,7 +1181,7 @@ setup_standalone_vless_wg() {
                 elif [ "$cur_out" = "masque" ] || systemctl is-active --quiet usque.service 2>/dev/null; then
                     out_human="Cloudflare MASQUE (Usque 127.0.0.1:1080)"
                 fi
-                c_state="Активен (Порт: ${XRAY_PORT:-443}/tcp | SNI: ${XRAY_SNI:-gateway.icloud.com} | ${out_human})"
+                c_state="Активен (Порт: ${XRAY_PORT:-443}/tcp | SNI: ${XRAY_SNI:-www.microsoft.com} | ${out_human})"
             fi
         fi
 
@@ -1181,7 +1201,7 @@ setup_standalone_vless_wg() {
 
 Преимущества VLESS-REALITY (XTLS Vision):
   • Не нужен личный домен и выпуск сертификатов Let's Encrypt
-  • Маскировка под реальный TLS 1.3 (gateway.icloud.com / dl.google.com)
+  • Маскировка под реальный TLS 1.3 (www.microsoft.com / dl.google.com)
   • Полное сохранение приоритетного соединения Tailscale на сервере
 
 Выберите действие:" 18 "$WT_WIDTH" 2 "sc_choice"                 "1" " Настроить автономный VLESS-REALITY (XTLS Vision)"                 "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
@@ -1210,12 +1230,12 @@ setup_standalone_vless_wg() {
             5)
                 echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО VLESS-REALITY (XTLS VISION) ===${C_RESET}"
                 local x_port="443"
-                local x_sni="gateway.icloud.com"
+                local x_sni="www.microsoft.com"
                 if [ -f /etc/default/bobarev-cascade ]; then
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     x_port="${XRAY_PORT:-443}"
-                    x_sni="${XRAY_SNI:-gateway.icloud.com}"
+                    x_sni="${XRAY_SNI:-www.microsoft.com}"
                 fi
                 prompt_default "1/2. Введите TCP-порт для VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
                 [ "$MODULE_CANCELED" = true ] && continue
@@ -1229,9 +1249,9 @@ setup_standalone_vless_wg() {
                     continue
                 fi
 
-                prompt_default "2/2. Целевой SNI-домен для маскировки REALITY (gateway.icloud.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
+                prompt_default "2/2. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
                 [ "$MODULE_CANCELED" = true ] && continue
-                [ -z "$x_sni" ] && x_sni="gateway.icloud.com"
+                [ -z "$x_sni" ] && x_sni="www.microsoft.com"
 
                 ensure_xray_installed || { pause_enter; continue; }
                 enable_routing_optimizations || true
@@ -1248,7 +1268,7 @@ setup_standalone_vless_wg() {
                     out_m="wg0"
                 fi
 
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m"
+                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m" "$GEN_X_PATH"
                 write_xray_service
                 silent_run systemctl enable --now bobarev-xray.service
                 systemctl restart bobarev-xray.service || true
@@ -1275,6 +1295,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
 EOF
@@ -1352,11 +1373,14 @@ write_usque_systemd_unit() {
         local help_out=""
         help_out=$(/usr/local/bin/usque "$proxy_mode" --help 2>&1 || true)
         if printf '%s\n' "$help_out" | grep -qE -- '(^|[[:space:]])-d([,[:space:]]|$)|--dns'; then
-            # Передаем как IPv4, так и IPv6 DNS Cloudflare (по официальной документации Diniboy1123/usque)
-            dns_flags="-d 1.1.1.1 -d 1.0.0.1 -d 2606:4700:4700::1111 -d 2606:4700:4700::1001"
+            local has_wan_v6=""
+            has_wan_v6=$(get_wan_global_ipv6)
+            if [ -n "$has_wan_v6" ]; then
+                dns_flags="-d 1.1.1.1 -d 1.0.0.1 -d 2606:4700:4700::1111 -d 2606:4700:4700::1001"
+            else
+                dns_flags="-d 1.1.1.1 -d 1.0.0.1"
+            fi
         fi
-        # Важно: по стандарту IPv6 (RFC 8200) минимальный MTU равен 1280 байт!
-        # Установка MTU меньше 1280 (например 1104) отключает IPv6 внутри gVisor-стека режима socks.
         if [ "$proxy_mode" = "socks" ] && [ -n "$mtu_val" ] && printf '%s\n' "$help_out" | grep -qE -- '(^|[[:space:]])-m([,[:space:]]|$)|--mtu'; then
             mtu_flags="-m ${mtu_val}"
         fi
@@ -1364,7 +1388,7 @@ write_usque_systemd_unit() {
 
     cat << USQUE_SVC_EOF > /etc/systemd/system/usque.service
 [Unit]
-Description=Usque MASQUE Cloudflare WARP Dual-Stack Proxy (${proxy_mode} on 127.0.0.1:1080)
+Description=Usque MASQUE Cloudflare WARP Proxy (${proxy_mode} on 127.0.0.1:1080)
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -1641,7 +1665,7 @@ enable_masque_for_existing_vless() {
         } >> /etc/default/bobarev-cascade
 
         if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ]; then
-            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-gateway.icloud.com}" "masque"
+            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "masque"
             write_xray_service
             systemctl restart bobarev-xray.service || true
         fi
@@ -1673,7 +1697,7 @@ disable_usque_masque_routing() {
         } >> /etc/default/bobarev-cascade
 
         if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ]; then
-            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-gateway.icloud.com}" "direct"
+            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "direct"
             systemctl restart bobarev-xray.service || true
         fi
         if systemctl is-active --quiet hysteria-server.service 2>/dev/null && [ -n "${HYSTERIA_PASS:-}" ]; then
@@ -1716,7 +1740,7 @@ setup_standalone_vless_masque() {
                 fi
                 local hy2_badge=""
                 systemctl is-active --quiet hysteria-server.service 2>/dev/null && hy2_badge=" + Hysteria2 UDP"
-                c_state="Активен (VLESS ${XRAY_PORT:-443}/tcp${hy2_badge} | SNI: ${XRAY_SNI:-gateway.icloud.com} | ${out_human})"
+                c_state="Активен (VLESS ${XRAY_PORT:-443}/tcp${hy2_badge} | SNI: ${XRAY_SNI:-www.microsoft.com} | ${out_human})"
             fi
         fi
 
@@ -1740,7 +1764,7 @@ setup_standalone_vless_masque() {
 
 В чем главные плюсы этой связки:
   1) Не нужен домен и SSL-сертификаты: VLESS-REALITY (XTLS Vision) маскируется
-     под реальное рукопожатие TLS 1.3 к gateway.icloud.com / dl.google.com.
+     под реальное рукопожатие TLS 1.3 к www.microsoft.com / dl.google.com.
   2) Мгновенная работа в Shadowrocket: Xray направляет TCP через Cloudflare MASQUE,
      а быстрые UDP DNS-запросы (1.1.1.1:53) обрабатывает напрямую без ошибок.
   3) Полная совместимость с установленным на сервере Tailscale (без остановки служб).
@@ -1794,12 +1818,12 @@ setup_standalone_vless_masque() {
             7)
                 echo -e "${C_CYAN} === НАСТРОЙКА СВЯЗКИ VLESS-REALITY (XTLS VISION) + CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
                 local x_port="443"
-                local x_sni="gateway.icloud.com"
+                local x_sni="www.microsoft.com"
                 if [ -f /etc/default/bobarev-cascade ]; then
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     x_port="${XRAY_PORT:-443}"
-                    x_sni="${XRAY_SNI:-gateway.icloud.com}"
+                    x_sni="${XRAY_SNI:-www.microsoft.com}"
                 fi
 
                 prompt_default "1/3. TCP-порт для VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
@@ -1807,9 +1831,9 @@ setup_standalone_vless_masque() {
                 x_port="${x_port//[^0-9]/}"
                 [ -z "$x_port" ] && x_port="443"
 
-                prompt_default "2/3. Целевой SNI-домен для маскировки REALITY (gateway.icloud.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
+                prompt_default "2/3. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
                 [ "$MODULE_CANCELED" = true ] && continue
-                [ -z "$x_sni" ] && x_sni="gateway.icloud.com"
+                [ -z "$x_sni" ] && x_sni="www.microsoft.com"
 
                 local enable_hy2_backup=false
                 if prompt_yn "3/3. Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
@@ -1846,7 +1870,7 @@ setup_standalone_vless_masque() {
                 generate_xray_reality_credentials || { pause_enter; continue; }
                 apply_naive_tcp_tuning_profile "balanced"
 
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque"
+                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH"
                 write_xray_service
                 silent_run systemctl enable --now bobarev-xray.service
                 systemctl restart bobarev-xray.service || true
@@ -1907,6 +1931,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 HYSTERIA_PORT="${x_port}"
 HYSTERIA_PASS="${h_pass}"
 HYSTERIA_CERT_PIN="${cert_pin}"
@@ -1953,13 +1978,13 @@ setup_standalone_naive_masque() {
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS-REALITY (XTLS VISION) -> TAILSCALE ===${C_RESET}"
-    local saved_exit="" x_port="443" x_sni="gateway.icloud.com" cur_role=""
+    local saved_exit="" x_port="443" x_sni="www.microsoft.com" cur_role=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         saved_exit="${EXIT_TS_IP:-}"
         x_port="${XRAY_PORT:-443}"
-        x_sni="${XRAY_SNI:-gateway.icloud.com}"
+        x_sni="${XRAY_SNI:-www.microsoft.com}"
         cur_role="${CASCADE_ROLE:-}"
     fi
 
@@ -1974,7 +1999,7 @@ setup_cascade_server1_ru() {
         return 0
     fi
 
-    prompt_default "2/3. Целевой SNI-домен для маскировки REALITY (gateway.icloud.com, dl.google.com):" "$x_sni" x_sni
+    prompt_default "2/3. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com):" "$x_sni" x_sni
     if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
 
     ensure_xray_installed || return 1
@@ -1996,7 +2021,7 @@ setup_cascade_server1_ru() {
     pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
     pub_ip6=$(get_wan_global_ipv6)
 
-    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit"
+    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH"
     write_xray_service
     silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
@@ -2010,6 +2035,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
 TCP_TUNE_PROFILE="balanced"
@@ -2504,12 +2530,12 @@ ${C_CYAN} ТОКЕНЫ ДЛЯ КАСКАДА С СЕРВЕРОМ 1 (РФ):${C_RE
 
 setup_cascade_hysteria_server1_ru() {
     echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS-REALITY (XTLS VISION) -> HYSTERIA 2 ===${C_RESET}"
-    local x_port="443" x_sni="gateway.icloud.com" cur_role=""
+    local x_port="443" x_sni="www.microsoft.com" cur_role=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         x_port="${XRAY_PORT:-443}"
-        x_sni="${XRAY_SNI:-gateway.icloud.com}"
+        x_sni="${XRAY_SNI:-www.microsoft.com}"
         cur_role="${CASCADE_ROLE:-}"
     fi
 
@@ -2542,7 +2568,7 @@ setup_cascade_hysteria_server1_ru() {
         return 0
     fi
 
-    prompt_default "3/3. Целевой SNI-домен для маскировки VLESS-REALITY (gateway.icloud.com, dl.google.com):" "$x_sni" x_sni
+    prompt_default "3/3. Целевой SNI-домен для маскировки VLESS-REALITY (www.microsoft.com, dl.google.com):" "$x_sni" x_sni
     if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
 
     ensure_hysteria_installed || return 1
@@ -2563,7 +2589,7 @@ setup_cascade_hysteria_server1_ru() {
         tls_block="tls:
   sni: www.bing.com
   insecure: false
-  pinSHA256: "${s2_pin}""
+  pinSHA256: \"${s2_pin}\""
         echo -e "${C_GREEN} Включена защита от MITM: привязка сертификата Сервера 2 (pinSHA256: ${s2_pin}).${C_RESET}"
     fi
     cat << EOF > /etc/hysteria/client.yaml
@@ -2619,7 +2645,7 @@ SVC_EOF
     generate_xray_reality_credentials || return 1
     apply_naive_tcp_tuning_profile "balanced"
 
-    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "hysteria_local"
+    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "hysteria_local" "$GEN_X_PATH"
     write_xray_service
     silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
@@ -2646,6 +2672,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
 TCP_TUNE_PROFILE="balanced"
@@ -2815,12 +2842,19 @@ render_xray_server_config() {
     local x_uuid="$2"
     local x_priv="$3"
     local x_short_id="$4"
-    local x_sni="$5"
+    local x_sni="${5:-www.microsoft.com}"
     local exit_mode="${6:-direct}"
+    local x_path="${7:-${XRAY_XHTTP_PATH:-/xhttp-stream}}"
+    [[ "$x_path" != /* ]] && x_path="/${x_path}"
 
     mkdir -p /etc/xray
 
     if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
+        # Умная маршрутизация для VLESS-XHTTP -> Cloudflare MASQUE (usque на 127.0.0.1:1080):
+        # 1) Вход vless-xhttp-in работает по современному протоколу XHTTP ("mode": "auto", принимает auto, packet-up, stream-up, stream-one).
+        # 2) Выход masque-out использует freedom с dialerProxy: "usque-raw" и sockopt.domainStrategy: "UseIPv4",
+        #    чтобы Xray сам мгновенно резолвил домены в IPv4 на сервере и передавал в usque готовый IPv4-адрес
+        #    (полностью исключает ошибку 'DNS resolution failed: i/o timeout' внутри usque после простоя!).
         cat << EOF > /etc/xray/config.json
 {
   "log": {
@@ -2828,38 +2862,43 @@ render_xray_server_config() {
   },
   "inbounds": [
     {
-      "tag": "vless-reality-in",
+      "tag": "vless-xhttp-in",
       "port": ${x_port},
       "protocol": "vless",
       "settings": {
         "clients": [
           {
-            "id": "${x_uuid}",
-            "flow": "xtls-rprx-vision"
+            "id": "${x_uuid}"
           }
         ],
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "tcp",
+        "network": "xhttp",
         "security": "reality",
+        "xhttpSettings": {
+          "path": "${x_path}",
+          "mode": "auto"
+        },
         "realitySettings": {
           "show": false,
           "dest": "${x_sni}:443",
           "xver": 0,
           "serverNames": [
-            "${x_sni}"
+            "${x_sni}",
+            "www.microsoft.com"
           ],
           "privateKey": "${x_priv}",
           "shortIds": [
-            "${x_short_id}"
+            "${x_short_id}",
+            ""
           ]
         }
       },
       "sniffing": {
         "enabled": true,
         "destOverride": ["http", "tls", "quic"],
-        "routeOnly": false
+        "routeOnly": true
       }
     },
     {
@@ -2874,13 +2913,24 @@ render_xray_server_config() {
       "sniffing": {
         "enabled": true,
         "destOverride": ["http", "tls", "quic"],
-        "routeOnly": false
+        "routeOnly": true
       }
     }
   ],
   "outbounds": [
     {
       "tag": "masque-out",
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "dialerProxy": "usque-raw",
+          "domainStrategy": "UseIPv4",
+          "tcpNoDelay": true
+        }
+      }
+    },
+    {
+      "tag": "usque-raw",
       "protocol": "socks",
       "settings": {
         "servers": [
@@ -2899,8 +2949,10 @@ render_xray_server_config() {
     {
       "tag": "direct-udp",
       "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "UseIPv4v6"
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "UseIPv4v6"
+        }
       }
     }
   ],
@@ -2940,26 +2992,24 @@ EOF
       }
     }'
     else
-        local outbound_sockopt=""
+        local iface_field=""
         if [ "$exit_mode" = "direct" ]; then
             local wan_dev
             wan_dev=$(get_wan_if)
             if [ -n "$wan_dev" ] && [ -d "/sys/class/net/$wan_dev" ]; then
-                outbound_sockopt=',
-      "streamSettings": {
-        "sockopt": {
-          "interface": "'"$wan_dev"'",
-          "tcpNoDelay": true
-        }
-      }'
+                iface_field="\"interface\": \"${wan_dev}\","
             fi
         fi
         outbound_json='{
       "tag": "direct",
       "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "UseIPv4v6"
-      }'"${outbound_sockopt}"'
+      "streamSettings": {
+        "sockopt": {
+          '"${iface_field}"'
+          "domainStrategy": "UseIPv4v6",
+          "tcpNoDelay": true
+        }
+      }
     }'
     fi
 
@@ -2970,37 +3020,43 @@ EOF
   },
   "inbounds": [
     {
-      "tag": "vless-reality-in",
+      "tag": "vless-xhttp-in",
       "port": ${x_port},
       "protocol": "vless",
       "settings": {
         "clients": [
           {
-            "id": "${x_uuid}",
-            "flow": "xtls-rprx-vision"
+            "id": "${x_uuid}"
           }
         ],
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "tcp",
+        "network": "xhttp",
         "security": "reality",
+        "xhttpSettings": {
+          "path": "${x_path}",
+          "mode": "auto"
+        },
         "realitySettings": {
           "show": false,
           "dest": "${x_sni}:443",
           "xver": 0,
           "serverNames": [
-            "${x_sni}"
+            "${x_sni}",
+            "www.microsoft.com"
           ],
           "privateKey": "${x_priv}",
           "shortIds": [
-            "${x_short_id}"
+            "${x_short_id}",
+            ""
           ]
         }
       },
       "sniffing": {
         "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     }
   ],
@@ -3012,7 +3068,7 @@ EOF
     "rules": [
       {
         "type": "field",
-        "inboundTag": ["vless-reality-in"],
+        "inboundTag": ["vless-xhttp-in"],
         "outboundTag": "direct"
       }
     ]
@@ -3027,19 +3083,23 @@ render_xray_cascade_s1_config() {
     local s1_uuid="$2"
     local s1_priv="$3"
     local s1_short_id="$4"
-    local s1_sni="$5"
+    local s1_sni="${5:-www.microsoft.com}"
     local s2_ip="$6"
     local s2_port="$7"
     local s2_uuid="$8"
     local s2_pub="$9"
     local s2_short_id="${10}"
-    local s2_sni="${11}"
+    local s2_sni="${11:-www.microsoft.com}"
+    local s1_path="${12:-${XRAY_XHTTP_PATH:-/xhttp-stream}}"
+    local s2_path="${13:-${S2_XRAY_PATH:-/xhttp-stream}}"
+    [[ "$s1_path" != /* ]] && s1_path="/${s1_path}"
+    [[ "$s2_path" != /* ]] && s2_path="/${s2_path}"
 
     local wan_dev
     wan_dev=$(get_wan_if)
     local frag_iface_line=""
     if [ -n "$wan_dev" ] && [ -d "/sys/class/net/$wan_dev" ]; then
-        frag_iface_line=""interface": "${wan_dev}","
+        frag_iface_line="\"interface\": \"${wan_dev}\","
     fi
 
     mkdir -p /etc/xray
@@ -3050,37 +3110,43 @@ render_xray_cascade_s1_config() {
   },
   "inbounds": [
     {
-      "tag": "vless-reality-in",
+      "tag": "vless-xhttp-in",
       "port": ${s1_port},
       "protocol": "vless",
       "settings": {
         "clients": [
           {
-            "id": "${s1_uuid}",
-            "flow": "xtls-rprx-vision"
+            "id": "${s1_uuid}"
           }
         ],
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "tcp",
+        "network": "xhttp",
         "security": "reality",
+        "xhttpSettings": {
+          "path": "${s1_path}",
+          "mode": "auto"
+        },
         "realitySettings": {
           "show": false,
           "dest": "${s1_sni}:443",
           "xver": 0,
           "serverNames": [
-            "${s1_sni}"
+            "${s1_sni}",
+            "www.microsoft.com"
           ],
           "privateKey": "${s1_priv}",
           "shortIds": [
-            "${s1_short_id}"
+            "${s1_short_id}",
+            ""
           ]
         }
       },
       "sniffing": {
         "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     },
     {
@@ -3094,7 +3160,8 @@ render_xray_cascade_s1_config() {
       },
       "sniffing": {
         "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     }
   ],
@@ -3110,16 +3177,19 @@ render_xray_cascade_s1_config() {
             "users": [
               {
                 "id": "${s2_uuid}",
-                "encryption": "none",
-                "flow": "xtls-rprx-vision"
+                "encryption": "none"
               }
             ]
           }
         ]
       },
       "streamSettings": {
-        "network": "tcp",
+        "network": "xhttp",
         "security": "reality",
+        "xhttpSettings": {
+          "path": "${s2_path}",
+          "mode": "auto"
+        },
         "realitySettings": {
           "show": false,
           "fingerprint": "chrome",
@@ -3137,9 +3207,6 @@ render_xray_cascade_s1_config() {
     {
       "tag": "fragment",
       "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "AsIs"
-      },
       "streamSettings": {
         "finalmask": {
           "tcp": [
@@ -3155,6 +3222,7 @@ render_xray_cascade_s1_config() {
         },
         "sockopt": {
           ${frag_iface_line}
+          "domainStrategy": "AsIs",
           "tcpNoDelay": true
         }
       }
@@ -3165,7 +3233,7 @@ render_xray_cascade_s1_config() {
     "rules": [
       {
         "type": "field",
-        "inboundTag": ["vless-reality-in", "socks-in"],
+        "inboundTag": ["vless-xhttp-in", "socks-in"],
         "outboundTag": "proxy"
       }
     ]
@@ -3181,15 +3249,16 @@ render_xray_client_config() {
     local s2_uuid="$3"
     local s2_pub="$4"
     local s2_short_id="$5"
-    local s2_sni="$6"
+    local s2_sni="${6:-www.microsoft.com}"
     local s1_port="${7:-443}"
-    local s1_sni="${8:-gateway.icloud.com}"
+    local s1_sni="${8:-www.microsoft.com}"
+    local s2_path="${9:-/xhttp-stream}"
     generate_xray_reality_credentials || return 1
-    render_xray_cascade_s1_config "$s1_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$s1_sni" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni"
+    render_xray_cascade_s1_config "$s1_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$s1_sni" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$GEN_X_PATH" "$s2_path"
 }
 
 setup_cascade_xray_server2_foreign() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): VLESS-REALITY (XTLS VISION) -> MASQUE / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): VLESS-XHTTP (REALITY) -> MASQUE / ЧИСТЫЙ IP ===${C_RESET}"
     local cur_role=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
@@ -3198,18 +3267,20 @@ setup_cascade_xray_server2_foreign() {
     fi
 
     local x_port="443"
-    prompt_default "1/3. Введите TCP-порт для приема VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
+    prompt_default "1/3. Введите TCP-порт для приема VLESS-XHTTP (рекомендуется 443):" "$x_port" x_port
     if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
     x_port="${x_port//[^0-9]/}"
     [ -z "$x_port" ] && x_port="443"
 
-    local x_sni="gateway.icloud.com"
-    prompt_default "2/3. Введите целевой SNI-домен для маскировки REALITY (gateway.icloud.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
+    local x_sni="www.microsoft.com"
+    prompt_default "2/3. Введите целевой SNI-домен для маскировки REALITY (www.microsoft.com, www.amd.com, itunes.apple.com):" "$x_sni" x_sni
     if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
 
     local exit_choice=""
-    if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Xray REALITY)" "
-Как выпускать трафик из Xray в интернет?" 16 "$WT_WIDTH" 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)"     "2" " Через Cloudflare MASQUE (Usque — чистый IP CDN Cloudflare без капч и блокировок)"; then
+    if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (VLESS-XHTTP)" "
+Как выпускать трафик из Xray в интернет?" 16 "$WT_WIDTH" 2 "exit_choice" \
+    "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)" \
+    "2" " Через Cloudflare MASQUE (Usque — чистый IP CDN Cloudflare без капч и блокировок)"; then
         return 0
     fi
 
@@ -3221,7 +3292,7 @@ setup_cascade_xray_server2_foreign() {
     local ports_to_scan=("${x_port}/tcp")
     [ "$exit_mode" = "warp" ] && ports_to_scan+=("1080/tcp" "10808/tcp")
 
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 3 — Каскад: VLESS-REALITY (Сервер 2 Зарубеж)" "$allow_self" "${ports_to_scan[@]}"; then
+    if ! scan_and_warn_occupied_ports_interactive "Пункт 3 — Каскад: VLESS-XHTTP (Сервер 2 Зарубеж)" "$allow_self" "${ports_to_scan[@]}"; then
         return 0
     fi
 
@@ -3234,10 +3305,17 @@ setup_cascade_xray_server2_foreign() {
     local x_pub="$GEN_X_PUB"
     local x_uuid="$GEN_X_UUID"
     local x_short_id="$GEN_X_SHORT_ID"
+    local x_path="$GEN_X_PATH"
 
     apply_foreign_exit_mode "$exit_mode"
-    render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "$exit_mode"
+    render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "$exit_mode" "$x_path"
     write_xray_service
+
+    if ! /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
+        echo -e "${C_RED} Ошибка проверки синтаксиса /etc/xray/config.json:${C_RESET}"
+        /usr/local/bin/xray run -test -c /etc/xray/config.json || true
+        return 1
+    fi
 
     silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
@@ -3250,7 +3328,7 @@ setup_cascade_xray_server2_foreign() {
     fi
 
     if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${x_port}/tcp" comment 'Xray REALITY XTLS Vision'
+        silent_run ufw allow "${x_port}/tcp" comment 'Xray VLESS XHTTP REALITY'
         silent_run ufw reload
     fi
 
@@ -3268,14 +3346,10 @@ setup_cascade_xray_server2_foreign() {
     fi
 
     local bridge_token
-    bridge_token=$(printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 | tr -d '
-
- ')
+    bridge_token=$(printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 | tr -d '\n\r ')
     local bridge_token_v6=""
     if [ -n "$pub_ipv6" ]; then
-        bridge_token_v6=$(printf '%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" | base64 | tr -d '
-
- ')
+        bridge_token_v6=$(printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 | tr -d '\n\r ')
     fi
 
     cat << EOF > /etc/default/bobarev-cascade
@@ -3287,6 +3361,7 @@ XRAY_PRIV="$x_priv"
 XRAY_PUB="$x_pub"
 XRAY_SHORT_ID="$x_short_id"
 XRAY_SNI="$x_sni"
+XRAY_XHTTP_PATH="$x_path"
 XRAY_TOKEN="$bridge_token"
 XRAY_TOKEN_V6="$bridge_token_v6"
 SERVER_PUB_IP="$pub_ip"
@@ -3294,15 +3369,12 @@ SERVER_PUB_IPV6="$pub_ipv6"
 EOF
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "
-${C_GREEN} Сервер 2 (Xray VLESS-REALITY XTLS Vision [порт: $x_port/tcp, SNI: $x_sni, выход: $exit_mode]) успешно запущен!${C_RESET}"
-    echo -e "
-${C_CYAN} ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ — КАСКАД VLESS-REALITY + FINALMASK):${C_RESET}"
+    echo -e "\n${C_GREEN} Сервер 2 (Xray VLESS-XHTTP [порт: $x_port/tcp, Path: $x_path, SNI: $x_sni, выход: $exit_mode]) успешно запущен!${C_RESET}"
+    echo -e "\n${C_CYAN} ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ — КАСКАД VLESS-XHTTP + FINALMASK):${C_RESET}"
     echo -e "   ${C_BOLD}Основной токен (IPv4):${C_RESET}"
     echo -e "    ${C_BOLD}${C_GREEN}${bridge_token}${C_RESET}"
     if [ -n "$bridge_token_v6" ]; then
-        echo -e "
-   ${C_BOLD}Резервный токен (IPv6 — обход блокировки IPv4):${C_RESET}"
+        echo -e "\n   ${C_BOLD}Резервный токен (IPv6 — обход блокировки IPv4):${C_RESET}"
         echo -e "    ${C_BOLD}${C_CYAN}${bridge_token_v6}${C_RESET}"
     fi
     echo ""
@@ -3310,53 +3382,53 @@ ${C_CYAN} ТОКЕНЫ ДЛЯ СЕРВЕРА 1 (РФ — КАСКАД VLESS-REAL
 }
 
 setup_cascade_xray_server1_ru() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS-REALITY (XTLS VISION) -> FINALMASK -> СЕРВЕР 2 ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS-XHTTP -> FINALMASK -> СЕРВЕР 2 ===${C_RESET}"
     local s1_port="443"
-    local s1_sni="gateway.icloud.com"
+    local s1_sni="www.microsoft.com"
     local cur_role=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         s1_port="${XRAY_PORT:-443}"
-        s1_sni="${XRAY_SNI:-gateway.icloud.com}"
+        s1_sni="${XRAY_SNI:-www.microsoft.com}"
         cur_role="${CASCADE_ROLE:-}"
     fi
 
     local token_in=""
-    prompt_clean "1/3. Вставьте Токен соединения Xray REALITY с Зарубежного Сервера 2:" token_in
+    prompt_clean "1/3. Вставьте Токен соединения VLESS-XHTTP с Зарубежного Сервера 2:" token_in
     if [ "$MODULE_CANCELED" = true ] || [ -z "$token_in" ]; then return 0; fi
 
     local clean_b64
     clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
     local decoded
-    decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '
-' || echo "")
-    local s2_ip="" s2_port="" s2_uuid="" s2_pub="" s2_short_id="" s2_sni=""
-    IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni <<< "$decoded"
+    decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\r\n' || echo "")
+    local s2_ip="" s2_port="" s2_uuid="" s2_pub="" s2_short_id="" s2_sni="" s2_path=""
+    IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni s2_path <<< "$decoded"
+    [ -z "$s2_path" ] && s2_path="/xhttp-stream"
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_uuid" ] || [ -z "$s2_pub" ]; then
-        echo -e "${C_RED} Ошибка: Неверный формат Токена Xray REALITY! Скопируйте свежий токен с Сервера 2.${C_RESET}"
+        echo -e "${C_RED} Ошибка: Неверный формат Токена Xray! Скопируйте свежий токен с Сервера 2.${C_RESET}"
         return 1
     fi
 
-    prompt_default "2/3. TCP-порт на этом РФ-сервере для подключения ваших устройств (рекомендуется 443 или 8443):" "$s1_port" s1_port
+    prompt_default "2/3. TCP-порт на этом РФ-сервере для подключения ваших устройств (рекомендуется 443):" "$s1_port" s1_port
     if [ "$MODULE_CANCELED" = true ] || [ -z "$s1_port" ]; then return 0; fi
     s1_port="${s1_port//[^0-9]/}"
     [ -z "$s1_port" ] && s1_port="443"
 
     local allow_self=""
     [ "$cur_role" = "ru_xray_entry" ] && allow_self="xray"
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 3 — Каскад: VLESS-REALITY + Finalmask (Сервер 1 РФ)" "$allow_self" "${s1_port}/tcp" "10808/tcp"; then
+    if ! scan_and_warn_occupied_ports_interactive "Пункт 3 — Каскад: VLESS-XHTTP + Finalmask (Сервер 1 РФ)" "$allow_self" "${s1_port}/tcp" "10808/tcp"; then
         return 0
     fi
 
-    prompt_default "3/3. Целевой SNI-домен для маскировки входа на РФ-сервере (gateway.icloud.com, dl.google.com, www.microsoft.com):" "$s1_sni" s1_sni
+    prompt_default "3/3. Целевой SNI-домен для маскировки входа на РФ-сервере (www.microsoft.com, www.amd.com, itunes.apple.com):" "$s1_sni" s1_sni
     if [ "$MODULE_CANCELED" = true ] || [ -z "$s1_sni" ]; then return 0; fi
 
     ensure_xray_installed || return 1
     enable_routing_optimizations || true
 
-    echo -e "${C_BLUE} Запуск каскадного моста VLESS-REALITY (XTLS Vision + Finalmask -> ${s2_ip}:${s2_port}) без остановки Tailscale...${C_RESET}"
+    echo -e "${C_BLUE} Запуск каскадного моста VLESS-XHTTP (Finalmask -> ${s2_ip}:${s2_port}, Path: ${s2_path}) без остановки Tailscale...${C_RESET}"
     if [[ "$s2_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         while ip rule del to "$s2_ip" lookup main priority 101 2>/dev/null; do :; done
         ip rule add to "$s2_ip" lookup main priority 101 2>/dev/null || true
@@ -3367,9 +3439,16 @@ setup_cascade_xray_server1_ru() {
     local s1_priv="$GEN_X_PRIV"
     local s1_pub="$GEN_X_PUB"
     local s1_short_id="$GEN_X_SHORT_ID"
+    local s1_path="$GEN_X_PATH"
 
-    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni"
+    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$s1_path" "$s2_path"
     write_xray_service
+
+    if ! /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
+        echo -e "${C_RED} Ошибка проверки синтаксиса /etc/xray/config.json:${C_RESET}"
+        /usr/local/bin/xray run -test -c /etc/xray/config.json || true
+        return 1
+    fi
 
     silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
@@ -3395,12 +3474,14 @@ XRAY_PRIV="${s1_priv}"
 XRAY_PUB="${s1_pub}"
 XRAY_SHORT_ID="${s1_short_id}"
 XRAY_SNI="${s1_sni}"
+XRAY_XHTTP_PATH="${s1_path}"
 S2_XRAY_IP="${s2_ip}"
 S2_XRAY_PORT="${s2_port}"
 S2_XRAY_UUID="${s2_uuid}"
 S2_XRAY_PUB="${s2_pub}"
 S2_XRAY_SHORT_ID="${s2_short_id}"
 S2_XRAY_SNI="${s2_sni}"
+S2_XRAY_PATH="${s2_path}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
 TCP_TUNE_PROFILE="balanced"
@@ -3410,11 +3491,11 @@ EOF
     apply_naive_tcp_tuning_profile "balanced"
 
     if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${s1_port}/tcp" comment 'VLESS REALITY XTLS Vision'
+        silent_run ufw allow "${s1_port}/tcp" comment 'VLESS XHTTP REALITY'
         silent_run ufw reload
     fi
 
-    echo -e "${C_BLUE} Проверка выходного IP через каскадный мост Xray REALITY (127.0.0.1:10808 -> Finalmask -> ${s2_ip}:${s2_port})...${C_RESET}"
+    echo -e "${C_BLUE} Проверка выходного IP через каскадный мост VLESS-XHTTP (127.0.0.1:10808 -> Finalmask -> ${s2_ip}:${s2_port})...${C_RESET}"
     local test_ip="" probe_url="" direct_ip="$pub_ip"
     for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org" "https://ip.gs" "https://ifconfig.me/ip"; do
         if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
@@ -3425,14 +3506,13 @@ EOF
         if [[ "$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; else test_ip=""; fi
     done
     if [ -z "$test_ip" ]; then
-        echo -e "${C_RED} Каскадный мост Xray REALITY (127.0.0.1:10808 -> ${s2_ip}:${s2_port}) не вернул внешний IPv4.${C_RESET}"
-        echo -e "${C_YELLOW} Проверьте доступность TCP-порта ${s2_port} на Сервере 2 (${s2_ip}), его firewall и журнал:${C_RESET}"
+        echo -e "${C_RED} Каскадный мост VLESS-XHTTP (127.0.0.1:10808 -> ${s2_ip}:${s2_port}) не вернул внешний IPv4.${C_RESET}"
+        echo -e "${C_YELLOW} Проверьте, что на Сервере 2 (${s2_ip}) также обновлен скрипт до версии v3.20.0 (VLESS-XHTTP) и перезапущен Сервер 2!${C_RESET}"
         echo "journalctl -u bobarev-xray.service -n 50 --no-pager"
         return 1
     fi
-    echo -e "
-${C_GREEN} Каскад VLESS-REALITY (XTLS Vision -> Finalmask -> Сервер 2 Зарубеж) успешно запущен!${C_RESET}"
-    echo -e "   Входной IP Сервера 1 (РФ):     ${C_BLUE}${direct_ip:-не определён} (порт ${s1_port}/tcp)${C_RESET}"
+    echo -e "\n${C_GREEN} Каскад VLESS-XHTTP (SplitHTTP + Finalmask -> Сервер 2 Зарубеж) успешно запущен!${C_RESET}"
+    echo -e "   Входной IP Сервера 1 (РФ):     ${C_BLUE}${direct_ip:-не определён} (порт ${s1_port}/tcp, Path: ${s1_path})${C_RESET}"
     echo -e "   Выходной IP каскада (Сервер 2): ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     print_vless_shadowrocket_links
 }
@@ -3447,20 +3527,26 @@ manage_cascade_xray_menu() {
                 source /etc/default/bobarev-cascade
                 if [ "${CASCADE_ROLE:-}" = "foreign_xray_exit" ]; then
                     if is_warp_active; then
-                        c_state="Активен Сервер 2 (Зарубеж: VLESS-REALITY -> Cloudflare MASQUE)"
+                        c_state="Активен Сервер 2 (Зарубеж: VLESS-XHTTP -> Cloudflare MASQUE)"
                     else
-                        c_state="Активен Сервер 2 (Зарубеж: VLESS-REALITY -> Чистый IP сервера)"
+                        c_state="Активен Сервер 2 (Зарубеж: VLESS-XHTTP -> Чистый IP сервера)"
                     fi
                 elif [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ]; then
-                    c_state="Активен Сервер 1 (РФ: VLESS-REALITY -> Finalmask -> Сервер 2 ${XRAY_SERVER:-})"
+                    c_state="Активен Сервер 1 (РФ: VLESS-XHTTP -> Finalmask -> Сервер 2 ${XRAY_SERVER:-})"
                 fi
             fi
         fi
 
         local c_choice
-        if ! smart_menu " Каскад: VLESS-REALITY (XTLS Vision + Finalmask + MASQUE)" "
-Статус моста: $c_state
-Выберите действие:" 20 "$WT_WIDTH" 8 "c_choice"         "1" " Сервер 2 (Зарубеж): VLESS-REALITY (XTLS Vision) -> Выход"         "2" " Сервер 1 (РФ): VLESS-REALITY -> Finalmask -> Сервер 2"         "3" " Управление ключами VLESS-REALITY и смена SNI"         "4" " Показать ссылки и QR-коды для Shadowrocket"         "5" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE"         "6" " Показать токен подключения для Сервера 1"         "7" " Остановить службы Xray"         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
+        if ! smart_menu " Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)" "\nСтатус моста: $c_state\nВыберите действие:" 20 "$WT_WIDTH" 8 "c_choice" \
+        "1" " Сервер 2 (Зарубеж): VLESS-XHTTP (SplitHTTP) -> Выход" \
+        "2" " Сервер 1 (РФ): VLESS-XHTTP -> Finalmask -> Сервер 2" \
+        "3" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
+        "4" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
+        "5" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
+        "6" " Показать токен подключения для Сервера 1" \
+        "7" " Остановить службы Xray" \
+        "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -3476,18 +3562,15 @@ manage_cascade_xray_menu() {
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${XRAY_TOKEN:-}" ]; then
-                        echo -e "${C_CYAN} Токены Xray REALITY для подключения Сервера 1 (РФ):${C_RESET}
-"
+                        echo -e "${C_CYAN} Токены VLESS-XHTTP для подключения Сервера 1 (РФ):${C_RESET}\n"
                         echo -e "   ${C_BOLD}Основной токен (IPv4):${C_RESET}"
-                        echo -e "    ${C_BOLD}${C_GREEN}${XRAY_TOKEN}${C_RESET}
-"
+                        echo -e "    ${C_BOLD}${C_GREEN}${XRAY_TOKEN}${C_RESET}\n"
                         if [ -n "${XRAY_TOKEN_V6:-}" ]; then
                             echo -e "   ${C_BOLD}Резервный токен (IPv6):${C_RESET}"
-                            echo -e "    ${C_BOLD}${C_CYAN}${XRAY_TOKEN_V6}${C_RESET}
-"
+                            echo -e "    ${C_BOLD}${C_CYAN}${XRAY_TOKEN_V6}${C_RESET}\n"
                         fi
                     else
-                        echo -e "${C_YELLOW} Токен Xray REALITY еще не создан на этом сервере.${C_RESET}"
+                        echo -e "${C_YELLOW} Токен VLESS-XHTTP еще не создан на этом сервере.${C_RESET}"
                     fi
                 fi
                 pause_enter
@@ -9015,8 +9098,8 @@ setup_vless_reality_mullvad_inbound() {
   return 1
  fi
  ensure_xray_installed || return 1
- local x_sni="gateway.icloud.com"
- prompt_default "2/2. Введите SNI-домен для маскировки REALITY (gateway.icloud.com, dl.google.com):" "$x_sni" x_sni
+ local x_sni="www.microsoft.com"
+ prompt_default "2/2. Введите SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com):" "$x_sni" x_sni
  if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
 
  generate_xray_reality_credentials || return 1
@@ -9025,7 +9108,7 @@ setup_vless_reality_mullvad_inbound() {
  local x_uuid="$GEN_X_UUID"
  local x_short_id="$GEN_X_SHORT_ID"
 
- render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "mullvad"
+ render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "mullvad" "$GEN_X_PATH"
  write_xray_service
  silent_run systemctl enable --now bobarev-xray.service
  systemctl restart bobarev-xray.service || return 1
@@ -9064,6 +9147,7 @@ XRAY_PRIV="${x_priv}"
 XRAY_PUB="${x_pub}"
 XRAY_SHORT_ID="${x_short_id}"
 XRAY_SNI="${x_sni}"
+XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ipv6}"
 EOF
@@ -10284,7 +10368,7 @@ bobarev_cli_vless_status() {
         source /etc/default/bobarev-cascade
         echo "Роль: ${CASCADE_ROLE:-unknown}"
         echo "Порт: ${XRAY_PORT:-443}/tcp"
-        echo "SNI:  ${XRAY_SNI:-gateway.icloud.com}"
+        echo "SNI:  ${XRAY_SNI:-www.microsoft.com}"
         echo "Выход: ${VLESS_OUT_MODE:-${FOREIGN_EXIT_MODE:-direct}}"
     else
         echo "Конфигурация не найдена."
@@ -10422,7 +10506,7 @@ menu_connections_proxies() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-REALITY & HYSTERIA 2)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 19 "$WT_WIDTH" 7 sub_choice             "1" "Автономный VLESS-REALITY (Один сервер + WG Dual-Gateway)"             "2" "Автономный VLESS-REALITY (Один сервер + Cloudflare MASQUE)"             "3" "Каскад: VLESS-REALITY (XTLS Vision + Finalmask + MASQUE)"             "4" "Каскад / Сервер: VLESS-REALITY + Hysteria 2 QUIC (+ MASQUE)"             "5" "Шлюз: VLESS-REALITY + Tailscale / Mullvad Exit Node"             "6" "Каскад: VLESS-REALITY + Tailscale (2 сервера + MASQUE)"             "0" "⬅ Назад"; then
+        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-REALITY & HYSTERIA 2)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 19 "$WT_WIDTH" 7 sub_choice             "1" "Автономный VLESS-XHTTP (Один сервер + WG Dual-Gateway)"             "2" "Автономный VLESS-XHTTP (Один сервер + Cloudflare MASQUE)"             "3" "Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)"             "4" "Каскад / Сервер: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)"             "5" "Шлюз: VLESS-XHTTP + Tailscale / Mullvad Exit Node"             "6" "Каскад: VLESS-XHTTP + Tailscale (2 сервера + MASQUE)"             "0" "⬅ Назад"; then
             return 0
         fi
         if [ -z "$sub_choice" ] || [ "$sub_choice" = "0" ]; then return 0; fi
@@ -10488,7 +10572,7 @@ while true; do
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
     tz="${tz#Etc/}"
 
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v${SCRIPT_VERSION}" --menu "\nХост: $(hostname) ($(get_system_type_short)) | Часовой пояс: $tz\nUFW: $ufw_status | Tailscale: $ts_main_status\n\nВыберите раздел:" 20 "$WT_WIDTH" 6         "1" "🛠 Базовая настройка и безопасность"         "2" "🌍 Прокси, VPN и Каскады (VLESS-REALITY)"         "3" "🔒 Приватная сеть Tailscale и DERP"         "4" "🖧 Локальный маршрутизатор (LAN / SBC)"         "5" "⚙️ Диагностика, Аудит и Бэкап"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v${SCRIPT_VERSION}" --menu "\nХост: $(hostname) ($(get_system_type_short)) | Часовой пояс: $tz\nUFW: $ufw_status | Tailscale: $ts_main_status\n\nВыберите раздел:" 20 "$WT_WIDTH" 6         "1" "🛠 Базовая настройка и безопасность"         "2" "🌍 Прокси, VPN и Каскады (VLESS-XHTTP)"         "3" "🔒 Приватная сеть Tailscale и DERP"         "4" "🖧 Локальный маршрутизатор (LAN / SBC)"         "5" "⚙️ Диагностика, Аудит и Бэкап"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

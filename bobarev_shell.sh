@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.0 — универсальный инструмент безопасности, маршрутизации Tailscale и анти-DPI туннелирования (VLESS-XHTTP + REALITY + Finalmask, Hysteria 2 и Cloudflare MASQUE).
+# Bobarev Shell v3.20.1 — универсальный инструмент безопасности, маршрутизации Tailscale и анти-DPI туннелирования (VLESS / XHTTP + REALITY + Finalmask, Hysteria 2 и Cloudflare MASQUE).
 # Оптимизирован для развертывания на чистом сервере с сохранением приоритетного соединения Tailscale и бережным интерактивным контролем портов.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.0"
+SCRIPT_VERSION="3.20.1"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1230,7 +1230,7 @@ setup_standalone_vless_wg() {
                 pause_enter
                 ;;
             5)
-                echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО VLESS-REALITY (XTLS VISION) ===${C_RESET}"
+                echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО VLESS / XHTTP (SplitHTTP + REALITY) ===${C_RESET}"
                 local x_port="443"
                 local x_sni="www.microsoft.com"
                 if [ -f /etc/default/bobarev-cascade ]; then
@@ -1492,6 +1492,15 @@ install_and_setup_usque() {
     fi
 
     if [ ! -s /etc/usque/config.json ]; then
+        if ! curl -4 -fsS --connect-timeout 4 --max-time 6 https://api.cloudflareclient.com >/dev/null 2>&1; then
+            echo -e "${C_RED} Внимание: узел регистрации Cloudflare WARP (api.cloudflareclient.com:443) заблокирован ТСПУ на этом сервере!${C_RESET}"
+            echo -e "${C_YELLOW} На серверах внутри РФ прямой доступ к Cloudflare MASQUE блокируется провайдерами."
+            echo -e " Решение:"
+            echo -e "   1) Для связки с Cloudflare MASQUE используйте Зарубежный Сервер 2 (bobarev-servhost);"
+            echo -e "   2) А на этом РФ-сервере настройте Каскад (Раздел 2 -> Пункт 3) к Зарубежному Серверу 2!"
+            echo -e "   3) Либо временно включите зарубежный Tailscale Exit-Node (Раздел 3 -> 9) на время выполнения регистрации.${C_RESET}"
+            return 1
+        fi
         echo -e "${C_CYAN} Регистрация нового устройства в Cloudflare WARP (MASQUE)...${C_RESET}"
         echo -e "${C_BLUE} При запросе подтверждения условий Cloudflare (ToS) введите 'y' или нажмите Enter.${C_RESET}"
         (
@@ -1818,7 +1827,7 @@ setup_standalone_vless_masque() {
                 pause_enter
                 ;;
             7)
-                echo -e "${C_CYAN} === НАСТРОЙКА СВЯЗКИ VLESS-REALITY (XTLS VISION) + CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
+                echo -e "${C_CYAN} === НАСТРОЙКА СВЯЗКИ VLESS / XHTTP (SplitHTTP + REALITY) + CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
                 local x_port="443"
                 local x_sni="www.microsoft.com"
                 if [ -f /etc/default/bobarev-cascade ]; then
@@ -1951,7 +1960,7 @@ EOF
                 fi
 
                 echo ""
-                echo -e "${C_GREEN} === СВЯЗКА VLESS-REALITY (XTLS VISION) + CLOUDFLARE MASQUE УСПЕШНО ЗАПУЩЕНА! ===${C_RESET}"
+                echo -e "${C_GREEN} === СВЯЗКА VLESS / XHTTP (SplitHTTP + REALITY) + CLOUDFLARE MASQUE УСПЕШНО ЗАПУЩЕНА! ===${C_RESET}"
                 verify_usque_masque_ip
                 echo ""
                 print_vless_shadowrocket_links
@@ -1979,7 +1988,7 @@ setup_standalone_naive_masque() {
 }
 
 setup_cascade_server1_ru() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS-REALITY (XTLS VISION) -> TAILSCALE ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS / XHTTP (SplitHTTP + REALITY) -> TAILSCALE ===${C_RESET}"
     local saved_exit="" x_port="443" x_sni="www.microsoft.com" cur_role=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
@@ -2531,7 +2540,7 @@ ${C_CYAN} ТОКЕНЫ ДЛЯ КАСКАДА С СЕРВЕРОМ 1 (РФ):${C_RE
 }
 
 setup_cascade_hysteria_server1_ru() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS-REALITY (XTLS VISION) -> HYSTERIA 2 ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS / XHTTP (SplitHTTP + REALITY) -> HYSTERIA 2 ===${C_RESET}"
     local x_port="443" x_sni="www.microsoft.com" cur_role=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
@@ -5214,8 +5223,17 @@ ts42_control() {
    printf '[Service]
 Environment="TS_FORCE_NOISE_443=true"
 ' > "$file" || return 1
+   if [ -f /etc/default/tailscaled ]; then
+       if grep -q "^FLAGS=" /etc/default/tailscaled; then
+           sed -i 's/^FLAGS=.*/FLAGS="--port=443"/' /etc/default/tailscaled
+       else
+           echo 'FLAGS="--port=443"' >> /etc/default/tailscaled
+       fi
+   else
+       echo 'FLAGS="--port=443"' > /etc/default/tailscaled
+   fi
    if systemctl daemon-reload && systemctl restart tailscaled && ts42_wait_running; then
-    echo -e "${C_GREEN} Принудительный режим TCP 443 успешно активирован.${C_RESET}"
+    echo -e "${C_GREEN} Принудительный режим TCP/UDP 443 успешно активирован (порт 443 зафиксирован в /etc/default/tailscaled).${C_RESET}"
     return 0
    fi
    if [[ -n "$backup" ]]; then cp -a "$backup" "$file" || return 1; else rm -f "$file"; fi
@@ -5226,8 +5244,11 @@ Environment="TS_FORCE_NOISE_443=true"
    [[ -f "$file" ]] || { echo 'Принудительный режим TCP 443 не был включён.'; return 0; }
    nm_yes 'Отключить принудительный TCP 443 и перезапустить tailscaled?' || return 0
    rm -f "$file"
+   if [ -f /etc/default/tailscaled ]; then
+       sed -i 's/^FLAGS="--port=443"/FLAGS=""/' /etc/default/tailscaled
+   fi
    systemctl daemon-reload && systemctl restart tailscaled && ts42_wait_running
-   echo -e "${C_GREEN} Возвращён стандартный режим управления Tailscale.${C_RESET}"
+   echo -e "${C_GREEN} Возвращён стандартный режим управления Tailscale (стандартный порт 41641).${C_RESET}"
    ;;
  esac
 }
@@ -5334,7 +5355,13 @@ ts_smart_connect_exit_node() {
  [[ "$node" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || { echo -e "${C_RED}Некорректный адрес узла.${C_RESET}"; return 1; }
  nm_yes "Направить интернет-трафик через шлюз $node и закрепить его автозапуск при загрузке?" || return 0
  ts42_wait_running || return 1
- tailscale set --exit-node="$node" --exit-node-allow-lan-access=true || return 1
+ if [ "$(tailscale get advertise-exit-node 2>/dev/null || echo false)" = "true" ]; then
+  mkdir -p /etc/default
+  echo 'SAVED_ADVERTISE_EXIT="true"' > /etc/default/bobarev-tailscale-state
+  tailscale set --advertise-exit-node=false --exit-node="$node" --exit-node-allow-lan-access=true || return 1
+ else
+  tailscale set --exit-node="$node" --exit-node-allow-lan-access=true || return 1
+ fi
  if ! ts42_wait_default || ! ts42_ipv4; then
   echo -e "${C_RED}Шлюз $node не отвечает или нет выхода в интернет. Возвращаю прямой выход...${C_RESET}" >&2
   tailscale set --exit-node= 2>/dev/null || true
@@ -5362,6 +5389,13 @@ ts_smart_disconnect_exit_node() {
  fi
  systemctl disable --now bobarev-tailscale-exit-restore.service 2>/dev/null || true
  tailscale set --exit-node= 2>/dev/null || true
+ if [ -f /etc/default/bobarev-tailscale-state ] && grep -q 'SAVED_ADVERTISE_EXIT="true"' /etc/default/bobarev-tailscale-state 2>/dev/null; then
+  rm -f /etc/default/bobarev-tailscale-state
+  if prompt_yn "Вернуть этому серверу раздачу собственного интернета (Advertise Exit-Node), которая была активна до подключения к шлюзу?" "true"; then
+   tailscale set --advertise-exit-node=true 2>/dev/null || true
+   echo -e "${C_GREEN} Раздача собственного интернета (Advertise Exit-Node) восстановлена.${C_RESET}"
+  fi
+ fi
  echo -e "${C_GREEN}VPN-шлюз отключён. Устройство работает через прямой интернет (WAN).${C_RESET}"
  ts42_ipv4 || true
 }
@@ -7180,13 +7214,19 @@ mod_server_audit() {
         audit_human_row 'Защита SSH от перебора:' "$feat_off"
     fi
 
-    # 3. Прокси VLESS-REALITY (XTLS Vision)
+    # 3. Прокси VLESS / XHTTP (SplitHTTP + REALITY)
+    local vless_mode_desc="VLESS / XHTTP"
+    if [ -f /etc/xray/config.json ] && grep -q '"network"[[:space:]]*:[[:space:]]*"xhttp"' /etc/xray/config.json 2>/dev/null; then
+        vless_mode_desc="VLESS / XHTTP (SplitHTTP)"
+    elif [ -f /etc/xray/config.json ]; then
+        vless_mode_desc="VLESS / REALITY"
+    fi
     if is_vless_active; then
-        audit_human_row 'VLESS-REALITY (XTLS Vision):' "${C_GREEN}✔ Настроено (активен)${C_RESET}"
+        audit_human_row "Прокси ${vless_mode_desc}:" "${C_GREEN}✔ Настроено (активен)${C_RESET}"
     elif [ -f "/etc/xray/config.json" ]; then
-        audit_human_row 'VLESS-REALITY (XTLS Vision):' "${C_YELLOW}✔ Настроено (остановлен)${C_RESET}"
+        audit_human_row "Прокси ${vless_mode_desc}:" "${C_YELLOW}✔ Настроено (остановлен)${C_RESET}"
     else
-        audit_human_row 'VLESS-REALITY (XTLS Vision):' "$feat_off"
+        audit_human_row "Прокси ${vless_mode_desc}:" "$feat_off"
     fi
 
     # 4. Cloudflare MASQUE (Usque)
@@ -7201,7 +7241,11 @@ mod_server_audit() {
     # 5. Каскадные протоколы (Xray / Hysteria 2 / XRayMesh)
     local casc_feat="$feat_off"
     if systemctl is-active --quiet bobarev-xray.service 2>/dev/null; then
-        casc_feat="${C_GREEN}✔ Настроено (Xray VLESS REALITY)${C_RESET}"
+        if [ -f /etc/xray/config.json ] && grep -q '"network"[[:space:]]*:[[:space:]]*"xhttp"' /etc/xray/config.json 2>/dev/null; then
+            casc_feat="${C_GREEN}✔ Настроено (Xray VLESS / XHTTP)${C_RESET}"
+        else
+            casc_feat="${C_GREEN}✔ Настроено (Xray VLESS / REALITY)${C_RESET}"
+        fi
     elif systemctl is-active --quiet hysteria-client.service 2>/dev/null || systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
         casc_feat="${C_GREEN}✔ Настроено (Hysteria 2 QUIC)${C_RESET}"
     elif systemctl is-active --quiet xraymesh.service 2>/dev/null; then
@@ -9087,7 +9131,7 @@ BOBAREV_ENGINE_3146
 }
 
 setup_vless_reality_mullvad_inbound() {
- echo -e "${C_CYAN} === ВХОД VLESS-REALITY (XTLS VISION, IPv4 + IPv6) -> MULLVAD EXIT NODE ===${C_RESET}"
+ echo -e "${C_CYAN} === ВХОД VLESS / XHTTP (SplitHTTP + REALITY, IPv4 + IPv6) -> MULLVAD EXIT NODE ===${C_RESET}"
  local x_port="443"
  prompt_default "1/2. Введите TCP-порт для VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
  if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
@@ -10340,6 +10384,10 @@ nm_bound() {
     return 1
 }
 
+nm_yes() {
+    prompt_yn "$1" "${2:-false}"
+}
+
 # ==============================================================================
 # ОБРАБОТКА CLI-АРГУМЕНТОВ И БЫСТРЫХ КОМАНД
 # ==============================================================================
@@ -10364,7 +10412,7 @@ bobarev_cli_status() {
 }
 
 bobarev_cli_vless_status() {
-    echo "=== BOBAREV VLESS-REALITY STATUS ==="
+    echo "=== BOBAREV VLESS / XHTTP STATUS ==="
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
@@ -10376,9 +10424,9 @@ bobarev_cli_vless_status() {
         echo "Конфигурация не найдена."
     fi
     if systemctl is-active --quiet bobarev-xray.service; then
-        echo "Xray VLESS-REALITY: активен"
+        echo "Xray VLESS / XHTTP: активен"
     else
-        echo "Xray VLESS-REALITY: не активен"
+        echo "Xray VLESS / XHTTP: не активен"
     fi
     return 0
 }

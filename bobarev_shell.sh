@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.1 — универсальный инструмент безопасности, маршрутизации Tailscale и анти-DPI туннелирования (VLESS / XHTTP + REALITY + Finalmask, Hysteria 2 и Cloudflare MASQUE).
-# Оптимизирован для развертывания на чистом сервере с сохранением приоритетного соединения Tailscale и бережным интерактивным контролем портов.
+# Bobarev Shell v3.20.2 — модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
+# Скрипт выполняет бережную проверку занятых портов без принудительной остановки активных служб и сохраняет связность управляющих туннелей.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.1"
+SCRIPT_VERSION="3.20.2"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1164,6 +1164,74 @@ disable_hybrid_wg_routing() {
     echo -e "${C_GREEN} Туннель wg0 отключен. VLESS-REALITY переведен на прямой выход в интернет.${C_RESET}"
 }
 
+
+setup_self_steal_local_backend() {
+    local domain="$1"
+    local backend_port="${2:-8443}"
+    echo -e "${C_BLUE} Подготовка локального HTTPS-сервера (Self-steal SNI) для домена ${domain} на 127.0.0.1:${backend_port}...${C_RESET}"
+
+    if ! command -v nginx >/dev/null 2>&1 || ! command -v certbot >/dev/null 2>&1; then
+        echo -e "${C_BLUE} Установка nginx и certbot...${C_RESET}"
+        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx certbot >/dev/null 2>&1 || {
+            echo -e "${C_RED} Ошибка: Не удалось установить nginx и certbot.${C_RESET}"
+            return 1
+        }
+    fi
+
+    local cert_dir="/etc/letsencrypt/live/${domain}"
+    if [[ ! -f "${cert_dir}/fullchain.pem" || ! -f "${cert_dir}/privkey.pem" ]]; then
+        echo -e "${C_BLUE} Выпуск бесплатного TLS-сертификата Let's Encrypt для ${domain}...${C_RESET}"
+        if ss -tulpn 2>/dev/null | grep -qE ':80\b'; then
+            certbot certonly --webroot -w /var/www/html -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email || return 1
+        else
+            certbot certonly --standalone -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email || return 1
+        fi
+    fi
+
+    mkdir -p /var/www/selfsteal
+    cat > /var/www/selfsteal/index.html <<HTML
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${domain}</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:#e2e8f0}.card{padding:2rem 2.5rem;border-radius:12px;background:#1e293b;box-shadow:0 10px 25px rgba(0,0,0,.4);text-align:center}h1{margin:0 0 .5rem;font-size:1.4rem}p{margin:0;color:#94a3b8;font-size:.95rem}</style>
+</head>
+<body><div class="card"><h1>${domain}</h1><p>Edge Node Static Delivery Service — Active (TLS 1.3 / H2)</p></div></body>
+</html>
+HTML
+
+    cat > /etc/nginx/conf.d/xray-selfsteal.conf <<NGINX
+server {
+    listen 127.0.0.1:${backend_port} ssl http2;
+    server_name ${domain};
+
+    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    ssl_protocols TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    root /var/www/selfsteal;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+NGINX
+
+    # Исключаем конфликт с дефолтным портом 443 в nginx
+    sed -i -E 's/^[[:space:]]*listen[[:space:]]+(\[::\]:)?443/# listen 443/g' /etc/nginx/sites-enabled/* 2>/dev/null || true
+
+    if nginx -t >/dev/null 2>&1; then
+        systemctl enable --now nginx >/dev/null 2>&1
+        systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
+        echo -e "${C_GREEN} Локальный Self-steal SNI бэкенд активен на 127.0.0.1:${backend_port} (${domain}).${C_RESET}"
+        return 0
+    else
+        echo -e "${C_RED} Ошибка проверки конфигурации nginx для Self-steal SNI.${C_RESET}"
+        return 1
+    fi
+}
+
 setup_standalone_vless_wg() {
     while true; do
         MODULE_CANCELED=false
@@ -1251,9 +1319,41 @@ setup_standalone_vless_wg() {
                     continue
                 fi
 
-                prompt_default "2/2. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
-                [ "$MODULE_CANCELED" = true ] && continue
-                [ -z "$x_sni" ] && x_sni="www.microsoft.com"
+                local x_sni_choice="" x_dest=""
+                echo -e "\n${C_BOLD}Выберите режим маскировки SNI:${C_RESET}"
+                echo -e "  ${C_CYAN}1)${C_RESET} www.microsoft.com (По умолчанию — глобальный CDN Microsoft, TLS 1.3 / H2)"
+                echo -e "  ${C_CYAN}2)${C_RESET} itunes.apple.com  (Глобальный CDN Apple, отличная проходимость на iOS/macOS)"
+                echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
+                echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
+                echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
+                read -r -p "Ваш выбор [1-5, Enter=1]: " x_sni_choice
+                case "${x_sni_choice:-1}" in
+                    1) x_sni="www.microsoft.com" ;;
+                    2) x_sni="itunes.apple.com" ;;
+                    3) x_sni="www.amd.com" ;;
+                    4)
+                        prompt_default "Введите внешний домен для маскировки (SNI):" "$x_sni" x_sni
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        ;;
+                    5)
+                        local self_domain=""
+                        prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        if [[ -n "$self_domain" ]]; then
+                            x_sni="$self_domain"
+                            if setup_self_steal_local_backend "$x_sni" "8443"; then
+                                x_dest="127.0.0.1:8443"
+                            else
+                                echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
+                                pause_enter; continue
+                            fi
+                        else
+                            x_sni="www.microsoft.com"
+                        fi
+                        ;;
+                    *) x_sni="www.microsoft.com" ;;
+                esac
+                [[ -z "$x_dest" ]] && x_dest="${x_sni}:443"
 
                 ensure_xray_installed || { pause_enter; continue; }
                 enable_routing_optimizations || true
@@ -1270,7 +1370,7 @@ setup_standalone_vless_wg() {
                     out_m="wg0"
                 fi
 
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m" "$GEN_X_PATH"
+                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m" "$GEN_X_PATH" "$x_dest"
                 write_xray_service
                 silent_run systemctl enable --now bobarev-xray.service
                 systemctl restart bobarev-xray.service || true
@@ -1297,6 +1397,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_REALITY_DEST="${x_dest}"
 XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
@@ -1676,7 +1777,8 @@ enable_masque_for_existing_vless() {
         } >> /etc/default/bobarev-cascade
 
         if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ]; then
-            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "masque"
+            local cur_dest="${XRAY_REALITY_DEST:-${XRAY_SNI:-www.microsoft.com}:443}"
+            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "masque" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "$cur_dest"
             write_xray_service
             systemctl restart bobarev-xray.service || true
         fi
@@ -1708,7 +1810,8 @@ disable_usque_masque_routing() {
         } >> /etc/default/bobarev-cascade
 
         if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ]; then
-            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "direct"
+            local cur_dest="${XRAY_REALITY_DEST:-${XRAY_SNI:-www.microsoft.com}:443}"
+            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "direct" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "$cur_dest"
             systemctl restart bobarev-xray.service || true
         fi
         if systemctl is-active --quiet hysteria-server.service 2>/dev/null && [ -n "${HYSTERIA_PASS:-}" ]; then
@@ -1842,9 +1945,41 @@ setup_standalone_vless_masque() {
                 x_port="${x_port//[^0-9]/}"
                 [ -z "$x_port" ] && x_port="443"
 
-                prompt_default "2/3. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
-                [ "$MODULE_CANCELED" = true ] && continue
-                [ -z "$x_sni" ] && x_sni="www.microsoft.com"
+                local x_sni_choice="" x_dest=""
+                echo -e "\n${C_BOLD}Выберите режим маскировки SNI:${C_RESET}"
+                echo -e "  ${C_CYAN}1)${C_RESET} www.microsoft.com (По умолчанию — глобальный CDN Microsoft, TLS 1.3 / H2)"
+                echo -e "  ${C_CYAN}2)${C_RESET} itunes.apple.com  (Глобальный CDN Apple, отличная проходимость на iOS/macOS)"
+                echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
+                echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
+                echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
+                read -r -p "Ваш выбор [1-5, Enter=1]: " x_sni_choice
+                case "${x_sni_choice:-1}" in
+                    1) x_sni="www.microsoft.com" ;;
+                    2) x_sni="itunes.apple.com" ;;
+                    3) x_sni="www.amd.com" ;;
+                    4)
+                        prompt_default "Введите внешний домен для маскировки (SNI):" "$x_sni" x_sni
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        ;;
+                    5)
+                        local self_domain=""
+                        prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        if [[ -n "$self_domain" ]]; then
+                            x_sni="$self_domain"
+                            if setup_self_steal_local_backend "$x_sni" "8443"; then
+                                x_dest="127.0.0.1:8443"
+                            else
+                                echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
+                                pause_enter; continue
+                            fi
+                        else
+                            x_sni="www.microsoft.com"
+                        fi
+                        ;;
+                    *) x_sni="www.microsoft.com" ;;
+                esac
+                [[ -z "$x_dest" ]] && x_dest="${x_sni}:443"
 
                 local enable_hy2_backup=false
                 if prompt_yn "3/3. Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
@@ -1881,7 +2016,7 @@ setup_standalone_vless_masque() {
                 generate_xray_reality_credentials || { pause_enter; continue; }
                 apply_naive_tcp_tuning_profile "balanced"
 
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH"
+                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH" "$x_dest"
                 write_xray_service
                 silent_run systemctl enable --now bobarev-xray.service
                 systemctl restart bobarev-xray.service || true
@@ -1942,6 +2077,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_REALITY_DEST="${x_dest}"
 XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 HYSTERIA_PORT="${x_port}"
 HYSTERIA_PASS="${h_pass}"
@@ -2856,6 +2992,7 @@ render_xray_server_config() {
     local x_sni="${5:-www.microsoft.com}"
     local exit_mode="${6:-direct}"
     local x_path="${7:-${XRAY_XHTTP_PATH:-/xhttp-stream}}"
+    local reality_dest="${8:-${x_sni}:443}"
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
 
     mkdir -p /etc/xray
@@ -2893,7 +3030,7 @@ render_xray_server_config() {
         },
         "realitySettings": {
           "show": false,
-          "dest": "${x_sni}:443",
+          "dest": "${reality_dest}",
           "xver": 0,
           "serverNames": [
             "${x_sni}",
@@ -3051,7 +3188,7 @@ EOF
         },
         "realitySettings": {
           "show": false,
-          "dest": "${x_sni}:443",
+          "dest": "${reality_dest}",
           "xver": 0,
           "serverNames": [
             "${x_sni}",
@@ -7221,10 +7358,14 @@ mod_server_audit() {
     elif [ -f /etc/xray/config.json ]; then
         vless_mode_desc="VLESS / REALITY"
     fi
+    local self_steal_tag=""
+    if [ -f /etc/xray/config.json ] && grep -q '127.0.0.1:8443' /etc/xray/config.json 2>/dev/null; then
+        self_steal_tag=" + Self-Steal SNI"
+    fi
     if is_vless_active; then
-        audit_human_row "Прокси ${vless_mode_desc}:" "${C_GREEN}✔ Настроено (активен)${C_RESET}"
+        audit_human_row "Прокси ${vless_mode_desc}:" "${C_GREEN}✔ Настроено (активен${self_steal_tag})${C_RESET}"
     elif [ -f "/etc/xray/config.json" ]; then
-        audit_human_row "Прокси ${vless_mode_desc}:" "${C_YELLOW}✔ Настроено (остановлен)${C_RESET}"
+        audit_human_row "Прокси ${vless_mode_desc}:" "${C_YELLOW}✔ Настроено (остановлен${self_steal_tag})${C_RESET}"
     else
         audit_human_row "Прокси ${vless_mode_desc}:" "$feat_off"
     fi

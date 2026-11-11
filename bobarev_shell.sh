@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.1 — универсальный инструмент безопасности, маршрутизации Tailscale и анти-DPI туннелирования (VLESS / XHTTP + REALITY + Finalmask, Hysteria 2 и Cloudflare MASQUE).
-# Оптимизирован для развертывания на чистом сервере с сохранением приоритетного соединения Tailscale и бережным интерактивным контролем портов.
+# Bobarev Shell v3.20.3 — модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
+# Скрипт выполняет бережную проверку занятых портов без принудительной остановки активных служб и сохраняет связность управляющих туннелей.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.1"
+SCRIPT_VERSION="3.20.3"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -555,17 +555,17 @@ rotate_vless_credentials_interactive() {
     local cur_sni="${XRAY_SNI:-www.microsoft.com}"
     local cur_port="${XRAY_PORT:-443}"
     local cur_path="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-    local new_sni="" new_path=""
-    prompt_default "1/2. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, www.amd.com, itunes.apple.com):" "$cur_sni" new_sni
-    [ "$MODULE_CANCELED" = true ] && return 0
-    [ -z "$new_sni" ] && new_sni="$cur_sni"
+    local new_sni="" new_dest="" new_path=""
+    select_reality_sni_and_dest_interactive "$cur_sni" || return 0
+    new_sni="$SELECT_SNI_RESULT"
+    new_dest="$SELECT_DEST_RESULT"
 
     prompt_default "2/2. Путь XHTTP (начинается с /):" "$cur_path" new_path
     [ "$MODULE_CANCELED" = true ] && return 0
     [ -z "$new_path" ] && new_path="$cur_path"
     [[ "$new_path" != /* ]] && new_path="/${new_path}"
 
-    if ! prompt_yn "Перегенерировать UUID, ключи x25519 и ShortId для VLESS-XHTTP (порт ${cur_port}/tcp, SNI: ${new_sni}, Path: ${new_path})?" "true"; then
+    if ! prompt_yn "Перегенерировать UUID, ключи x25519 и ShortId для VLESS-XHTTP (порт ${cur_port}/tcp, SNI: ${new_sni}, Dest: ${new_dest}, Path: ${new_path})?" "true"; then
         return 0
     fi
 
@@ -575,25 +575,27 @@ rotate_vless_credentials_interactive() {
     XRAY_PUB="$GEN_X_PUB"
     XRAY_SHORT_ID="$GEN_X_SHORT_ID"
     XRAY_SNI="$new_sni"
+    XRAY_REALITY_DEST="$new_dest"
     XRAY_XHTTP_PATH="$new_path"
 
-    sed -i '/^XRAY_UUID=/d;/^XRAY_PRIV=/d;/^XRAY_PUB=/d;/^XRAY_SHORT_ID=/d;/^XRAY_SNI=/d;/^XRAY_XHTTP_PATH=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    sed -i '/^XRAY_UUID=/d;/^XRAY_PRIV=/d;/^XRAY_PUB=/d;/^XRAY_SHORT_ID=/d;/^XRAY_SNI=/d;/^XRAY_REALITY_DEST=/d;/^XRAY_XHTTP_PATH=/d' /etc/default/bobarev-cascade 2>/dev/null || true
     {
         printf 'XRAY_UUID=%q\n' "$XRAY_UUID"
         printf 'XRAY_PRIV=%q\n' "$XRAY_PRIV"
         printf 'XRAY_PUB=%q\n' "$XRAY_PUB"
         printf 'XRAY_SHORT_ID=%q\n' "$XRAY_SHORT_ID"
         printf 'XRAY_SNI=%q\n' "$XRAY_SNI"
+        printf 'XRAY_REALITY_DEST=%q\n' "$XRAY_REALITY_DEST"
         printf 'XRAY_XHTTP_PATH=%q\n' "$XRAY_XHTTP_PATH"
     } >> /etc/default/bobarev-cascade
 
     if [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && [ -n "${S2_XRAY_IP:-}" ]; then
-        render_xray_cascade_s1_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$S2_XRAY_IP" "$S2_XRAY_PORT" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "$S2_XRAY_SNI" "$XRAY_XHTTP_PATH" "${S2_XRAY_PATH:-/}"
+        render_xray_cascade_s1_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$S2_XRAY_IP" "$S2_XRAY_PORT" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "$S2_XRAY_SNI" "$XRAY_XHTTP_PATH" "${S2_XRAY_PATH:-/}" "$XRAY_REALITY_DEST"
     elif [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ]; then
-        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local" "$XRAY_XHTTP_PATH"
+        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
     else
         local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
-        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$out_m" "$XRAY_XHTTP_PATH"
+        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$out_m" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
     fi
 
     systemctl restart bobarev-xray.service || true
@@ -1164,6 +1166,125 @@ disable_hybrid_wg_routing() {
     echo -e "${C_GREEN} Туннель wg0 отключен. VLESS-REALITY переведен на прямой выход в интернет.${C_RESET}"
 }
 
+
+SELECT_SNI_RESULT="www.microsoft.com"
+SELECT_DEST_RESULT="www.microsoft.com:443"
+
+select_reality_sni_and_dest_interactive() {
+    local default_sni="${1:-www.microsoft.com}"
+    local sni_choice="" chosen_sni="$default_sni" chosen_dest=""
+    echo -e "\n${C_BOLD}Выберите режим маскировки SNI:${C_RESET}"
+    echo -e "  ${C_CYAN}1)${C_RESET} www.microsoft.com (По умолчанию — глобальный CDN Microsoft, TLS 1.3 / H2)"
+    echo -e "  ${C_CYAN}2)${C_RESET} itunes.apple.com  (Глобальный CDN Apple, отличная проходимость на iOS/macOS)"
+    echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
+    echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
+    echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
+    read -r -p "Ваш выбор [1-5, Enter=1]: " sni_choice
+    case "${sni_choice:-1}" in
+        1) chosen_sni="www.microsoft.com" ;;
+        2) chosen_sni="itunes.apple.com" ;;
+        3) chosen_sni="www.amd.com" ;;
+        4)
+            prompt_default "Введите внешний домен для маскировки (SNI):" "$default_sni" chosen_sni
+            [ "$MODULE_CANCELED" = true ] && return 1
+            [ -z "$chosen_sni" ] && chosen_sni="www.microsoft.com"
+            ;;
+        5)
+            local self_domain=""
+            prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
+            [ "$MODULE_CANCELED" = true ] && return 1
+            if [[ -n "$self_domain" ]]; then
+                chosen_sni="$self_domain"
+                if setup_self_steal_local_backend "$chosen_sni" "8443"; then
+                    chosen_dest="127.0.0.1:8443"
+                else
+                    echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
+                    return 1
+                fi
+            else
+                chosen_sni="www.microsoft.com"
+            fi
+            ;;
+        *) chosen_sni="www.microsoft.com" ;;
+    esac
+    [[ -z "$chosen_dest" ]] && chosen_dest="${chosen_sni}:443"
+    SELECT_SNI_RESULT="$chosen_sni"
+    SELECT_DEST_RESULT="$chosen_dest"
+    return 0
+}
+
+setup_self_steal_local_backend() {
+    local domain="$1"
+    local backend_port="${2:-8443}"
+    echo -e "${C_BLUE} Подготовка локального HTTPS-сервера (Self-steal SNI) для домена ${domain} на 127.0.0.1:${backend_port}...${C_RESET}"
+
+    if ! command -v nginx >/dev/null 2>&1 || ! command -v certbot >/dev/null 2>&1; then
+        echo -e "${C_BLUE} Установка nginx и certbot...${C_RESET}"
+        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx certbot >/dev/null 2>&1 || {
+            echo -e "${C_RED} Ошибка: Не удалось установить nginx и certbot.${C_RESET}"
+            return 1
+        }
+    fi
+
+    if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -qw "active"; then
+        silent_run ufw allow 80/tcp comment 'LetEncrypt HTTP-01 Challenge'
+    fi
+
+    local cert_dir="/etc/letsencrypt/live/${domain}"
+    if [[ ! -f "${cert_dir}/fullchain.pem" || ! -f "${cert_dir}/privkey.pem" ]]; then
+        echo -e "${C_BLUE} Выпуск бесплатного TLS-сертификата Let's Encrypt для ${domain}...${C_RESET}"
+        mkdir -p /var/www/html
+        if ss -tulpn 2>/dev/null | grep -qE ':80\b'; then
+            certbot certonly --webroot -w /var/www/html -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email || return 1
+        else
+            certbot certonly --standalone -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email || return 1
+        fi
+    fi
+
+    mkdir -p /var/www/selfsteal
+    cat > /var/www/selfsteal/index.html <<HTML
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${domain}</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:#e2e8f0}.card{padding:2rem 2.5rem;border-radius:12px;background:#1e293b;box-shadow:0 10px 25px rgba(0,0,0,.4);text-align:center}h1{margin:0 0 .5rem;font-size:1.4rem}p{margin:0;color:#94a3b8;font-size:.95rem}</style>
+</head>
+<body><div class="card"><h1>${domain}</h1><p>Edge Node Static Delivery Service — Active (TLS 1.3 / H2)</p></div></body>
+</html>
+HTML
+
+    cat > /etc/nginx/conf.d/xray-selfsteal.conf <<NGINX
+server {
+    listen 127.0.0.1:${backend_port} ssl http2;
+    server_name ${domain};
+
+    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    ssl_protocols TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    root /var/www/selfsteal;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+NGINX
+
+    # Исключаем конфликт с дефолтным портом 443 в nginx
+    sed -i -E 's/^[[:space:]]*listen[[:space:]]+(\[::\]:)?443/# listen 443/g' /etc/nginx/sites-enabled/* 2>/dev/null || true
+
+    if nginx -t >/dev/null 2>&1; then
+        systemctl enable --now nginx >/dev/null 2>&1
+        systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
+        echo -e "${C_GREEN} Локальный Self-steal SNI бэкенд активен на 127.0.0.1:${backend_port} (${domain}).${C_RESET}"
+        return 0
+    else
+        echo -e "${C_RED} Ошибка проверки конфигурации nginx для Self-steal SNI.${C_RESET}"
+        return 1
+    fi
+}
+
 setup_standalone_vless_wg() {
     while true; do
         MODULE_CANCELED=false
@@ -1251,9 +1372,41 @@ setup_standalone_vless_wg() {
                     continue
                 fi
 
-                prompt_default "2/2. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
-                [ "$MODULE_CANCELED" = true ] && continue
-                [ -z "$x_sni" ] && x_sni="www.microsoft.com"
+                local x_sni_choice="" x_dest=""
+                echo -e "\n${C_BOLD}Выберите режим маскировки SNI:${C_RESET}"
+                echo -e "  ${C_CYAN}1)${C_RESET} www.microsoft.com (По умолчанию — глобальный CDN Microsoft, TLS 1.3 / H2)"
+                echo -e "  ${C_CYAN}2)${C_RESET} itunes.apple.com  (Глобальный CDN Apple, отличная проходимость на iOS/macOS)"
+                echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
+                echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
+                echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
+                read -r -p "Ваш выбор [1-5, Enter=1]: " x_sni_choice
+                case "${x_sni_choice:-1}" in
+                    1) x_sni="www.microsoft.com" ;;
+                    2) x_sni="itunes.apple.com" ;;
+                    3) x_sni="www.amd.com" ;;
+                    4)
+                        prompt_default "Введите внешний домен для маскировки (SNI):" "$x_sni" x_sni
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        ;;
+                    5)
+                        local self_domain=""
+                        prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        if [[ -n "$self_domain" ]]; then
+                            x_sni="$self_domain"
+                            if setup_self_steal_local_backend "$x_sni" "8443"; then
+                                x_dest="127.0.0.1:8443"
+                            else
+                                echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
+                                pause_enter; continue
+                            fi
+                        else
+                            x_sni="www.microsoft.com"
+                        fi
+                        ;;
+                    *) x_sni="www.microsoft.com" ;;
+                esac
+                [[ -z "$x_dest" ]] && x_dest="${x_sni}:443"
 
                 ensure_xray_installed || { pause_enter; continue; }
                 enable_routing_optimizations || true
@@ -1270,7 +1423,7 @@ setup_standalone_vless_wg() {
                     out_m="wg0"
                 fi
 
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m" "$GEN_X_PATH"
+                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m" "$GEN_X_PATH" "$x_dest"
                 write_xray_service
                 silent_run systemctl enable --now bobarev-xray.service
                 systemctl restart bobarev-xray.service || true
@@ -1297,6 +1450,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_REALITY_DEST="${x_dest}"
 XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
@@ -1492,27 +1646,19 @@ install_and_setup_usque() {
     fi
 
     if [ ! -s /etc/usque/config.json ]; then
-        if ! curl -4 -fsS --connect-timeout 4 --max-time 6 https://api.cloudflareclient.com >/dev/null 2>&1; then
-            echo -e "${C_RED} Внимание: узел регистрации Cloudflare WARP (api.cloudflareclient.com:443) заблокирован ТСПУ на этом сервере!${C_RESET}"
-            echo -e "${C_YELLOW} На серверах внутри РФ прямой доступ к Cloudflare MASQUE блокируется провайдерами."
-            echo -e " Решение:"
-            echo -e "   1) Для связки с Cloudflare MASQUE используйте Зарубежный Сервер 2 (bobarev-servhost);"
-            echo -e "   2) А на этом РФ-сервере настройте Каскад (Раздел 2 -> Пункт 3) к Зарубежному Серверу 2!"
-            echo -e "   3) Либо временно включите зарубежный Tailscale Exit-Node (Раздел 3 -> 9) на время выполнения регистрации.${C_RESET}"
-            return 1
-        fi
         echo -e "${C_CYAN} Регистрация нового устройства в Cloudflare WARP (MASQUE)...${C_RESET}"
         echo -e "${C_BLUE} При запросе подтверждения условий Cloudflare (ToS) введите 'y' или нажмите Enter.${C_RESET}"
         (
             cd /etc/usque || exit 1
             if /usr/local/bin/usque register --help 2>&1 | grep -q -- "--accept-tos"; then
-                /usr/local/bin/usque register --accept-tos -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
+                timeout 20 /usr/local/bin/usque register --accept-tos -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
             else
-                printf 'y\n\n' | /usr/local/bin/usque register -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
+                printf 'y\n\n' | timeout 20 /usr/local/bin/usque register -c /etc/usque/config.json || /usr/local/bin/usque register -c /etc/usque/config.json
             fi
         )
         if [ ! -s /etc/usque/config.json ]; then
             echo -e "${C_RED} Ошибка: файл /etc/usque/config.json не был создан при регистрации.${C_RESET}"
+            echo -e "${C_YELLOW} Если это сервер внутри РФ и регистрация блокируется ТСПУ, поднимайте Cloudflare MASQUE на Зарубежном Сервере 2 либо временно включите зарубежный Tailscale Exit-Node на время регистрации.${C_RESET}"
             return 1
         fi
         chmod 600 /etc/usque/config.json
@@ -1676,7 +1822,8 @@ enable_masque_for_existing_vless() {
         } >> /etc/default/bobarev-cascade
 
         if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ]; then
-            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "masque"
+            local cur_dest="${XRAY_REALITY_DEST:-${XRAY_SNI:-www.microsoft.com}:443}"
+            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "masque" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "$cur_dest"
             write_xray_service
             systemctl restart bobarev-xray.service || true
         fi
@@ -1708,7 +1855,8 @@ disable_usque_masque_routing() {
         } >> /etc/default/bobarev-cascade
 
         if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ]; then
-            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "direct"
+            local cur_dest="${XRAY_REALITY_DEST:-${XRAY_SNI:-www.microsoft.com}:443}"
+            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "direct" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "$cur_dest"
             systemctl restart bobarev-xray.service || true
         fi
         if systemctl is-active --quiet hysteria-server.service 2>/dev/null && [ -n "${HYSTERIA_PASS:-}" ]; then
@@ -1842,9 +1990,41 @@ setup_standalone_vless_masque() {
                 x_port="${x_port//[^0-9]/}"
                 [ -z "$x_port" ] && x_port="443"
 
-                prompt_default "2/3. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com, www.microsoft.com):" "$x_sni" x_sni
-                [ "$MODULE_CANCELED" = true ] && continue
-                [ -z "$x_sni" ] && x_sni="www.microsoft.com"
+                local x_sni_choice="" x_dest=""
+                echo -e "\n${C_BOLD}Выберите режим маскировки SNI:${C_RESET}"
+                echo -e "  ${C_CYAN}1)${C_RESET} www.microsoft.com (По умолчанию — глобальный CDN Microsoft, TLS 1.3 / H2)"
+                echo -e "  ${C_CYAN}2)${C_RESET} itunes.apple.com  (Глобальный CDN Apple, отличная проходимость на iOS/macOS)"
+                echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
+                echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
+                echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
+                read -r -p "Ваш выбор [1-5, Enter=1]: " x_sni_choice
+                case "${x_sni_choice:-1}" in
+                    1) x_sni="www.microsoft.com" ;;
+                    2) x_sni="itunes.apple.com" ;;
+                    3) x_sni="www.amd.com" ;;
+                    4)
+                        prompt_default "Введите внешний домен для маскировки (SNI):" "$x_sni" x_sni
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        ;;
+                    5)
+                        local self_domain=""
+                        prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
+                        [ "$MODULE_CANCELED" = true ] && continue
+                        if [[ -n "$self_domain" ]]; then
+                            x_sni="$self_domain"
+                            if setup_self_steal_local_backend "$x_sni" "8443"; then
+                                x_dest="127.0.0.1:8443"
+                            else
+                                echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
+                                pause_enter; continue
+                            fi
+                        else
+                            x_sni="www.microsoft.com"
+                        fi
+                        ;;
+                    *) x_sni="www.microsoft.com" ;;
+                esac
+                [[ -z "$x_dest" ]] && x_dest="${x_sni}:443"
 
                 local enable_hy2_backup=false
                 if prompt_yn "3/3. Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
@@ -1881,7 +2061,7 @@ setup_standalone_vless_masque() {
                 generate_xray_reality_credentials || { pause_enter; continue; }
                 apply_naive_tcp_tuning_profile "balanced"
 
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH"
+                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH" "$x_dest"
                 write_xray_service
                 silent_run systemctl enable --now bobarev-xray.service
                 systemctl restart bobarev-xray.service || true
@@ -1942,6 +2122,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_REALITY_DEST="${x_dest}"
 XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 HYSTERIA_PORT="${x_port}"
 HYSTERIA_PASS="${h_pass}"
@@ -2010,8 +2191,10 @@ setup_cascade_server1_ru() {
         return 0
     fi
 
-    prompt_default "2/3. Целевой SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com):" "$x_sni" x_sni
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
+    local x_dest=""
+    select_reality_sni_and_dest_interactive "$x_sni" || return 0
+    x_sni="$SELECT_SNI_RESULT"
+    x_dest="$SELECT_DEST_RESULT"
 
     ensure_xray_installed || return 1
     ensure_tailscale_installed || true
@@ -2032,7 +2215,7 @@ setup_cascade_server1_ru() {
     pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
     pub_ip6=$(get_wan_global_ipv6)
 
-    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH"
+    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH" "$x_dest"
     write_xray_service
     silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
@@ -2260,7 +2443,7 @@ apply_foreign_exit_mode() {
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         if [ "${CASCADE_ROLE:-}" = "foreign_xray_exit" ] && [ -n "${XRAY_PORT:-}" ]; then
-            render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$exit_mode"
+            render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$exit_mode" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "${XRAY_REALITY_DEST:-${XRAY_SNI:-www.microsoft.com}:443}"
             silent_run systemctl restart bobarev-xray.service
         elif [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] && [ -n "${HYSTERIA_PORT:-}" ]; then
             render_hysteria_server_config "$HYSTERIA_PORT" "${HYSTERIA_PASS:-SecretPass2026}" "$exit_mode"
@@ -2579,8 +2762,10 @@ setup_cascade_hysteria_server1_ru() {
         return 0
     fi
 
-    prompt_default "3/3. Целевой SNI-домен для маскировки VLESS-REALITY (www.microsoft.com, dl.google.com):" "$x_sni" x_sni
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
+    local x_dest=""
+    select_reality_sni_and_dest_interactive "$x_sni" || return 0
+    x_sni="$SELECT_SNI_RESULT"
+    x_dest="$SELECT_DEST_RESULT"
 
     ensure_hysteria_installed || return 1
     ensure_xray_installed || return 1
@@ -2656,7 +2841,7 @@ SVC_EOF
     generate_xray_reality_credentials || return 1
     apply_naive_tcp_tuning_profile "balanced"
 
-    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "hysteria_local" "$GEN_X_PATH"
+    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "hysteria_local" "$GEN_X_PATH" "$x_dest"
     write_xray_service
     silent_run systemctl enable --now bobarev-xray.service
     systemctl restart bobarev-xray.service || true
@@ -2856,7 +3041,12 @@ render_xray_server_config() {
     local x_sni="${5:-www.microsoft.com}"
     local exit_mode="${6:-direct}"
     local x_path="${7:-${XRAY_XHTTP_PATH:-/xhttp-stream}}"
+    local reality_dest="${8:-${XRAY_REALITY_DEST:-${x_sni}:443}}"
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
+    local srv_names_json="\"${x_sni}\", \"www.microsoft.com\""
+    if [[ "$reality_dest" == 127.0.0.1:* ]] || [[ "$x_sni" == "www.microsoft.com" ]]; then
+        srv_names_json="\"${x_sni}\""
+    fi
 
     mkdir -p /etc/xray
 
@@ -2893,11 +3083,10 @@ render_xray_server_config() {
         },
         "realitySettings": {
           "show": false,
-          "dest": "${x_sni}:443",
+          "dest": "${reality_dest}",
           "xver": 0,
           "serverNames": [
-            "${x_sni}",
-            "www.microsoft.com"
+            ${srv_names_json}
           ],
           "privateKey": "${x_priv}",
           "shortIds": [
@@ -3051,11 +3240,10 @@ EOF
         },
         "realitySettings": {
           "show": false,
-          "dest": "${x_sni}:443",
+          "dest": "${reality_dest}",
           "xver": 0,
           "serverNames": [
-            "${x_sni}",
-            "www.microsoft.com"
+            ${srv_names_json}
           ],
           "privateKey": "${x_priv}",
           "shortIds": [
@@ -3103,8 +3291,13 @@ render_xray_cascade_s1_config() {
     local s2_sni="${11:-www.microsoft.com}"
     local s1_path="${12:-${XRAY_XHTTP_PATH:-/xhttp-stream}}"
     local s2_path="${13:-${S2_XRAY_PATH:-/xhttp-stream}}"
+    local s1_dest="${14:-${XRAY_REALITY_DEST:-${s1_sni}:443}}"
     [[ "$s1_path" != /* ]] && s1_path="/${s1_path}"
     [[ "$s2_path" != /* ]] && s2_path="/${s2_path}"
+    local s1_srv_names="\"${s1_sni}\", \"www.microsoft.com\""
+    if [[ "$s1_dest" == 127.0.0.1:* ]] || [[ "$s1_sni" == "www.microsoft.com" ]]; then
+        s1_srv_names="\"${s1_sni}\""
+    fi
 
     local wan_dev
     wan_dev=$(get_wan_if)
@@ -3141,11 +3334,10 @@ render_xray_cascade_s1_config() {
         },
         "realitySettings": {
           "show": false,
-          "dest": "${s1_sni}:443",
+          "dest": "${s1_dest}",
           "xver": 0,
           "serverNames": [
-            "${s1_sni}",
-            "www.microsoft.com"
+            ${s1_srv_names}
           ],
           "privateKey": "${s1_priv}",
           "shortIds": [
@@ -3283,9 +3475,10 @@ setup_cascade_xray_server2_foreign() {
     x_port="${x_port//[^0-9]/}"
     [ -z "$x_port" ] && x_port="443"
 
-    local x_sni="www.microsoft.com"
-    prompt_default "2/3. Введите целевой SNI-домен для маскировки REALITY (www.microsoft.com, www.amd.com, itunes.apple.com):" "$x_sni" x_sni
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
+    local x_sni="www.microsoft.com" x_dest=""
+    select_reality_sni_and_dest_interactive "$x_sni" || return 0
+    x_sni="$SELECT_SNI_RESULT"
+    x_dest="$SELECT_DEST_RESULT"
 
     local exit_choice=""
     if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (VLESS-XHTTP)" "
@@ -3319,7 +3512,7 @@ setup_cascade_xray_server2_foreign() {
     local x_path="$GEN_X_PATH"
 
     apply_foreign_exit_mode "$exit_mode"
-    render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "$exit_mode" "$x_path"
+    render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "$exit_mode" "$x_path" "$x_dest"
     write_xray_service
 
     if ! /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
@@ -3372,6 +3565,7 @@ XRAY_PRIV="$x_priv"
 XRAY_PUB="$x_pub"
 XRAY_SHORT_ID="$x_short_id"
 XRAY_SNI="$x_sni"
+XRAY_REALITY_DEST="$x_dest"
 XRAY_XHTTP_PATH="$x_path"
 XRAY_TOKEN="$bridge_token"
 XRAY_TOKEN_V6="$bridge_token_v6"
@@ -3433,8 +3627,10 @@ setup_cascade_xray_server1_ru() {
         return 0
     fi
 
-    prompt_default "3/3. Целевой SNI-домен для маскировки входа на РФ-сервере (www.microsoft.com, www.amd.com, itunes.apple.com):" "$s1_sni" s1_sni
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$s1_sni" ]; then return 0; fi
+    local s1_dest=""
+    select_reality_sni_and_dest_interactive "$s1_sni" || return 0
+    s1_sni="$SELECT_SNI_RESULT"
+    s1_dest="$SELECT_DEST_RESULT"
 
     ensure_xray_installed || return 1
     enable_routing_optimizations || true
@@ -3452,7 +3648,7 @@ setup_cascade_xray_server1_ru() {
     local s1_short_id="$GEN_X_SHORT_ID"
     local s1_path="$GEN_X_PATH"
 
-    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$s1_path" "$s2_path"
+    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$s1_path" "$s2_path" "$s1_dest"
     write_xray_service
 
     if ! /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
@@ -3485,6 +3681,7 @@ XRAY_PRIV="${s1_priv}"
 XRAY_PUB="${s1_pub}"
 XRAY_SHORT_ID="${s1_short_id}"
 XRAY_SNI="${s1_sni}"
+XRAY_REALITY_DEST="${s1_dest}"
 XRAY_XHTTP_PATH="${s1_path}"
 S2_XRAY_IP="${s2_ip}"
 S2_XRAY_PORT="${s2_port}"
@@ -7221,10 +7418,14 @@ mod_server_audit() {
     elif [ -f /etc/xray/config.json ]; then
         vless_mode_desc="VLESS / REALITY"
     fi
+    local self_steal_tag=""
+    if [ -f /etc/xray/config.json ] && grep -q '127.0.0.1:8443' /etc/xray/config.json 2>/dev/null; then
+        self_steal_tag=" + Self-Steal SNI"
+    fi
     if is_vless_active; then
-        audit_human_row "Прокси ${vless_mode_desc}:" "${C_GREEN}✔ Настроено (активен)${C_RESET}"
+        audit_human_row "Прокси ${vless_mode_desc}:" "${C_GREEN}✔ Настроено (активен${self_steal_tag})${C_RESET}"
     elif [ -f "/etc/xray/config.json" ]; then
-        audit_human_row "Прокси ${vless_mode_desc}:" "${C_YELLOW}✔ Настроено (остановлен)${C_RESET}"
+        audit_human_row "Прокси ${vless_mode_desc}:" "${C_YELLOW}✔ Настроено (остановлен${self_steal_tag})${C_RESET}"
     else
         audit_human_row "Прокси ${vless_mode_desc}:" "$feat_off"
     fi
@@ -9144,9 +9345,10 @@ setup_vless_reality_mullvad_inbound() {
   return 1
  fi
  ensure_xray_installed || return 1
- local x_sni="www.microsoft.com"
- prompt_default "2/2. Введите SNI-домен для маскировки REALITY (www.microsoft.com, dl.google.com):" "$x_sni" x_sni
- if [ "$MODULE_CANCELED" = true ] || [ -z "$x_sni" ]; then return 0; fi
+ local x_sni="www.microsoft.com" x_dest=""
+ select_reality_sni_and_dest_interactive "$x_sni" || return 0
+ x_sni="$SELECT_SNI_RESULT"
+ x_dest="$SELECT_DEST_RESULT"
 
  generate_xray_reality_credentials || return 1
  local x_priv="$GEN_X_PRIV"
@@ -9154,7 +9356,7 @@ setup_vless_reality_mullvad_inbound() {
  local x_uuid="$GEN_X_UUID"
  local x_short_id="$GEN_X_SHORT_ID"
 
- render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "mullvad" "$GEN_X_PATH"
+ render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "mullvad" "$GEN_X_PATH" "$x_dest"
  write_xray_service
  silent_run systemctl enable --now bobarev-xray.service
  systemctl restart bobarev-xray.service || return 1

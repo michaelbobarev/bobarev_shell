@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.4 — модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
-# Скрипт выполняет бережную проверку занятых портов без принудительной остановки активных служб и сохраняет связность управляющих туннелей.
+# Bobarev Shell v3.20.5 — модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
+# Скрипт выполняет бережную проверку занятых портов без принудительной остановки активных служб, оптимизирует сетевой стек ядра (BBR, буферы, TIME_WAIT, LimitNOFILE=512000) и сохраняет связность управляющих туннелей.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.4"
+SCRIPT_VERSION="3.20.5"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -638,14 +638,45 @@ tune_fq_qdisc_interfaces() {
     done
 }
 
+apply_system_nofile_limits() {
+    mkdir -p /etc/security/limits.d /etc/systemd/system.conf.d /etc/systemd/user.conf.d
+    cat << 'LIM_EOF' > /etc/security/limits.d/99-bobarev-nofile.conf
+* soft nofile 512000
+* hard nofile 512000
+root soft nofile 512000
+root hard nofile 512000
+LIM_EOF
+    if [ -f /etc/security/limits.conf ] && ! grep -q "512000" /etc/security/limits.conf 2>/dev/null; then
+        sed -i '/# Bobarev Shell File Descriptors/,+4d' /etc/security/limits.conf 2>/dev/null || true
+        cat << 'LIM_MAIN_EOF' >> /etc/security/limits.conf
+# Bobarev Shell File Descriptors
+* soft nofile 512000
+* hard nofile 512000
+root soft nofile 512000
+root hard nofile 512000
+LIM_MAIN_EOF
+    fi
+    cat << 'SYS_LIM_EOF' > /etc/systemd/system.conf.d/99-bobarev-nofile.conf
+[Manager]
+DefaultLimitNOFILE=512000
+SYS_LIM_EOF
+    cat << 'USR_LIM_EOF' > /etc/systemd/user.conf.d/99-bobarev-nofile.conf
+[Manager]
+DefaultLimitNOFILE=512000
+USR_LIM_EOF
+    ulimit -n 512000 2>/dev/null || true
+}
+
 apply_naive_tcp_tuning_profile() {
     local profile="${1:-balanced}"
     silent_run modprobe nf_conntrack
+    apply_system_nofile_limits
     mkdir -p /etc/sysctl.d
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.16.3: Aggressive Anti-HoL Blocking & Low-Latency Profile
+# Bobarev Shell v3.20.5: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -660,23 +691,26 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
 net.core.rmem_default = 262144
 net.core.wmem_default = 262144
 net.core.optmem_max = 2097152
-net.core.netdev_max_backlog = 30000
+net.core.netdev_max_backlog = 16384
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 131072 262144 524288
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_keepalive_time = 300
-net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_max_orphans = 131072
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.netfilter.nf_conntrack_max = 262144
 net.netfilter.nf_conntrack_tcp_timeout_established = 14400
@@ -688,7 +722,8 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.16.3: Zero-Bufferbloat High-Throughput Balanced Profile
+# Bobarev Shell v3.20.5: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
@@ -703,23 +738,26 @@ net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
 net.core.rmem_default = 262144
 net.core.wmem_default = 262144
 net.core.optmem_max = 2097152
-net.core.netdev_max_backlog = 30000
+net.core.netdev_max_backlog = 16384
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_mem = 131072 262144 524288
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 131072 67108864
-net.ipv4.tcp_wmem = 4096 131072 67108864
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_keepalive_time = 300
-net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_max_orphans = 131072
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.netfilter.nf_conntrack_max = 262144
 net.netfilter.nf_conntrack_tcp_timeout_established = 14400
@@ -1278,6 +1316,12 @@ NGINX
     # Исключаем конфликт с дефолтным портом 443 в nginx
     sed -i -E 's/^[[:space:]]*listen[[:space:]]+(\[::\]:)?443/# listen 443/g' /etc/nginx/sites-enabled/* 2>/dev/null || true
 
+    mkdir -p /etc/systemd/system/nginx.service.d
+    cat > /etc/systemd/system/nginx.service.d/99-bobarev-nofile.conf <<NGINX_LIM
+[Service]
+LimitNOFILE=512000
+NGINX_LIM
+    systemctl daemon-reload >/dev/null 2>&1 || true
     if nginx -t >/dev/null 2>&1; then
         systemctl enable --now nginx >/dev/null 2>&1
         systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
@@ -1559,7 +1603,7 @@ Environment="GOMEMLIMIT=384MiB"
 ExecStart=/usr/local/bin/usque ${proxy_mode} -b 127.0.0.1 -p 1080 ${mtu_flags} ${dns_flags} ${extra_flags} -c /etc/usque/config.json
 Restart=always
 RestartSec=3
-LimitNOFILE=65535
+LimitNOFILE=512000
 
 [Install]
 WantedBy=multi-user.target
@@ -5076,6 +5120,7 @@ mod_hardening() {
     ensure_wg_kernel_modules
     disable_ufw_strict_rpfilter
 
+    apply_system_nofile_limits
     mkdir -p /etc/sysctl.d
     tee /etc/sysctl.d/99-zzz-server-hardening.conf > /dev/null << HARDENING_EOF
 kernel.dmesg_restrict = 1
@@ -5087,16 +5132,28 @@ kernel.perf_event_paranoid = 3
 kernel.sysrq = 0
 kernel.panic = 10
 kernel.panic_on_oops = 1
+fs.file-max = 2097152
 net.core.bpf_jit_harden = 2
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
-net.core.rmem_default = 1048576
-net.core.wmem_default = 1048576
-net.core.netdev_max_backlog = 10000
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.core.netdev_max_backlog = 16384
+net.core.somaxconn = 32768
+net.ipv4.tcp_max_syn_backlog = 16384
 net.netfilter.nf_conntrack_max = 262144
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_max_orphans = 131072
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 net.ipv4.conf.all.accept_redirects = 0
@@ -6989,8 +7046,8 @@ mod_server_audit() {
         local param="$1" expected="$2" label="$3" ok_msg="$4" err_msg="$5"
         local val=$(sysctl -n "$param" 2>/dev/null || echo "N/A")
         if [ "$param" = "net.core.rmem_max" ]; then
-            if [ "$val" != "N/A" ] && [ "$val" -ge 26214400 ] 2>/dev/null; then
-                audit_human_row "$label" "${C_GREEN}Активны (расширенные буферы под высокие скорости, сейчас: $val)${C_RESET}"
+            if [ "$val" != "N/A" ] && [ "$val" -ge 16777216 ] 2>/dev/null; then
+                audit_human_row "$label" "${C_GREEN}Активны (оптимизированы 16M+ под BBR/XHTTP, сейчас: $val)${C_RESET}"
                 return
             fi
         fi
@@ -7012,7 +7069,16 @@ mod_server_audit() {
     audit_human_row 'Пересылка пакетов (IPv6):' "$v6_text"
     check_param "net.ipv4.tcp_syncookies"         "1"        "Защита от флуда (SYN):" "Включена" "Отключена"
     check_param "net.ipv4.tcp_congestion_control" "bbr"      "Ускорение сети TCP BBR:" "Активно" "Стандартное"
-    check_param "net.core.rmem_max"               "67108864" "Расширенные буферы VPN:" "Активны (расширенные буферы под высокие скорости)" "Стандартные"
+    check_param "net.core.rmem_max"               "16777216" "Расширенные буферы TCP/UDP:" "Активны (16 МБ под BBR и XHTTP)" "Стандартные"
+    check_param "net.ipv4.tcp_tw_reuse"           "1"        "Переиспользование TIME_WAIT:" "Включено (tcp_tw_reuse = 1)" "Отключено"
+    check_param "net.ipv4.tcp_fin_timeout"        "15"       "Таймаут закрытия FIN:" "Оптимизирован (15 сек)" "Стандартный"
+    local nofile_cur
+    nofile_cur=$(ulimit -n 2>/dev/null || echo "1024")
+    if [ "${nofile_cur:-0}" -ge 512000 ] 2>/dev/null || [ -f /etc/security/limits.d/99-bobarev-nofile.conf ]; then
+        audit_human_row 'Лимит дескрипторов (NOFILE):' "${C_GREEN}Расширен (ulimit: 512000, Xray/Hysteria: 1048576)${C_RESET}"
+    else
+        audit_human_row 'Лимит дескрипторов (NOFILE):' "${C_YELLOW}Стандартный ($nofile_cur — рекомендуется п. 1 -> 8)${C_RESET}"
+    fi
 
     audit_profile_state 'Профиль защиты ядра:' /etc/sysctl.d/99-zzz-server-hardening.conf
     local ping_state

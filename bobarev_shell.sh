@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.6 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
-# Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, TIME_WAIT, LimitNOFILE=512000) и автоматически защищает DNS и маршрутизацию от сбоев после перезагрузки (systemd-resolved FallbackDNS, MagicDNS и Boot Watchdog).
+# Bobarev Shell v3.20.8 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, src_valid_mark=1, LimitNOFILE=512000), разделяет P2P-трафик Tailscale (fwmark 0x80000 / table 52) и автоматически защищает DNS при перезагрузке.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.6"
+SCRIPT_VERSION="3.20.8"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -675,7 +675,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.6: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.8: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -722,7 +722,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.6: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+# Bobarev Shell v3.20.8: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -824,11 +824,11 @@ print_vless_shadowrocket_links() {
         local fm_encoded="%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%22tlshello%22%2C%22length%22%3A%2240-60%22%2C%22delay%22%3A%2230-50%22%7D%7D%5D%7D"
         local xhttp_auto_v4="" xhttp_packet_v4="" xhttp_auto_v6=""
         if [ -n "$pub_ip4" ]; then
-            xhttp_auto_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-Auto"
+            xhttp_auto_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-StreamOne"
             xhttp_packet_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=firefox&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-PacketUp"
         fi
         if [ -n "$pub_ip6" ]; then
-            xhttp_auto_v6="vless://${x_uuid}@[${pub_ip6}]:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-IPv6"
+            xhttp_auto_v6="vless://${x_uuid}@[${pub_ip6}]:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-IPv6"
         fi
 
         echo -e "\n ${C_BOLD}Параметры VLESS-XHTTP (SplitHTTP + REALITY + TLS Fragment) для ручного ввода:${C_RESET}"
@@ -838,8 +838,8 @@ print_vless_shadowrocket_links() {
         echo -e "   • UUID:               ${C_GREEN}${x_uuid}${C_RESET}"
         echo -e "   • Транспорт (Network): ${C_GREEN}xhttp (SplitHTTP)${C_RESET}"
         echo -e "   • Путь (Path):        ${C_GREEN}${x_path}${C_RESET}"
-        echo -e "   • Режим (XHTTP Mode): ${C_GREEN}auto${C_RESET} (или ${C_YELLOW}packet-up${C_RESET} для мобильных сетей)"
-        echo -e "   • Flow (Поток):       ${C_GREEN}none / пусто (для XHTTP используется мультиплексор XMUX)${C_RESET}"
+        echo -e "   • Режим (XHTTP Mode): ${C_GREEN}stream-one${C_RESET} (полнодуплексный поток; резерв: ${C_YELLOW}packet-up${C_RESET})"
+        echo -e "   • Flow (Поток):       ${C_GREEN}none / пусто (остальные поля XHTTP остаются серыми по умолчанию)${C_RESET}"
         echo -e "   • TLS / REALITY:      ${C_GREEN}Вкл (REALITY)${C_RESET}"
         echo -e "   • SNI (Peer):         ${C_GREEN}${x_sni}${C_RESET}"
         echo -e "   • Public Key (pbk):   ${C_GREEN}${x_pub}${C_RESET}"
@@ -848,7 +848,7 @@ print_vless_shadowrocket_links() {
         echo -e "   • Fragment (Клиент):  ${C_GREEN}Enable = Вкл | Length: 40-60 | Interval: 30-50 | Packets: tlshello${C_RESET}"
 
         if [ -n "$xhttp_auto_v4" ]; then
-            echo -e "\n ${C_GREEN}1) Основная ссылка VLESS-XHTTP (mode=auto, XMUX поток, порт ${x_port}/tcp):${C_RESET}"
+            echo -e "\n ${C_GREEN}1) Основная ссылка VLESS-XHTTP (mode=stream-one, порт ${x_port}/tcp):${C_RESET}"
             echo -e " ${C_BOLD}${C_GREEN}${xhttp_auto_v4}${C_RESET}"
         fi
         if [ -n "$xhttp_packet_v4" ]; then
@@ -856,12 +856,12 @@ print_vless_shadowrocket_links() {
             echo -e " ${C_BOLD}${C_YELLOW}${xhttp_packet_v4}${C_RESET}"
         fi
         if [ -n "$xhttp_auto_v6" ]; then
-            echo -e "\n ${C_CYAN}3) Резервная ссылка VLESS-XHTTP (IPv6, порт ${x_port}/tcp):${C_RESET}"
+            echo -e "\n ${C_CYAN}3) Резервная ссылка VLESS-XHTTP (IPv6, mode=stream-one, порт ${x_port}/tcp):${C_RESET}"
             echo -e " ${C_CYAN}${xhttp_auto_v6}${C_RESET}"
         fi
 
         if command -v qrencode >/dev/null 2>&1 && [ -n "$xhttp_auto_v4" ]; then
-            echo -e "\n ${C_GREEN}QR-код №1 — VLESS-XHTTP (mode=auto):${C_RESET}"
+            echo -e "\n ${C_GREEN}QR-код №1 — VLESS-XHTTP (mode=stream-one):${C_RESET}"
             qrencode -t ansiutf8 "${xhttp_auto_v4}" 2>/dev/null || true
             if [ -n "$xhttp_packet_v4" ]; then
                 echo -e "\n ${C_YELLOW}QR-код №2 — VLESS-XHTTP (mode=packet-up + fp=firefox для мобильных операторов):${C_RESET}"
@@ -890,7 +890,7 @@ print_vless_shadowrocket_links() {
     echo -e "\n${C_CYAN} Памятка для подключения с iPhone (Shadowrocket / Streisand / V2Box / Happ):${C_RESET}"
     echo -e "   1) В ссылки и QR-коды уже встроены параметры фрагментации TLS ClientHello (fragment=40-60,30-50,tlshello и fm)."
     echo -e "   2) В приложении Shadowrocket на iOS после сканирования QR-кода зайдите внутрь узла (i) -> Fragment и убедитесь, что тумблер Enable включен (Length: 40-60, Interval: 30-50, Packets: tlshello)!"
-    echo -e "   3) Добавьте обе ссылки VLESS-XHTTP (№1 mode=auto и №2 mode=packet-up) — на мобильном интернете часто лучше пробивает №2 (packet-up)."
+    echo -e "   3) Добавьте обе ссылки VLESS-XHTTP (№1 mode=stream-one для максимальной скорости и Telegram, №2 mode=packet-up как резерв для жестких мобильных сетей)."
     echo -e "   4) Ваше приоритетное соединение Tailscale на сервере полностью сохранено."
 }
 
@@ -1036,8 +1036,8 @@ Address = $addr
 FwMark = 51820
 Table = off
 
-# 1. Форвардинг ядра и отключение строгого rp_filter
-PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv4.conf.all.forwarding=1 >/dev/null 2>&1 || true
+# 1. Форвардинг ядра, учет fwmark (src_valid_mark=1), автоподбор MTU и отключение строгого rp_filter
+PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv4.conf.all.forwarding=1 net.ipv4.conf.all.src_valid_mark=1 net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
 PostUp = for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do [ -f "\$rp" ] && echo 0 > "\$rp"; done
 
 # 2. Маршруты в изолированную таблицу 150
@@ -1045,16 +1045,20 @@ PostUp = ip route replace 100.64.0.0/10 dev tailscale0 table 150 2>/dev/null || 
 PostUp = ip route replace default dev wg0 table 150
 PostUp = ip route replace 100.64.0.0/10 dev tailscale0 table main 2>/dev/null || true
 
-# 3. ЗАЩИТА СИСТЕМНОГО ДОСТУПА (ВЫСОКИЙ ПРИОРИТЕТ 95-100 -> в таблицу main / ens3):
+# 3. ЗАЩИТА СИСТЕМНОГО ДОСТУПА (ВЫСОКИЙ ПРИОРИТЕТ 95-100 -> в таблицу 52 / main):
 # А) Пакеты самого WireGuard (FwMark 51820) — защита от зацикливания туннеля!
 PostUp = ip rule del fwmark 51820 lookup main priority 95 2>/dev/null || true
 PostUp = ip rule add fwmark 51820 lookup main priority 95
 
-# Б) Подсеть Tailscale (100.64.0.0/10) — трафик между узлами идет строго через tailscale0
+# Б) Подсеть Tailscale (100.64.0.0/10) — трафик между узлами идет напрямую через таблицу 52 (Tailscale) и main
+PostUp = ip rule del to 100.64.0.0/10 lookup 52 priority 96 2>/dev/null || true
+PostUp = ip rule add to 100.64.0.0/10 lookup 52 priority 96
 PostUp = ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null || true
 PostUp = ip rule add to 100.64.0.0/10 lookup main priority 96
 
-# В) Связь демона Tailscale с пирами и серверами координации (порт 41641/udp)
+# В) Прямой P2P/STUN/DERP-трафик самого демона tailscaled (fwmark 0x80000/0xff0000 на любом порту + 41641/udp)
+PostUp = ip rule del fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null || true
+PostUp = ip rule add fwmark 0x80000/0xff0000 lookup main priority 97
 PostUp = ip rule del sport 41641 lookup main priority 97 2>/dev/null || true
 PostUp = ip rule add sport 41641 lookup main priority 97
 
@@ -1094,7 +1098,9 @@ PostDown = ip rule del iif tailscale0 lookup 150 priority 1000 2>/dev/null || tr
 PostDown = ip rule del sport 80 lookup main priority 100 2>/dev/null || true
 PostDown = ip rule del sport 443 lookup main priority 99 2>/dev/null || true
 PostDown = ip rule del sport $ssh_p lookup main priority 98 2>/dev/null || true
+PostDown = ip rule del fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null || true
 PostDown = ip rule del sport 41641 lookup main priority 97 2>/dev/null || true
+PostDown = ip rule del to 100.64.0.0/10 lookup 52 priority 96 2>/dev/null || true
 PostDown = ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null || true
 PostDown = ip rule del fwmark 51820 lookup main priority 95 2>/dev/null || true
 PostDown = ip rule del fwmark 0x80000000/0x80000000 lookup main priority 94 2>/dev/null || true
@@ -1180,7 +1186,9 @@ disable_hybrid_wg_routing() {
     while ip rule del priority 1000 2>/dev/null; do :; done
     while ip rule del fwmark 0x80000000/0x80000000 lookup main priority 94 2>/dev/null; do :; done
     while ip rule del fwmark 51820 lookup main priority 95 2>/dev/null; do :; done
+    while ip rule del to 100.64.0.0/10 lookup 52 priority 96 2>/dev/null; do :; done
     while ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null; do :; done
+    while ip rule del fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null; do :; done
     while ip rule del sport 41641 lookup main priority 97 2>/dev/null; do :; done
     if [[ "$cleanup_ssh_port" =~ ^[0-9]+$ ]]; then
         while ip rule del sport "$cleanup_ssh_port" lookup main priority 98 2>/dev/null; do :; done
@@ -1627,7 +1635,7 @@ install_universal_dns_boot_guard() {
     mkdir -p /usr/local/sbin
     cat << 'BOOT_GUARD_EOF' > /usr/local/sbin/bobarev-universal-dns-guard
 #!/bin/bash
-# Bobarev Shell v3.20.6 — Универсальный сторож DNS, IPv4-приоритета и защиты от зависшего Exit-Node при загрузке
+# Bobarev Shell v3.20.8 — Универсальный сторож DNS, IPv4-приоритета и защиты от зависшего Exit-Node при загрузке
 set -u
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -3632,7 +3640,7 @@ render_xray_cascade_s1_config() {
         "security": "reality",
         "xhttpSettings": {
           "path": "${s2_path}",
-          "mode": "auto"
+          "mode": "stream-one"
         },
         "realitySettings": {
           "show": false,
@@ -5336,6 +5344,8 @@ net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
+net.ipv4.conf.all.src_valid_mark = 1
+net.ipv4.tcp_mtu_probing = 1
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.send_redirects = 0
@@ -9676,7 +9686,7 @@ SERVER_PUB_IPV6="${pub_ipv6}"
 EOF
  chmod 600 /etc/default/bobarev-cascade
 
- local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=xhttp&path=%2F${GEN_X_PATH#/}&mode=auto&fragment=40-60,30-50,tlshello#VPS-Mullvad-IPv4"
+ local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=xhttp&path=%2F${GEN_X_PATH#/}&mode=stream-one&fragment=40-60,30-50,tlshello#VPS-Mullvad-IPv4"
  {
   echo "=== VLESS-REALITY (XTLS VISION) ССЫЛКИ ДЛЯ SHADOWROCKET / V2BOX (ВЫХОД ЧЕРЕЗ TAILSCALE MULLVAD) ==="
   echo "IPv4: $vless_v4"

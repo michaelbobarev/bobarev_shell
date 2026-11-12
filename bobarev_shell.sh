@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.5 — модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
-# Скрипт выполняет бережную проверку занятых портов без принудительной остановки активных служб, оптимизирует сетевой стек ядра (BBR, буферы, TIME_WAIT, LimitNOFILE=512000) и сохраняет связность управляющих туннелей.
+# Bobarev Shell v3.20.6 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
+# Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, TIME_WAIT, LimitNOFILE=512000) и автоматически защищает DNS и маршрутизацию от сбоев после перезагрузки (systemd-resolved FallbackDNS, MagicDNS и Boot Watchdog).
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.5"
+SCRIPT_VERSION="3.20.6"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -675,7 +675,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.5: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.6: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -722,7 +722,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.5: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+# Bobarev Shell v3.20.6: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -1551,17 +1551,198 @@ ensure_ipv4_precedence_and_host_dns() {
         echo "precedence ::ffff:0:0/96  100" > /etc/gai.conf
     fi
 
-    # 2. Приоритетное соединение Tailscale не изменяем (все пользовательские настройки Tailscale сохраняются)
+    # 2. Если осталась старая служба bobarev-shell-dns.service от Mullvad, но сам маршрут exit-node в таблице 52 не активен,
+    #    отключаем блокировщик WAN DNS, чтобы после перезагрузки не пропадал DNS (search DOMAINS6 -> search .).
+    local mullvad_route_active=false
+    if ip -4 route show table 52 default 2>/dev/null | grep -qE '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)'; then
+        mullvad_route_active=true
+    fi
+    if [ "$mullvad_route_active" = false ]; then
+        if systemctl is-enabled --quiet bobarev-shell-dns.service 2>/dev/null || [ -f /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf ]; then
+            systemctl disable --now bobarev-shell-dns.service 2>/dev/null || true
+            rm -f /etc/systemd/system/bobarev-shell-dns.service /etc/systemd/system/bobarev-dns-guard.service /usr/local/sbin/bobarev-universal-dns-guard /etc/systemd/resolved.conf.d /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf 2>/dev/null || true
+        fi
+    fi
 
-    # 3. Проверяем наличие быстрых публичных DNS в /etc/resolv.conf
-    if [ -f /etc/resolv.conf ] && ! grep -qE '^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|127\.0\.0\.53)' /etc/resolv.conf 2>/dev/null; then
-        if grep -qE '^[[:space:]]*nameserver[[:space:]]+100\.100\.100\.100' /etc/resolv.conf 2>/dev/null; then
+    # 3. Универсальная страховка systemd-resolved (127.0.0.53) от потери апстрим-DNS после reboot (Debian 12/13, Ubuntu, 4vps и др.)
+    local wan_if
+    wan_if=$(get_wan_if)
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        if [ ! -f /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf ]; then
+            cat << 'RESOLVED_UNIV_EOF' > /etc/systemd/resolved.conf.d/99-bobarev-universal-dns.conf
+[Resolve]
+DNS=1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 77.88.8.8 2606:4700:4700::1111 2001:4860:4860::8888
+FallbackDNS=9.9.9.9 149.112.112.112 77.88.8.1
+Domains=~.
+DNSStubListener=yes
+Cache=yes
+RESOLVED_UNIV_EOF
+            chmod 644 /etc/systemd/resolved.conf.d/99-bobarev-universal-dns.conf 2>/dev/null || true
+        fi
+        # Если DNS сейчас не резолвит (например, сразу после reboot с пустым search .), мгновенно перезапускаем и привязываем DNS к WAN
+        if ! getent hosts cloudflare.com >/dev/null 2>&1 && ! getent hosts raw.githubusercontent.com >/dev/null 2>&1 && ! getent hosts ya.ru >/dev/null 2>&1; then
+            systemctl restart systemd-resolved 2>/dev/null || true
+            if [ -n "$wan_if" ] && command -v resolvectl >/dev/null 2>&1 && [ "$mullvad_route_active" = false ]; then
+                resolvectl dns "$wan_if" 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 77.88.8.8 2>/dev/null || true
+                resolvectl default-route "$wan_if" yes 2>/dev/null || true
+                resolvectl flush-caches 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # 4. Страховка классического /etc/resolv.conf (включая серверы с Tailscale MagicDNS 100.100.100.100 без systemd-resolved)
+    if [ -f /etc/resolv.conf ] && ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+        if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|77\.88\.8\.8)' /etc/resolv.conf 2>/dev/null; then
             {
+                cat /etc/resolv.conf 2>/dev/null || true
                 echo "nameserver 1.1.1.1"
                 echo "nameserver 8.8.8.8"
-                cat /etc/resolv.conf
+                echo "nameserver 77.88.8.8"
             } > /etc/resolv.conf.bobarev.tmp && mv -f /etc/resolv.conf.bobarev.tmp /etc/resolv.conf 2>/dev/null || true
         fi
+    fi
+
+    # 5. Финальная самодиагностика: если в /etc/resolv.conf стоит 127.0.0.53, но локальный стаб мёртв при живом пинге до DNS,
+    #    переключаем /etc/resolv.conf на прямые публичные DNS-резолверы (РФ + мир).
+    if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+        if ! getent hosts cloudflare.com >/dev/null 2>&1 && ! getent hosts ya.ru >/dev/null 2>&1; then
+            if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ping -c 1 -W 2 77.88.8.8 >/dev/null 2>&1; then
+                rm -f /etc/resolv.conf 2>/dev/null || true
+                cat << 'DIRECT_RESOLV_EOF' > /etc/resolv.conf
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 77.88.8.8
+nameserver 1.0.0.1
+options edns0 timeout:2 attempts:2
+DIRECT_RESOLV_EOF
+                chmod 644 /etc/resolv.conf 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
+install_universal_dns_boot_guard() {
+    ensure_ipv4_precedence_and_host_dns
+    mkdir -p /usr/local/sbin
+    cat << 'BOOT_GUARD_EOF' > /usr/local/sbin/bobarev-universal-dns-guard
+#!/bin/bash
+# Bobarev Shell v3.20.6 — Универсальный сторож DNS, IPv4-приоритета и защиты от зависшего Exit-Node при загрузке
+set -u
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+get_wan_dev() {
+    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+}
+
+# 1. Приоритет IPv4 над IPv6 в /etc/gai.conf (без отключения IPv6)
+if [ -f /etc/gai.conf ]; then
+    if grep -qE '^[[:space:]]*#[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
+        sed -i -E 's/^[[:space:]]*#[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)//' /etc/gai.conf 2>/dev/null || true
+    elif ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
+        echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
+    fi
+else
+    echo "precedence ::ffff:0:0/96  100" > /etc/gai.conf
+fi
+
+# 2. Защита от «зависшего» или недоступного Tailscale Exit-Node после перезагрузки:
+#    если маршрут уходит в tailscale0, но пинг до 1.1.1.1 / 8.8.8.8 / 77.88.8.8 не проходит,
+#    и при этом на сервере НЕ включён строгий зафиксированный транзакционный режим Mullvad,
+#    возвращаем прямой выход через WAN, чтобы сервер не терял связность.
+if command -v tailscale >/dev/null 2>&1 && ip -4 route show table 52 default 2>/dev/null | grep -qE '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)'; then
+    if [ ! -f /var/lib/bobarev-shell-mullvad/config ] && [ ! -f /etc/bobarev-tailscale/exit-node ]; then
+        if ! ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 && ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 && ! ping -c 1 -W 3 77.88.8.8 >/dev/null 2>&1; then
+            tailscale set --exit-node= 2>/dev/null || true
+        fi
+    fi
+fi
+
+# 3. Очистка осиротевшего блокировщика DNS от Mullvad, если сам туннель Mullvad не активен
+MULLVAD_ACTIVE=false
+if [ -f /var/lib/bobarev-shell-mullvad/config ] && ip -4 route show table 52 default 2>/dev/null | grep -qE '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)'; then
+    MULLVAD_ACTIVE=true
+fi
+if [ "$MULLVAD_ACTIVE" = false ]; then
+    if systemctl is-enabled --quiet bobarev-shell-dns.service 2>/dev/null || [ -f /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf ]; then
+        systemctl disable --now bobarev-shell-dns.service 2>/dev/null || true
+        rm -f /etc/systemd/system/bobarev-shell-dns.service /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf 2>/dev/null || true
+    fi
+fi
+
+# 4. Конфигурация systemd-resolved с постоянным пулом DNS и FallbackDNS (Cloudflare + Google + Quad9 + Yandex для серверов в РФ и за рубежом)
+WAN_IF=$(get_wan_dev)
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    if [ ! -f /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf ]; then
+        cat << 'EOF_RES' > /etc/systemd/resolved.conf.d/99-bobarev-universal-dns.conf
+[Resolve]
+DNS=1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 77.88.8.8 2606:4700:4700::1111 2001:4860:4860::8888
+FallbackDNS=9.9.9.9 149.112.112.112 77.88.8.1
+Domains=~.
+DNSStubListener=yes
+Cache=yes
+EOF_RES
+        chmod 644 /etc/systemd/resolved.conf.d/99-bobarev-universal-dns.conf 2>/dev/null || true
+    fi
+    systemctl restart systemd-resolved 2>/dev/null || true
+    if [ -n "$WAN_IF" ] && command -v resolvectl >/dev/null 2>&1 && [ "$MULLVAD_ACTIVE" = false ]; then
+        resolvectl dns "$WAN_IF" 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 77.88.8.8 2>/dev/null || true
+        resolvectl default-route "$WAN_IF" yes 2>/dev/null || true
+        resolvectl flush-caches 2>/dev/null || true
+    fi
+fi
+
+# 5. Защита /etc/resolv.conf без systemd-resolved (в т.ч. при перезаписи Tailscale MagicDNS 100.100.100.100)
+if [ -f /etc/resolv.conf ] && ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+    if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|77\.88\.8\.8)' /etc/resolv.conf 2>/dev/null; then
+        {
+            cat /etc/resolv.conf 2>/dev/null || true
+            echo "nameserver 1.1.1.1"
+            echo "nameserver 8.8.8.8"
+            echo "nameserver 77.88.8.8"
+        } > /etc/resolv.conf.bobarev.tmp && mv -f /etc/resolv.conf.bobarev.tmp /etc/resolv.conf 2>/dev/null || true
+    fi
+fi
+
+# 6. Аварийное переключение со стаба 127.0.0.53 на прямой /etc/resolv.conf, если после старта стаб не резолвит имена
+sleep 1
+if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+    if ! getent hosts cloudflare.com >/dev/null 2>&1 && ! getent hosts raw.githubusercontent.com >/dev/null 2>&1 && ! getent hosts ya.ru >/dev/null 2>&1; then
+        if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ping -c 1 -W 2 77.88.8.8 >/dev/null 2>&1; then
+            rm -f /etc/resolv.conf 2>/dev/null || true
+            cat << 'EOF_DIRECT' > /etc/resolv.conf
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 77.88.8.8
+nameserver 1.0.0.1
+options edns0 timeout:2 attempts:2
+EOF_DIRECT
+            chmod 644 /etc/resolv.conf 2>/dev/null || true
+        fi
+    fi
+fi
+exit 0
+BOOT_GUARD_EOF
+    chmod 755 /usr/local/sbin/bobarev-universal-dns-guard 2>/dev/null || true
+
+    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+        cat << 'BOOT_UNIT_EOF' > /etc/systemd/system/bobarev-dns-guard.service
+[Unit]
+Description=Bobarev Universal DNS & Post-Reboot Connectivity Guard
+Wants=network-online.target
+After=network-online.target systemd-resolved.service tailscaled.service NetworkManager.service systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bobarev-universal-dns-guard
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BOOT_UNIT_EOF
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable bobarev-dns-guard.service >/dev/null 2>&1 || true
     fi
 }
 
@@ -4591,10 +4772,8 @@ mod_apt_update() {
     echo -e "${C_CYAN} === 3/27. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
 
-    if [ -f /etc/gai.conf ]; then
-        sed -i 's/^#\s*precedence ::ffff:0:0\/96\s\+100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf 2>/dev/null || true
-        echo -e "${C_BLUE} Включен приоритет IPv4 над IPv6 (защита от зависаний apt и curl).${C_RESET}"
-    fi
+    install_universal_dns_boot_guard
+    echo -e "${C_BLUE} Включены приоритет IPv4 над IPv6 и универсальная защита DNS при перезагрузке.${C_RESET}"
 
     apt-get update && apt-get upgrade -yq
 
@@ -5119,6 +5298,7 @@ mod_hardening() {
     silent_run modprobe nf_conntrack
     ensure_wg_kernel_modules
     disable_ufw_strict_rpfilter
+    install_universal_dns_boot_guard
 
     apply_system_nofile_limits
     mkdir -p /etc/sysctl.d
@@ -5191,7 +5371,7 @@ HARDENING_EOF
         echo -e "${C_GREEN} Аппаратный таймер защиты от зависаний (Watchdog 15s) для мини-ПК активирован.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN} Защита ядра, форвардинг пакетов, расширенные UDP-буферы и TCP BBR применены.${C_RESET}"
+    echo -e "${C_GREEN} Защита ядра, буферы 16 МБ, лимиты дескрипторов (512000), TCP BBR и защита DNS после перезагрузки применены.${C_RESET}"
 }
 
 # 8. Firewall UFW (сохраняет правила личного DERP, Каскада NaiveProxy/WARP/WG-Cascade и открывает 41641/udp при наличии Tailscale)
@@ -5585,14 +5765,17 @@ if [[ "$current" != "$node" ]]; then
 fi
 for i in {1..30}; do
  if ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default dev tailscale0([[:space:]]|$)'; then
-  actual=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((p.get("HostName", "?") for p in (d.get("Peer") or {}).values() if p.get("ExitNode")),"не определён"))') || actual='не определён'
-  echo "Настройка выхода применена: $node; peer=$actual."
-  exit 0
+  if ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+   actual=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next((p.get("HostName", "?") for p in (d.get("Peer") or {}).values() if p.get("ExitNode")),"не определён"))') || actual='не определён'
+   echo "Настройка выхода применена: $node; peer=$actual."
+   exit 0
+  fi
  fi
  sleep 2
 done
-echo 'Нет default после выбора выхода. WAN fallback не выполнялся.' >&2
-exit 1
+echo 'Удалённый exit-node недоступен после перезагрузки — автоматический возврат на прямой WAN для сохранения связности.' >&2
+tailscale set --exit-node= 2>/dev/null || true
+exit 0
 TS42_RESTORE
  chmod 700 /usr/local/sbin/bobarev-tailscale-exit-restore || return 1
  cat > /etc/systemd/system/bobarev-tailscale-exit-restore.service <<'TS42_UNIT'
@@ -7078,6 +7261,11 @@ mod_server_audit() {
         audit_human_row 'Лимит дескрипторов (NOFILE):' "${C_GREEN}Расширен (ulimit: 512000, Xray/Hysteria: 1048576)${C_RESET}"
     else
         audit_human_row 'Лимит дескрипторов (NOFILE):' "${C_YELLOW}Стандартный ($nofile_cur — рекомендуется п. 1 -> 8)${C_RESET}"
+    fi
+    if systemctl is-enabled --quiet bobarev-dns-guard.service 2>/dev/null || [ -f /etc/systemd/resolved.conf.d/99-bobarev-universal-dns.conf ]; then
+        audit_human_row 'Защита DNS после ребута:' "${C_GREEN}✔ Активна (FallbackDNS + Boot Watchdog)${C_RESET}"
+    else
+        audit_human_row 'Защита DNS после ребута:' "${C_YELLOW}Не закреплена (включается в п. 1 -> 8)${C_RESET}"
     fi
 
     audit_profile_state 'Профиль защиты ядра:' /etc/sysctl.d/99-zzz-server-hardening.conf
@@ -8986,10 +9174,15 @@ NETWORK_DNS
 dns_guard(){
  [[ -f "$CFG" ]] || return 0
  source "$CFG"
- resolvectl dns "$WAN" ''
- resolvectl domain "$WAN" ''
- resolvectl default-route "$WAN" no
- if ip link show tailscale0 >/dev/null 2>&1;then resolvectl revert tailscale0;fi
+ if ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' || [[ "${BOBAREV_APPLY:-0}" == "1" ]]; then
+  resolvectl dns "$WAN" ''
+  resolvectl domain "$WAN" ''
+  resolvectl default-route "$WAN" no
+  if ip link show tailscale0 >/dev/null 2>&1;then resolvectl revert tailscale0;fi
+ else
+  resolvectl dns "$WAN" 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 2>/dev/null || true
+  resolvectl default-route "$WAN" yes 2>/dev/null || true
+ fi
 }
 configure_dns(){
  apt-get install -y systemd-resolved whiptail
@@ -9007,7 +9200,7 @@ configure_dns(){
 [Resolve]
 DNS=
 DNS=$DNS
-FallbackDNS=
+FallbackDNS=1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4
 Domains=
 Domains=~.
 DNSOverTLS=$dot_mode
@@ -9042,7 +9235,7 @@ for line in open(sys.argv[1]):
   else:values[key].extend(value.split())
  else:scalar[key]=value
 assert values['DNS']==[sys.argv[2]],'Сторонний DNS drop-in перекрывает выбор'
-assert not values['FallbackDNS'] and values['Domains']==['~.'],'Конфликт DNS routing/fallback'
+assert values['Domains']==['~.'],'Конфликт DNS routing/fallback'
 assert scalar.get('DNSStubListener')=='yes','Конфликт режима resolver'
 PY_EFFECTIVE
  cat > /etc/systemd/system/bobarev-shell-dns.service <<'UNIT_DNS'
@@ -10671,6 +10864,11 @@ nm_bound() {
 nm_yes() {
     prompt_yn "$1" "${2:-false}"
 }
+
+# Автоматическое самовосстановление DNS и приоритета IPv4 при каждом запуске скрипта
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    ensure_ipv4_precedence_and_host_dns 2>/dev/null || true
+fi
 
 # ==============================================================================
 # ОБРАБОТКА CLI-АРГУМЕНТОВ И БЫСТРЫХ КОМАНД

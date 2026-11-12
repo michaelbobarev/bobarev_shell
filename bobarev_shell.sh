@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.9 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Bobarev Shell v3.20.10 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
 # Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, src_valid_mark=1, LimitNOFILE=512000), разделяет P2P-трафик Tailscale (fwmark 0x80000 / table 52) и автоматически защищает DNS при перезагрузке.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.9"
+SCRIPT_VERSION="3.20.10"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -77,6 +77,20 @@ get_cpu_rps_mask() {
 }
 
 silent_run() { "$@" >/dev/null 2>&1 || true; }
+
+safe_restart_systemd_service() {
+    local svc="$1"
+    [ -z "$svc" ] && return 1
+    silent_run systemctl stop "$svc"
+    silent_run systemctl daemon-reload
+    silent_run systemctl reset-failed "$svc"
+    silent_run systemctl enable "$svc"
+    if ! systemctl start "$svc" 2>/dev/null; then
+        sleep 1
+        silent_run systemctl reset-failed "$svc"
+        systemctl start "$svc" || true
+    fi
+}
 
 verify_sha256() {
     local file="$1"
@@ -680,7 +694,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.9: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.10: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -727,7 +741,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.9: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+# Bobarev Shell v3.20.10: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -1488,8 +1502,7 @@ setup_standalone_vless_wg() {
 
                 render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m" "$GEN_X_PATH" "$x_dest"
                 write_xray_service
-                silent_run systemctl enable --now bobarev-xray.service
-                systemctl restart bobarev-xray.service || true
+                safe_restart_systemd_service bobarev-xray.service
                 sleep 1
 
                 if ! systemctl is-active --quiet bobarev-xray.service; then
@@ -1914,9 +1927,7 @@ install_and_setup_usque() {
     echo -e "${C_BLUE} Настройка системной службы usque.service (режим: ${proxy_mode}, Dual-Stack IPv4/IPv6 на 127.0.0.1:1080)...${C_RESET}"
     write_usque_systemd_unit "$proxy_mode" "1280" ""
 
-    systemctl daemon-reload
-    systemctl enable --now usque.service
-    systemctl restart usque.service
+    safe_restart_systemd_service usque.service
 
     echo -e "${C_BLUE} Ожидание инициализации QUIC/MASQUE-туннеля на 127.0.0.1:1080...${C_RESET}"
     wait_for_usque_port || true
@@ -2307,8 +2318,7 @@ setup_standalone_vless_masque() {
 
                 render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH" "$x_dest"
                 write_xray_service
-                silent_run systemctl enable --now bobarev-xray.service
-                systemctl restart bobarev-xray.service || true
+                safe_restart_systemd_service bobarev-xray.service
                 sleep 1
 
                 if ! systemctl is-active --quiet bobarev-xray.service; then
@@ -2327,6 +2337,7 @@ setup_standalone_vless_masque() {
 Description=Bobarev Shell Hysteria 2 Server
 After=network.target network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -2340,9 +2351,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 SVC_EOF
-                        silent_run systemctl daemon-reload
-                        silent_run systemctl enable --now hysteria-server.service
-                        systemctl restart hysteria-server.service || true
+                        safe_restart_systemd_service hysteria-server.service
                         if [ -s /etc/hysteria/server.crt ]; then
                             cert_pin=$(openssl x509 -noout -fingerprint -sha256 -in /etc/hysteria/server.crt 2>/dev/null | awk -F= '{print $2}' | tr -d '[:space:]' || true)
                         fi
@@ -2461,8 +2470,7 @@ setup_cascade_server1_ru() {
 
     render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH" "$x_dest"
     write_xray_service
-    silent_run systemctl enable --now bobarev-xray.service
-    systemctl restart bobarev-xray.service || true
+    safe_restart_systemd_service bobarev-xray.service
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_entry"
@@ -2720,8 +2728,7 @@ apply_foreign_exit_mode() {
 TS_MASQUE_EOF
                     chmod 600 /etc/xray/config.json
                     write_xray_service
-                    silent_run systemctl enable --now bobarev-xray.service
-                    silent_run systemctl restart bobarev-xray.service
+                    safe_restart_systemd_service bobarev-xray.service
                     iptables -t nat -I PREROUTING 1 -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null || true
                 fi
             else
@@ -2781,49 +2788,40 @@ render_hysteria_server_config() {
     fi
     chmod 600 /etc/hysteria/server.key
 
-    local outbound_block=""
-    if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
-        outbound_block='outbounds:
-  - name: masque_out
-    type: socks5
-    socks5:
-      addr: "127.0.0.1:1080"'
-    else
-        outbound_block='outbounds:
-  - name: direct_out
-    type: direct
-    direct:
-      mode: 46'
-    fi
-
-    cat << EOF > /etc/hysteria/config.yaml
-listen: ":${h_port}"
-
-tls:
-  cert: "/etc/hysteria/server.crt"
-  key: "/etc/hysteria/server.key"
-
-auth:
-  type: password
-  password: "${h_pass}"
-
-quic:
-  initStreamReceiveWindow: 16777216
-  maxStreamReceiveWindow: 16777216
-  initConnReceiveWindow: 67108864
-  maxConnReceiveWindow: 67108864
-  maxIdleTimeout: 60s
-  maxIncomingStreams: 1024
-  disablePathMTUDiscovery: false
-
-masquerade:
-  type: proxy
-  proxy:
-    url: "https://www.bing.com"
-    rewriteHost: true
-
-${outbound_block}
-EOF
+    {
+        printf 'listen: ":%s"\n\n' "$h_port"
+        printf 'tls:\n'
+        printf '  cert: "/etc/hysteria/server.crt"\n'
+        printf '  key: "/etc/hysteria/server.key"\n\n'
+        printf 'auth:\n'
+        printf '  type: password\n'
+        printf '  password: "%s"\n\n' "$h_pass"
+        printf 'quic:\n'
+        printf '  initStreamReceiveWindow: 16777216\n'
+        printf '  maxStreamReceiveWindow: 16777216\n'
+        printf '  initConnReceiveWindow: 67108864\n'
+        printf '  maxConnReceiveWindow: 67108864\n'
+        printf '  maxIdleTimeout: 60s\n'
+        printf '  maxIncomingStreams: 1024\n'
+        printf '  disablePathMTUDiscovery: false\n\n'
+        printf 'masquerade:\n'
+        printf '  type: proxy\n'
+        printf '  proxy:\n'
+        printf '    url: "https://www.bing.com"\n'
+        printf '    rewriteHost: true\n\n'
+        printf 'outbounds:\n'
+        if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
+            printf '  - name: masque_out\n'
+            printf '    type: socks5\n'
+            printf '    socks5:\n'
+            printf '      addr: "127.0.0.1:1080"\n'
+        else
+            printf '  - name: direct_out\n'
+            printf '    type: direct\n'
+            printf '    direct:\n'
+            printf '      mode: 46\n'
+        fi
+    } > /etc/hysteria/config.yaml
     chmod 600 /etc/hysteria/config.yaml
 }
 
@@ -2879,6 +2877,7 @@ setup_cascade_hysteria_server2_foreign() {
 Description=Bobarev Shell Hysteria 2 Server
 After=network.target network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -2893,9 +2892,7 @@ RestartSec=3
 WantedBy=multi-user.target
 SVC_EOF
 
-    silent_run systemctl daemon-reload
-    silent_run systemctl enable --now hysteria-server.service
-    systemctl restart hysteria-server.service || true
+    safe_restart_systemd_service hysteria-server.service
     sleep 2
 
     if ! systemctl is-active --quiet hysteria-server.service; then
@@ -3033,6 +3030,9 @@ setup_cascade_hysteria_server1_ru() {
     enable_routing_optimizations || true
 
     echo -e "${C_BLUE} Запуск клиентского моста Hysteria 2 (127.0.0.1:1080) без остановки приоритетного соединения Tailscale...${C_RESET}"
+    silent_run systemctl stop hysteria-client.service
+    silent_run systemctl reset-failed hysteria-client.service
+
     if [[ "$s2_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         while ip rule del to "$s2_ip" lookup main priority 101 2>/dev/null; do :; done
         ip rule add to "$s2_ip" lookup main priority 101 2>/dev/null || true
@@ -3046,34 +3046,31 @@ setup_cascade_hysteria_server1_ru() {
     if [[ "$s2_ip" == *:* ]]; then
         h_server_target="[${s2_ip}]:${s2_port}"
     fi
-    local tls_block='tls:
-  sni: "www.bing.com"
-  insecure: true'
     if [ -n "${s2_pin:-}" ]; then
-        tls_block="tls:
-  sni: \"www.bing.com\"
-  insecure: false
-  pinSHA256: \"${s2_pin}\""
         echo -e "${C_GREEN} Включена защита от MITM: привязка сертификата Сервера 2 (pinSHA256: ${s2_pin}).${C_RESET}"
     fi
-    cat << EOF > /etc/hysteria/client.yaml
-server: "${h_server_target}"
-auth: "${s2_pass}"
-
-${tls_block}
-
-quic:
-  initStreamReceiveWindow: 16777216
-  maxStreamReceiveWindow: 16777216
-  initConnReceiveWindow: 67108864
-  maxConnReceiveWindow: 67108864
-  maxIdleTimeout: 60s
-  keepAlivePeriod: 15s
-  disablePathMTUDiscovery: false
-
-socks5:
-  listen: "127.0.0.1:1080"
-EOF
+    {
+        printf 'server: "%s"\n' "$h_server_target"
+        printf 'auth: "%s"\n\n' "$s2_pass"
+        printf 'tls:\n'
+        printf '  sni: "www.bing.com"\n'
+        if [ -n "${s2_pin:-}" ]; then
+            printf '  insecure: false\n'
+            printf '  pinSHA256: "%s"\n\n' "$s2_pin"
+        else
+            printf '  insecure: true\n\n'
+        fi
+        printf 'quic:\n'
+        printf '  initStreamReceiveWindow: 16777216\n'
+        printf '  maxStreamReceiveWindow: 16777216\n'
+        printf '  initConnReceiveWindow: 67108864\n'
+        printf '  maxConnReceiveWindow: 67108864\n'
+        printf '  maxIdleTimeout: 60s\n'
+        printf '  keepAlivePeriod: 15s\n'
+        printf '  disablePathMTUDiscovery: false\n\n'
+        printf 'socks5:\n'
+        printf '  listen: "127.0.0.1:1080"\n'
+    } > /etc/hysteria/client.yaml
     chmod 600 /etc/hysteria/client.yaml
 
     cat << 'SVC_EOF' > /etc/systemd/system/hysteria-client.service
@@ -3081,6 +3078,7 @@ EOF
 Description=Bobarev Shell Hysteria 2 Client (SOCKS5 127.0.0.1:1080)
 After=network.target network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -3095,9 +3093,7 @@ RestartSec=3
 WantedBy=multi-user.target
 SVC_EOF
 
-    silent_run systemctl daemon-reload
-    silent_run systemctl enable --now hysteria-client.service
-    systemctl restart hysteria-client.service || true
+    safe_restart_systemd_service hysteria-client.service
     sleep 2
 
     if ! systemctl is-active --quiet hysteria-client.service; then
@@ -3111,8 +3107,7 @@ SVC_EOF
 
     render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "hysteria_local" "$GEN_X_PATH" "$x_dest"
     write_xray_service
-    silent_run systemctl enable --now bobarev-xray.service
-    systemctl restart bobarev-xray.service || true
+    safe_restart_systemd_service bobarev-xray.service
     sleep 1
 
     if ! systemctl is-active --quiet bobarev-xray.service; then
@@ -3296,6 +3291,7 @@ write_xray_service() {
 Description=Bobarev Shell Xray-core Cascade Service
 After=network.target network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -3812,8 +3808,7 @@ setup_cascade_xray_server2_foreign() {
         return 1
     fi
 
-    silent_run systemctl enable --now bobarev-xray.service
-    systemctl restart bobarev-xray.service || true
+    safe_restart_systemd_service bobarev-xray.service
     sleep 2
 
     if ! systemctl is-active --quiet bobarev-xray.service; then
@@ -3964,8 +3959,7 @@ setup_cascade_xray_server1_ru() {
         return 1
     fi
 
-    silent_run systemctl enable --now bobarev-xray.service
-    systemctl restart bobarev-xray.service || true
+    safe_restart_systemd_service bobarev-xray.service
     sleep 2
 
     if ! systemctl is-active --quiet bobarev-xray.service; then
@@ -9701,8 +9695,7 @@ setup_vless_reality_mullvad_inbound() {
 
  render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "mullvad" "$GEN_X_PATH" "$x_dest"
  write_xray_service
- silent_run systemctl enable --now bobarev-xray.service
- systemctl restart bobarev-xray.service || return 1
+ safe_restart_systemd_service bobarev-xray.service
  sleep 1
  if ! systemctl is-active --quiet bobarev-xray.service; then
   echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"

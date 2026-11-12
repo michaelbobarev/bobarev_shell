@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.3 — модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
+# Bobarev Shell v3.20.4 — модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита для Debian/Ubuntu и Armbian.
 # Скрипт выполняет бережную проверку занятых портов без принудительной остановки активных служб и сохраняет связность управляющих туннелей.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.3"
+SCRIPT_VERSION="3.20.4"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -782,16 +782,18 @@ print_vless_shadowrocket_links() {
     echo -e " Сервер (WAN):         IPv4: ${C_GREEN}${pub_ip4:-нет}${C_RESET} | IPv6: ${C_CYAN}${pub_ip6:-не назначен}${C_RESET}"
 
     if [ -n "$x_uuid" ] && [ -n "$x_pub" ]; then
+        local frag_params="fragment=40-60,30-50,tlshello&fragmentPackets=tlshello&fragmentLength=40-60&fragmentInterval=30-50"
+        local fm_encoded="%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%22tlshello%22%2C%22length%22%3A%2240-60%22%2C%22delay%22%3A%2230-50%22%7D%7D%5D%7D"
         local xhttp_auto_v4="" xhttp_packet_v4="" xhttp_auto_v6=""
         if [ -n "$pub_ip4" ]; then
-            xhttp_auto_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto#${hname}-XHTTP-Auto"
-            xhttp_packet_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=firefox&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-XHTTP-PacketUp"
+            xhttp_auto_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-Auto"
+            xhttp_packet_v4="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=firefox&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-PacketUp"
         fi
         if [ -n "$pub_ip6" ]; then
-            xhttp_auto_v6="vless://${x_uuid}@[${pub_ip6}]:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto#${hname}-XHTTP-IPv6"
+            xhttp_auto_v6="vless://${x_uuid}@[${pub_ip6}]:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=auto&${frag_params}&fm=${fm_encoded}#${hname}-XHTTP-IPv6"
         fi
 
-        echo -e "\n ${C_BOLD}Параметры VLESS-XHTTP (SplitHTTP + REALITY) для ручного ввода:${C_RESET}"
+        echo -e "\n ${C_BOLD}Параметры VLESS-XHTTP (SplitHTTP + REALITY + TLS Fragment) для ручного ввода:${C_RESET}"
         echo -e "   • Тип (Type):         ${C_GREEN}VLESS${C_RESET}"
         echo -e "   • Адрес (Address):    ${C_GREEN}${pub_ip4:-$pub_ip6}${C_RESET}"
         echo -e "   • Порт (Port):        ${C_GREEN}${x_port}${C_RESET}"
@@ -805,6 +807,7 @@ print_vless_shadowrocket_links() {
         echo -e "   • Public Key (pbk):   ${C_GREEN}${x_pub}${C_RESET}"
         echo -e "   • ShortId (sid):      ${C_GREEN}${x_sid}${C_RESET}"
         echo -e "   • Fingerprint (fp):   ${C_GREEN}chrome${C_RESET} (или ${C_YELLOW}firefox${C_RESET})"
+        echo -e "   • Fragment (Клиент):  ${C_GREEN}Enable = Вкл | Length: 40-60 | Interval: 30-50 | Packets: tlshello${C_RESET}"
 
         if [ -n "$xhttp_auto_v4" ]; then
             echo -e "\n ${C_GREEN}1) Основная ссылка VLESS-XHTTP (mode=auto, XMUX поток, порт ${x_port}/tcp):${C_RESET}"
@@ -847,9 +850,10 @@ print_vless_shadowrocket_links() {
     fi
 
     echo -e "\n${C_CYAN} Памятка для подключения с iPhone (Shadowrocket / Streisand / V2Box / Happ):${C_RESET}"
-    echo -e "   1) Добавьте обе ссылки VLESS-XHTTP (№1 mode=auto и №2 mode=packet-up) — на мобильном интернете часто лучше пробивает №2 (packet-up)!"
-    echo -e "   2) Не полагайтесь на кнопку TCP Ping в списке серверов — включите тумблер VPN и откройте сайт в браузере."
-    echo -e "   3) Ваше приоритетное соединение Tailscale на сервере полностью сохранено."
+    echo -e "   1) В ссылки и QR-коды уже встроены параметры фрагментации TLS ClientHello (fragment=40-60,30-50,tlshello и fm)."
+    echo -e "   2) В приложении Shadowrocket на iOS после сканирования QR-кода зайдите внутрь узла (i) -> Fragment и убедитесь, что тумблер Enable включен (Length: 40-60, Interval: 30-50, Packets: tlshello)!"
+    echo -e "   3) Добавьте обе ссылки VLESS-XHTTP (№1 mode=auto и №2 mode=packet-up) — на мобильном интернете часто лучше пробивает №2 (packet-up)."
+    echo -e "   4) Ваше приоритетное соединение Tailscale на сервере полностью сохранено."
 }
 
 print_naive_shadowrocket_links() {
@@ -3204,6 +3208,18 @@ EOF
       "tag": "direct",
       "protocol": "freedom",
       "streamSettings": {
+        "finalmask": {
+          "tcp": [
+            {
+              "type": "fragment",
+              "settings": {
+                "packets": "tlshello",
+                "length": "40-60",
+                "delay": "30-50"
+              }
+            }
+          ]
+        },
         "sockopt": {
           '"${iface_field}"'
           "domainStrategy": "UseIPv4v6",
@@ -9401,7 +9417,7 @@ SERVER_PUB_IPV6="${pub_ipv6}"
 EOF
  chmod 600 /etc/default/bobarev-cascade
 
- local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=tcp#VPS-Mullvad-IPv4"
+ local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=xhttp&path=%2F${GEN_X_PATH#/}&mode=auto&fragment=40-60,30-50,tlshello#VPS-Mullvad-IPv4"
  {
   echo "=== VLESS-REALITY (XTLS VISION) ССЫЛКИ ДЛЯ SHADOWROCKET / V2BOX (ВЫХОД ЧЕРЕЗ TAILSCALE MULLVAD) ==="
   echo "IPv4: $vless_v4"

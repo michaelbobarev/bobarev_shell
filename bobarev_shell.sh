@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.8 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Bobarev Shell v3.20.9 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
 # Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, src_valid_mark=1, LimitNOFILE=512000), разделяет P2P-трафик Tailscale (fwmark 0x80000 / table 52) и автоматически защищает DNS при перезагрузке.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.8"
+SCRIPT_VERSION="3.20.9"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -57,7 +57,12 @@ get_system_type_short() {
 }
 
 get_wan_if() {
-    ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
+    local dev=""
+    dev=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
+    if [ -z "$dev" ]; then
+        dev=$(ip -6 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
+    fi
+    echo "$dev"
 }
 
 DEFAULT_WAN_IF=$(get_wan_if)
@@ -675,7 +680,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.8: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.9: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -722,7 +727,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.8: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+# Bobarev Shell v3.20.9: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -1237,12 +1242,14 @@ select_reality_sni_and_dest_interactive() {
         4)
             prompt_default "Введите внешний домен для маскировки (SNI):" "$default_sni" chosen_sni
             [ "$MODULE_CANCELED" = true ] && return 1
+            chosen_sni=$(printf '%s' "$chosen_sni" | sed -E 's#^https?://##; s#/.*$##; s#:[0-9]+$##' | tr -d '[:space:]"'"'"'')
             [ -z "$chosen_sni" ] && chosen_sni="www.microsoft.com"
             ;;
         5)
             local self_domain=""
             prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
             [ "$MODULE_CANCELED" = true ] && return 1
+            self_domain=$(printf '%s' "$self_domain" | sed -E 's#^https?://##; s#/.*$##; s#:[0-9]+$##' | tr -d '[:space:]"'"'"'')
             if [[ -n "$self_domain" ]]; then
                 chosen_sni="$self_domain"
                 if setup_self_steal_local_backend "$chosen_sni" "8443"; then
@@ -2776,25 +2783,25 @@ render_hysteria_server_config() {
 
     local outbound_block=""
     if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
-        outbound_block="outbounds:
+        outbound_block='outbounds:
   - name: masque_out
     type: socks5
     socks5:
-      addr: 127.0.0.1:1080"
+      addr: "127.0.0.1:1080"'
     else
-        outbound_block="outbounds:
+        outbound_block='outbounds:
   - name: direct_out
     type: direct
     direct:
-      mode: 4"
+      mode: 46'
     fi
 
     cat << EOF > /etc/hysteria/config.yaml
-listen: :${h_port}
+listen: ":${h_port}"
 
 tls:
-  cert: /etc/hysteria/server.crt
-  key: /etc/hysteria/server.key
+  cert: "/etc/hysteria/server.crt"
+  key: "/etc/hysteria/server.key"
 
 auth:
   type: password
@@ -2812,7 +2819,7 @@ quic:
 masquerade:
   type: proxy
   proxy:
-    url: https://www.bing.com
+    url: "https://www.bing.com"
     rewriteHost: true
 
 ${outbound_block}
@@ -2904,15 +2911,31 @@ SVC_EOF
 
     local wan_dev
     wan_dev=$(get_wan_if)
-    local pub_ip
-    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-ens3}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    local pub_ip=""
+    if [ -n "$wan_dev" ]; then
+        pub_ip=$(ip -4 -o addr show dev "$wan_dev" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    fi
     if [ -z "$pub_ip" ]; then
-        pub_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
+        pub_ip=$(ip -4 -o addr show scope global 2>/dev/null | grep -vE 'tailscale|wg|tun|tap|docker|br-|veth|lo' | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    fi
+    if [ -z "$pub_ip" ] || [[ "$pub_ip" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.) ]]; then
+        local ext_v4=""
+        ext_v4=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
+        [ -z "$ext_v4" ] && ext_v4=$(curl -4 -s --max-time 4 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+        [[ "$ext_v4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && pub_ip="$ext_v4"
     fi
     local pub_ipv6=""
-    pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    if [ -n "$wan_dev" ]; then
+        pub_ipv6=$(ip -6 -o addr show dev "$wan_dev" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    fi
+    if [ -z "$pub_ipv6" ]; then
+        pub_ipv6=$(get_wan_global_ipv6)
+    fi
     if [ -z "$pub_ipv6" ]; then
         pub_ipv6=$(curl -6 -s --max-time 4 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
+    fi
+    if [ -z "$pub_ip" ] && [ -n "$pub_ipv6" ]; then
+        pub_ip="$pub_ipv6"
     fi
 
     local cert_pin=""
@@ -2922,12 +2945,10 @@ SVC_EOF
 
     local bridge_token
     bridge_token=$(printf '%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" | base64 | tr -d '
-
  ')
     local bridge_token_v6=""
     if [ -n "$pub_ipv6" ]; then
         bridge_token_v6=$(printf '%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" | base64 | tr -d '
-
  ')
     fi
 
@@ -2978,10 +2999,13 @@ setup_cascade_hysteria_server1_ru() {
     clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
     local decoded
     decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '
-
 ' || echo "")
     local s2_ip="" s2_port="" s2_pass="" s2_pin=""
     IFS='|' read -r s2_ip s2_port s2_pass s2_pin <<< "$decoded"
+    s2_ip=$(printf '%s' "$s2_ip" | tr -d '[:space:]"'"'"'[]')
+    s2_port=$(printf '%s' "$s2_port" | tr -dc '0-9')
+    s2_pass=$(printf '%s' "$s2_pass" | tr -d '[:space:]"'"'"'')
+    s2_pin=$(printf '%s' "$s2_pin" | tr -d '[:space:]"'"'"'')
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ]; then
         echo -e "${C_RED} Ошибка: Неверный формат Токена Hysteria 2!${C_RESET}"
@@ -3009,24 +3033,31 @@ setup_cascade_hysteria_server1_ru() {
     enable_routing_optimizations || true
 
     echo -e "${C_BLUE} Запуск клиентского моста Hysteria 2 (127.0.0.1:1080) без остановки приоритетного соединения Tailscale...${C_RESET}"
+    if [[ "$s2_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        while ip rule del to "$s2_ip" lookup main priority 101 2>/dev/null; do :; done
+        ip rule add to "$s2_ip" lookup main priority 101 2>/dev/null || true
+    elif [[ "$s2_ip" == *:* ]]; then
+        while ip -6 rule del to "$s2_ip" lookup main priority 101 2>/dev/null; do :; done
+        ip -6 rule add to "$s2_ip" lookup main priority 101 2>/dev/null || true
+    fi
 
     mkdir -p /etc/hysteria
     local h_server_target="${s2_ip}:${s2_port}"
-    if [[ "$s2_ip" =~ : ]]; then
+    if [[ "$s2_ip" == *:* ]]; then
         h_server_target="[${s2_ip}]:${s2_port}"
     fi
-    local tls_block="tls:
-  sni: www.bing.com
-  insecure: true"
+    local tls_block='tls:
+  sni: "www.bing.com"
+  insecure: true'
     if [ -n "${s2_pin:-}" ]; then
         tls_block="tls:
-  sni: www.bing.com
+  sni: \"www.bing.com\"
   insecure: false
   pinSHA256: \"${s2_pin}\""
         echo -e "${C_GREEN} Включена защита от MITM: привязка сертификата Сервера 2 (pinSHA256: ${s2_pin}).${C_RESET}"
     fi
     cat << EOF > /etc/hysteria/client.yaml
-server: ${h_server_target}
+server: "${h_server_target}"
 auth: "${s2_pass}"
 
 ${tls_block}
@@ -3041,7 +3072,7 @@ quic:
   disablePathMTUDiscovery: false
 
 socks5:
-  listen: 127.0.0.1:1080
+  listen: "127.0.0.1:1080"
 EOF
     chmod 600 /etc/hysteria/client.yaml
 
@@ -3105,6 +3136,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_REALITY_DEST="${x_dest}"
 XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
@@ -3126,6 +3158,16 @@ EOF
         fi
         if [[ "$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; else test_ip=""; fi
     done
+    if [ -z "$test_ip" ]; then
+        for probe_url in "https://[2606:4700:4700::1111]/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api64.ipify.org"; do
+            if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
+                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+            else
+                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
+            fi
+            if [[ "$test_ip" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$test_ip" == *:* || "$test_ip" == *.* ]]; then break; else test_ip=""; fi
+        done
+    fi
     [ -z "$test_ip" ] && test_ip="Проверьте доступность UDP-порта ${s2_port} на Сервере 2"
     echo -e "
 ${C_GREEN} Каскад (VLESS-REALITY XTLS Vision -> Hysteria 2 QUIC -> Выход Зарубеж) успешно запущен!${C_RESET}"
@@ -3787,15 +3829,31 @@ setup_cascade_xray_server2_foreign() {
 
     local wan_dev
     wan_dev=$(get_wan_if)
-    local pub_ip
-    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-ens3}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    local pub_ip=""
+    if [ -n "$wan_dev" ]; then
+        pub_ip=$(ip -4 -o addr show dev "$wan_dev" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    fi
     if [ -z "$pub_ip" ]; then
-        pub_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "IP_СЕРВЕРА_2")
+        pub_ip=$(ip -4 -o addr show scope global 2>/dev/null | grep -vE 'tailscale|wg|tun|tap|docker|br-|veth|lo' | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    fi
+    if [ -z "$pub_ip" ] || [[ "$pub_ip" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.) ]]; then
+        local ext_v4=""
+        ext_v4=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
+        [ -z "$ext_v4" ] && ext_v4=$(curl -4 -s --max-time 4 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+        [[ "$ext_v4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && pub_ip="$ext_v4"
     fi
     local pub_ipv6=""
-    pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    if [ -n "$wan_dev" ]; then
+        pub_ipv6=$(ip -6 -o addr show dev "$wan_dev" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    fi
+    if [ -z "$pub_ipv6" ]; then
+        pub_ipv6=$(get_wan_global_ipv6)
+    fi
     if [ -z "$pub_ipv6" ]; then
         pub_ipv6=$(curl -6 -s --max-time 4 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || true)
+    fi
+    if [ -z "$pub_ip" ] && [ -n "$pub_ipv6" ]; then
+        pub_ip="$pub_ipv6"
     fi
 
     local bridge_token

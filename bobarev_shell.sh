@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.10 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Bobarev Shell v3.20.11 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
 # Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, src_valid_mark=1, LimitNOFILE=512000), разделяет P2P-трафик Tailscale (fwmark 0x80000 / table 52) и автоматически защищает DNS при перезагрузке.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.10"
+SCRIPT_VERSION="3.20.11"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -694,7 +694,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.10: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.11: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -741,7 +741,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.10: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+# Bobarev Shell v3.20.11: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -894,7 +894,7 @@ print_vless_shadowrocket_links() {
         local h_sni="${HYSTERIA_SNI:-www.bing.com}"
         local h_pin="${HYSTERIA_CERT_PIN:-}"
         local pin_param="insecure=1"
-        [ -n "$h_pin" ] && pin_param="insecure=0&pinSHA256=${h_pin}"
+        [ -n "$h_pin" ] && pin_param="insecure=1&pinSHA256=${h_pin}"
         if [ -n "$pub_ip4" ]; then
             local hy2_uri="hysteria2://${HYSTERIA_PASS}@${pub_ip4}:${h_port}/?sni=${h_sni}&${pin_param}#${hname}-Hysteria2-UDP"
             echo -e "\n ${C_CYAN}4) Скоростная ссылка Hysteria 2 (QUIC UDP, порт ${h_port}/udp):${C_RESET}"
@@ -2784,6 +2784,9 @@ render_hysteria_server_config() {
     mkdir -p /etc/hysteria
     if [ ! -s /etc/hysteria/server.crt ] || [ ! -s /etc/hysteria/server.key ]; then
         openssl req -x509 -nodes -days 3650 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt -subj "/CN=www.bing.com" \
+            -addext "subjectAltName=DNS:www.bing.com,DNS:*.bing.com" 2>/dev/null || \
+        openssl req -x509 -nodes -days 3650 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
             -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt -subj "/CN=www.bing.com" 2>/dev/null
     fi
     chmod 600 /etc/hysteria/server.key
@@ -3054,11 +3057,11 @@ setup_cascade_hysteria_server1_ru() {
         printf 'auth: "%s"\n\n' "$s2_pass"
         printf 'tls:\n'
         printf '  sni: "www.bing.com"\n'
+        printf '  insecure: true\n'
         if [ -n "${s2_pin:-}" ]; then
-            printf '  insecure: false\n'
             printf '  pinSHA256: "%s"\n\n' "$s2_pin"
         else
-            printf '  insecure: true\n\n'
+            printf '\n'
         fi
         printf 'quic:\n'
         printf '  initStreamReceiveWindow: 16777216\n'

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.16 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Bobarev Shell v3.20.17 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
 # Поддерживает горячую смену выходного сервера (Пункт 3) и выбор транспорта между серверами (Пункт 4: Dual-Stack IPv4+IPv6 / Только IPv4 / Только IPv6) во всех каскадах (2-3, 2-4, 2-5, 2-6) без смены ключей VLESS.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.16"
+SCRIPT_VERSION="3.20.17"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -3670,16 +3670,31 @@ change_cascade_hysteria_exit_server_interactive() {
     echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними (служба bobarev-xray не перезапускалась)."
 }
 
+get_cascade_role_human() {
+    case "${1:-}" in
+        ru_entry)              echo "Каскад 2 -> 6: Сервер 1 (РФ: VLESS-XHTTP -> Tailscale)" ;;
+        foreign_warp_exit)     echo "Каскад 2 -> 6: Сервер 2 (Зарубеж: Tailscale -> Выход)" ;;
+        ru_xray_entry)         echo "Каскад 2 -> 3: Сервер 1 (РФ: VLESS-XHTTP -> Finalmask -> Сервер 2)" ;;
+        foreign_xray_exit)     echo "Каскад 2 -> 3: Сервер 2 (Зарубеж: VLESS-XHTTP -> Выход)" ;;
+        ru_hysteria_entry)     echo "Каскад 2 -> 4: Сервер 1 (РФ: VLESS-XHTTP -> Hysteria 2 QUIC)" ;;
+        foreign_hysteria_exit) echo "Каскад 2 -> 4: Сервер 2 (Зарубеж: Hysteria 2 QUIC -> Выход)" ;;
+        standalone_vless|standalone_naive) echo "Автономный режим VLESS-XHTTP (2 -> 1 / 2 -> 2 / 2 -> 5)" ;;
+        *)                     echo "Не активен (${1:-не задана})" ;;
+    esac
+}
+
 toggle_cascade_hysteria_transport_menu() {
-    if [ ! -f /etc/default/bobarev-cascade ]; then
-        echo -e "${C_YELLOW} Каскад Hysteria 2 еще не настроен. Сначала выполните настройку Сервера 1 в Пункте 2.${C_RESET}"
-        return 1
+    local CASCADE_ROLE="" CASCADE_TRANSPORT_MODE="dualstack" HYSTERIA_SERVER="" HYSTERIA_SERVER_V6="" HYSTERIA_PORT="36533" HYSTERIA_PASS="" HYSTERIA_CERT_PIN=""
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
     fi
-    # shellcheck disable=SC1091
-    source /etc/default/bobarev-cascade
     if [ "${CASCADE_ROLE:-}" != "ru_hysteria_entry" ]; then
-        echo -e "${C_YELLOW} Эта опция предназначена для Сервера 1 (Вход РФ). Текущая роль: ${CASCADE_ROLE:-не задана}.${C_RESET}"
-        return 1
+        local role_human
+        role_human=$(get_cascade_role_human "${CASCADE_ROLE:-}")
+        echo -e "${C_YELLOW} Каскад 2 -> 4 (VLESS-XHTTP -> Hysteria 2) сейчас не активен на этом сервере.${C_RESET}"
+        echo -e "${C_BLUE} Текущий активный режим сервера: ${C_BOLD}${role_human}${C_RESET}"
+        echo -e "${C_BLUE} Вы можете заранее выбрать режим транспорта ниже — он сохранится и автоматически применится при настройке Сервера 1 (Пункт 2), либо нажмите Отмена.${C_RESET}\n"
     fi
 
     local cur_mode="${CASCADE_TRANSPORT_MODE:-dualstack}"
@@ -3718,6 +3733,16 @@ toggle_cascade_hysteria_transport_menu() {
     local new_mode="dualstack"
     [ "$t_choice" = "2" ] && new_mode="ipv4_only"
     [ "$t_choice" = "3" ] && new_mode="ipv6_only"
+
+    if [ "${CASCADE_ROLE:-}" != "ru_hysteria_entry" ]; then
+        mkdir -p /etc/default
+        touch /etc/default/bobarev-cascade
+        sed -i '/^CASCADE_TRANSPORT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+        printf 'CASCADE_TRANSPORT_MODE="%s"\n' "$new_mode" >> /etc/default/bobarev-cascade
+        chmod 600 /etc/default/bobarev-cascade
+        echo -e "\n${C_GREEN} ✔ Предварительный выбор транспорта (${C_BOLD}${new_mode}${C_RESET}${C_GREEN}) сохранен и будет использован при запуске каскада Hysteria 2 (Пункт 2).${C_RESET}"
+        return 0
+    fi
 
     if [ "$new_mode" = "ipv4_only" ] && [ -z "$s2_v4" ]; then
         prompt_default "Введите IPv4-адрес Зарубежного Сервера 2:" "" s2_v4
@@ -4862,15 +4887,17 @@ EOF
 }
 
 toggle_cascade_xray_transport_menu() {
-    if [ ! -f /etc/default/bobarev-cascade ]; then
-        echo -e "${C_YELLOW} Конфигурация каскада (/etc/default/bobarev-cascade) не найдена. Сначала выполните настройку Сервера 1 в Пункте 2.${C_RESET}"
-        return 1
+    local CASCADE_ROLE="" CASCADE_TRANSPORT_MODE="dualstack" S2_XRAY_IP="" S2_XRAY_IPV6="" S2_XRAY_PORT="443"
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
     fi
-    # shellcheck disable=SC1091
-    source /etc/default/bobarev-cascade
     if [ "${CASCADE_ROLE:-}" != "ru_xray_entry" ]; then
-        echo -e "${C_YELLOW} Эта опция предназначена для Сервера 1 (Вход РФ). Текущая роль: ${CASCADE_ROLE:-не задана}.${C_RESET}"
-        return 1
+        local role_human
+        role_human=$(get_cascade_role_human "${CASCADE_ROLE:-}")
+        echo -e "${C_YELLOW} Каскад 2 -> 3 (VLESS-XHTTP + Finalmask) сейчас не активен на этом сервере.${C_RESET}"
+        echo -e "${C_BLUE} Текущий активный режим сервера: ${C_BOLD}${role_human}${C_RESET}"
+        echo -e "${C_BLUE} Вы можете заранее выбрать режим транспорта ниже — он сохранится и автоматически применится при настройке Сервера 1 (Пункт 2), либо нажмите Отмена.${C_RESET}\n"
     fi
 
     local cur_mode="${CASCADE_TRANSPORT_MODE:-dualstack}"
@@ -4900,6 +4927,16 @@ toggle_cascade_xray_transport_menu() {
     local new_mode="dualstack"
     [ "$t_choice" = "2" ] && new_mode="ipv4_only"
     [ "$t_choice" = "3" ] && new_mode="ipv6_only"
+
+    if [ "${CASCADE_ROLE:-}" != "ru_xray_entry" ]; then
+        mkdir -p /etc/default
+        touch /etc/default/bobarev-cascade
+        sed -i '/^CASCADE_TRANSPORT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+        printf 'CASCADE_TRANSPORT_MODE="%s"\n' "$new_mode" >> /etc/default/bobarev-cascade
+        chmod 600 /etc/default/bobarev-cascade
+        echo -e "\n${C_GREEN} ✔ Предварительный выбор транспорта (${C_BOLD}${new_mode}${C_RESET}${C_GREEN}) сохранен и будет использован при запуске каскада VLESS-XHTTP (Пункт 2).${C_RESET}"
+        return 0
+    fi
 
     if [ "$new_mode" = "ipv4_only" ] && [ -z "$s2_v4" ]; then
         prompt_default "Введите IPv4-адрес Зарубежного Сервера 2:" "" s2_v4
@@ -10358,9 +10395,9 @@ renew_watchdog(){
 }
 commit(){
  local answer=''
- log 'Откройте НОВУЮ SSH-сессию по публичному IPv4 и проверьте NaiveProxy/Shadowrocket.'
+ log 'Откройте НОВУЮ SSH-сессию по публичному IPv4 и проверьте VLESS-XHTTP / Shadowrocket.'
  log 'Проверьте выходной IP через клиентский прокси. Серверный curl этого не заменяет.'
- log 'Введите KEEP после успешной проверки NaiveProxy/Shadowrocket. Автоматический откат — не ранее чем через 45 минут.'
+ log 'Введите KEEP после успешной проверки VLESS-XHTTP / Shadowrocket. Автоматический откат — не ранее чем через 45 минут.'
  answer=$(whiptail --title 'BOBAREV SHELL' --inputbox 'Введите KEEP для подтверждения (ожидание без ограничения времени; автоматический откат не ранее чем через 45 минут):' 10 60 '' 3>&1 1>&2 2>&3) || die 'Нет подтверждения.'
  [[ $answer == KEEP ]] || die 'Изменения не подтверждены.'
  exec 8>"$BASE/state.lock";flock -w 10 8
@@ -10374,96 +10411,6 @@ commit(){
  systemctl restart bobarev-shell-return.service
  systemctl restart bobarev-shell-dns.service
  log 'Применено. Теперь нужен reboot-тест. Резервная копия сохранена.'
-}
-:443, DOMAIN {
-    @naive_proxy method CONNECT
-    route @naive_proxy {
-        request_header Authorization "{http.request.header.Proxy-Authorization}"
-        basic_auth bcrypt {
-AUTH
-        }
-        request_header -Authorization
-        forward_proxy {
-            hide_ip
-            hide_via
-        }
-    }
-    root * /var/www/html
-    file_server
-    handle_errors {
-        @auth_error expression {http.error.status_code} == 401
-        handle @auth_error {
-            header -WWW-Authenticate
-            respond "Not Found" 404
-        }
-    }
-}
-'''.replace('EMAIL',sys.argv[2]).replace('DOMAIN',sys.argv[1]).replace('AUTH','\n'.join(rows))
-p=Path('/etc/caddy/Caddyfile');p.write_text(text);p.chmod(0o600)
-PY_CADDY
- /usr/local/bin/caddy fmt --overwrite /etc/caddy/Caddyfile >/dev/null 2>&1 || true
- if ! /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$TX/caddy-validate.log" 2>&1; then
-  echo 'Caddyfile не прошёл валидацию.' >&2
-  tail -n 40 "$TX/caddy-validate.log" >&2
-  die 'Проверьте /etc/caddy/Caddyfile и повторите настройку.'
- fi
- cat > /etc/systemd/system/caddy.service <<'UNIT_CADDY'
-[Unit]
-Description=NaiveProxy Caddy — BOBAREV SHELL
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=notify
-User=root
-ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
-ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=1048576
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=full
-[Install]
-WantedBy=multi-user.target
-UNIT_CADDY
- local saved_vless_p=""
- if [[ -f /etc/default/bobarev-cascade ]]; then
-  saved_vless_p=$(awk -F= '/^MULLVAD_VLESS_PORT=/{gsub(/["'"'"']/, "", $2); print $2; exit}' /etc/default/bobarev-cascade 2>/dev/null || true)
- fi
- printf 'CASCADE_ROLE=%q\nNAIVE_DOMAIN=%q\nNAIVE_EMAIL=%q\nNAIVE_OUT_MODE=%q\n' standalone_naive "$domain" "$email" mullvad_ts > /etc/default/bobarev-cascade
- [[ -n "$saved_vless_p" ]] && printf 'MULLVAD_VLESS_PORT=%q\n' "$saved_vless_p" >> /etc/default/bobarev-cascade
- systemctl daemon-reload;systemctl enable caddy.service;systemctl restart caddy.service
- local http_code="" verified=0
- for n in {1..30};do
-  http_code=$(curl -q --noproxy '*' --resolve "$domain:443:127.0.0.1" -o /dev/null -sS -w '%{http_code}' --connect-timeout 3 --max-time 5 "https://$domain" 2>>"$TX/local-caddy-check.txt" || true)
-  if [[ $http_code =~ ^[1-5][0-9][0-9]$ ]];then verified=1;break;fi
-  sleep 3
- done
- if [[ $verified != 1 ]];then
-  journalctl -u caddy --since "10 minutes ago" --no-pager > "$TX/caddy-failure.log" 2>&1 || true
-  echo 'Локальная TLS-проверка Caddy не прошла. Последние строки журнала:' >&2
-  tail -n 60 "$TX/caddy-failure.log" >&2
-  echo "Полный лог: $TX/caddy-failure.log" >&2
-  if grep -qiE 'obtain|certificate|acme|challenge' "$TX/caddy-failure.log";then
-   echo 'Наиболее вероятно: ACME не смог получить сертификат. Проверьте A-запись и доступность 80/tcp/443/tcp извне.' >&2
-  elif grep -qiE 'address already in use|bind' "$TX/caddy-failure.log";then
-   echo 'Порт 80/443 занят другим процессом.' >&2
-  fi
-  die 'Установка остановлена до включения exit node.'
- fi
- python3 - "$domain" "$user" "$pass" "$BASE/client-links.txt" <<'PY_LINKS'
-import base64,pathlib,sys,urllib.parse
-host,u,p,dest=sys.argv[1:];b=base64.b64encode(f'{u}:{p}@{host}:443'.encode()).decode()
-text=f'http2://{b}?obfs=none#{host}-{u}\nhttps://{urllib.parse.quote(u,safe="")}:{urllib.parse.quote(p,safe="")}@{host}:443?padding=true\n'
-f=pathlib.Path(dest);f.write_text(text);f.chmod(0o600)
-PY_LINKS
- log "Ссылки с паролем: $BASE/client-links.txt (root-only)."
- echo ''
- echo '==================== NAIVEPROXY / SHADOWROCKET LINKS ===================='
- cat "$BASE/client-links.txt"
- echo '==================== КОНЕЦ ССЫЛОК (также в client-links.txt) ===================='
- echo ''
-
 }
 ui_input(){
  if command -v whiptail >/dev/null;then
@@ -10552,7 +10499,7 @@ diag(){
  ip -4 rule show;ip -4 route show table main;ip -4 route show table 52 || true
  command -v tailscale >/dev/null && tailscale debug prefs | grep -E 'ExitNode|CorpDNS|RouteAll' || true
  command -v resolvectl >/dev/null && resolvectl status || true
- for s in bobarev-shell-return bobarev-shell-dns bobarev-shell-rollback.timer caddy;do systemctl status "$s" --no-pager -l || true;done
+ for s in bobarev-shell-return bobarev-shell-dns bobarev-shell-rollback.timer bobarev-xray;do systemctl status "$s" --no-pager -l || true;done
  if [[ -f "$CFG" ]];then source "$CFG";log "WAN=$WAN NODE=$NODE DNS=$DNS";fi
  if command -v resolvectl >/dev/null;then timeout 15 resolvectl query www.google.com || true;fi
  if value=$(probe_ip);then log "Текущий IPv4: $value";else log 'Проверка внешнего IP не прошла.';fi

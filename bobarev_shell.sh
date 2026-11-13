@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.18 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
-# Поддерживает равноправный Dual-Stack (IPv4 + IPv6), горячую смену выходного сервера с выпадающим списком Exit Nodes (Пункт 3) и выбор транспорта между серверами (Пункт 4) во всех каскадах и шлюзах (2-3, 2-4, 2-5, 2-6).
+# Bobarev Shell v3.20.19 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Использует единый глобальный профиль VLESS-XHTTP для всех режимов и каскадов на сервере (свободное переключение выходных серверов без смены клиентских ссылок), выпадающий список Exit Nodes и расширенный аудит безопасности.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.18"
+SCRIPT_VERSION="3.20.19"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -548,6 +548,134 @@ scan_and_warn_occupied_ports_interactive() {
     return 0
 }
 
+GLOBAL_VLESS_ENV="/etc/xray/bobarev-vless-global.env"
+
+load_global_vless_credentials() {
+    if [ -f "$GLOBAL_VLESS_ENV" ]; then
+        # shellcheck disable=SC1090
+        source "$GLOBAL_VLESS_ENV"
+    fi
+    if { [ -z "${XRAY_UUID:-}" ] || [ -z "${XRAY_PRIV:-}" ] || [ -z "${XRAY_PUB:-}" ]; } && [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+    fi
+    if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
+        XRAY_PORT="${XRAY_PORT:-443}"
+        XRAY_SNI="${XRAY_SNI:-www.microsoft.com}"
+        XRAY_REALITY_DEST="${XRAY_REALITY_DEST:-${XRAY_SNI}:443}"
+        XRAY_XHTTP_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
+        GEN_X_PORT="$XRAY_PORT"
+        GEN_X_UUID="$XRAY_UUID"
+        GEN_X_PRIV="$XRAY_PRIV"
+        GEN_X_PUB="$XRAY_PUB"
+        GEN_X_SHORT_ID="$XRAY_SHORT_ID"
+        GEN_X_SNI="$XRAY_SNI"
+        GEN_X_DEST="$XRAY_REALITY_DEST"
+        GEN_X_PATH="$XRAY_XHTTP_PATH"
+        if [ ! -f "$GLOBAL_VLESS_ENV" ]; then
+            save_global_vless_credentials "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$XRAY_SNI" "$XRAY_REALITY_DEST" "$XRAY_XHTTP_PATH"
+        fi
+        return 0
+    fi
+    return 1
+}
+
+save_global_vless_credentials() {
+    local p_port="${1:-443}"
+    local p_uuid="$2"
+    local p_priv="$3"
+    local p_pub="$4"
+    local p_sid="$5"
+    local p_sni="${6:-www.microsoft.com}"
+    local p_dest="${7:-${p_sni}:443}"
+    local p_path="${8:-/xhttp-stream}"
+    [[ "$p_path" != /* ]] && p_path="/${p_path}"
+
+    mkdir -p /etc/xray /etc/default
+    cat << EOF > "$GLOBAL_VLESS_ENV"
+XRAY_PORT="${p_port}"
+XRAY_UUID="${p_uuid}"
+XRAY_PRIV="${p_priv}"
+XRAY_PUB="${p_pub}"
+XRAY_SHORT_ID="${p_sid}"
+XRAY_SNI="${p_sni}"
+XRAY_REALITY_DEST="${p_dest}"
+XRAY_XHTTP_PATH="${p_path}"
+EOF
+    chmod 600 "$GLOBAL_VLESS_ENV"
+
+    XRAY_PORT="$p_port"
+    XRAY_UUID="$p_uuid"
+    XRAY_PRIV="$p_priv"
+    XRAY_PUB="$p_pub"
+    XRAY_SHORT_ID="$p_sid"
+    XRAY_SNI="$p_sni"
+    XRAY_REALITY_DEST="$p_dest"
+    XRAY_XHTTP_PATH="$p_path"
+    GEN_X_PORT="$p_port"
+    GEN_X_UUID="$p_uuid"
+    GEN_X_PRIV="$p_priv"
+    GEN_X_PUB="$p_pub"
+    GEN_X_SHORT_ID="$p_sid"
+    GEN_X_SNI="$p_sni"
+    GEN_X_DEST="$p_dest"
+    GEN_X_PATH="$p_path"
+
+    if [ -f /etc/default/bobarev-cascade ]; then
+        sed -i '/^XRAY_PORT=/d;/^XRAY_UUID=/d;/^XRAY_PRIV=/d;/^XRAY_PUB=/d;/^XRAY_SHORT_ID=/d;/^XRAY_SNI=/d;/^XRAY_REALITY_DEST=/d;/^XRAY_XHTTP_PATH=/d;/^MULLVAD_VLESS_PORT=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+        {
+            printf 'XRAY_PORT="%s"\n' "$p_port"
+            printf 'XRAY_UUID="%s"\n' "$p_uuid"
+            printf 'XRAY_PRIV="%s"\n' "$p_priv"
+            printf 'XRAY_PUB="%s"\n' "$p_pub"
+            printf 'XRAY_SHORT_ID="%s"\n' "$p_sid"
+            printf 'XRAY_SNI="%s"\n' "$p_sni"
+            printf 'XRAY_REALITY_DEST="%s"\n' "$p_dest"
+            printf 'XRAY_XHTTP_PATH="%s"\n' "$p_path"
+        } >> /etc/default/bobarev-cascade
+        chmod 600 /etc/default/bobarev-cascade
+    fi
+}
+
+ensure_or_init_global_vless_inbound_interactive() {
+    local menu_label="${1:-Настройка VLESS-XHTTP}"
+    local extra_ports=("${@:2}")
+    ensure_xray_installed || return 1
+
+    if load_global_vless_credentials; then
+        echo -e "${C_GREEN} ✔ Используется глобальная учетная запись VLESS-XHTTP этого сервера:${C_RESET}"
+        echo -e "   Порт: ${C_BOLD}${XRAY_PORT}/tcp${C_RESET} | SNI: ${C_BOLD}${XRAY_SNI}${C_RESET} | Path: ${C_BOLD}${XRAY_XHTTP_PATH}${C_RESET}"
+        echo -e "   Клиентские ссылки в Shadowrocket сохранены и менять их не нужно!"
+        if [ "${#extra_ports[@]}" -gt 0 ]; then
+            if ! scan_and_warn_occupied_ports_interactive "$menu_label" "xray|usque|hysteria" "${extra_ports[@]}"; then
+                return 1
+            fi
+        fi
+        return 0
+    fi
+
+    local x_port="443"
+    prompt_default "Введите TCP-порт для глобальной учетной записи VLESS-XHTTP (рекомендуется 443 или 8443):" "$x_port" x_port
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 1; fi
+    x_port="${x_port//[^0-9]/}"
+    [ -z "$x_port" ] && x_port="443"
+
+    local scan_list=("${x_port}/tcp" "${extra_ports[@]}")
+    if ! scan_and_warn_occupied_ports_interactive "$menu_label" "xray|usque|hysteria" "${scan_list[@]}"; then
+        return 1
+    fi
+
+    local x_sni="www.microsoft.com" x_dest=""
+    select_reality_sni_and_dest_interactive "$x_sni" || return 1
+    x_sni="$SELECT_SNI_RESULT"
+    x_dest="$SELECT_DEST_RESULT"
+
+    generate_xray_reality_credentials || return 1
+    save_global_vless_credentials "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_PUB" "$GEN_X_SHORT_ID" "$x_sni" "$x_dest" "$GEN_X_PATH"
+    echo -e "${C_GREEN} ✔ Создана глобальная учетная запись VLESS-XHTTP (порт ${XRAY_PORT}/tcp, SNI: ${XRAY_SNI}) для всех режимов сервера!${C_RESET}"
+    return 0
+}
+
 generate_xray_reality_credentials() {
     ensure_xray_installed || return 1
     local keys=""
@@ -564,71 +692,107 @@ generate_xray_reality_credentials() {
     return 0
 }
 
+apply_global_vless_to_active_xray() {
+    load_global_vless_credentials || return 1
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+    fi
+    if [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && [ -n "${S2_XRAY_IP:-}" ]; then
+        render_xray_cascade_s1_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$S2_XRAY_IP" "$S2_XRAY_PORT" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "$S2_XRAY_SNI" "$XRAY_XHTTP_PATH" "${S2_XRAY_PATH:-/xhttp-stream}" "$XRAY_REALITY_DEST" "${S2_XRAY_IPV6:-}" "${CASCADE_TRANSPORT_MODE:-dualstack}"
+    elif [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ]; then
+        render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+    elif [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
+        render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "tailscale_exit" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+    else
+        local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
+        [ "$out_m" = "mullvad_ts" ] && out_m="tailscale_exit"
+        render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$out_m" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+    fi
+    if [ -s /etc/xray/vless_users.list ]; then
+        rebuild_xray_inbound_clients
+    fi
+    write_xray_service
+    safe_restart_systemd_service bobarev-xray.service
+    if command -v ufw &>/dev/null; then
+        silent_run ufw allow "${XRAY_PORT}/tcp" comment 'VLESS XHTTP REALITY'
+    fi
+}
+
 rotate_vless_credentials_interactive() {
-    if [ ! -f /etc/default/bobarev-cascade ]; then
-        echo -e "${C_YELLOW} Профиль VLESS-XHTTP еще не настроен на этом сервере.${C_RESET}"
+    local mode="${1:-full}"
+    if ! load_global_vless_credentials; then
+        echo -e "${C_YELLOW} Глобальный профиль VLESS-XHTTP еще не создан. Запускаю первичную инициализацию...${C_RESET}"
+        ensure_or_init_global_vless_inbound_interactive "Создание глобального профиля VLESS-XHTTP" || return 0
+        apply_global_vless_to_active_xray || true
+        print_vless_shadowrocket_links
         return 0
     fi
-    # shellcheck disable=SC1091
-    source /etc/default/bobarev-cascade
+
     local cur_sni="${XRAY_SNI:-www.microsoft.com}"
     local cur_port="${XRAY_PORT:-443}"
     local cur_path="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-    local new_sni="" new_dest="" new_path=""
-    select_reality_sni_and_dest_interactive "$cur_sni" || return 0
-    new_sni="$SELECT_SNI_RESULT"
-    new_dest="$SELECT_DEST_RESULT"
+    local new_port="$cur_port" new_sni="$cur_sni" new_dest="${XRAY_REALITY_DEST:-${cur_sni}:443}" new_path="$cur_path"
 
-    prompt_default "2/2. Путь XHTTP (начинается с /):" "$cur_path" new_path
-    [ "$MODULE_CANCELED" = true ] && return 0
-    [ -z "$new_path" ] && new_path="$cur_path"
-    [[ "$new_path" != /* ]] && new_path="/${new_path}"
+    if [ "$mode" = "params_only" ] || [ "$mode" = "full" ]; then
+        prompt_default "1/3. TCP-порт глобальной учетной записи VLESS-XHTTP:" "$cur_port" new_port
+        [ "$MODULE_CANCELED" = true ] && return 0
+        new_port="${new_port//[^0-9]/}"
+        [ -z "$new_port" ] && new_port="$cur_port"
+        if [ "$new_port" != "$cur_port" ]; then
+            scan_and_warn_occupied_ports_interactive "Смена порта VLESS-XHTTP" "xray" "${new_port}/tcp" || return 0
+        fi
 
-    if ! prompt_yn "Перегенерировать UUID, ключи x25519 и ShortId для VLESS-XHTTP (порт ${cur_port}/tcp, SNI: ${new_sni}, Dest: ${new_dest}, Path: ${new_path})?" "true"; then
-        return 0
+        select_reality_sni_and_dest_interactive "$cur_sni" || return 0
+        new_sni="$SELECT_SNI_RESULT"
+        new_dest="$SELECT_DEST_RESULT"
+
+        prompt_default "3/3. Путь XHTTP (начинается с /):" "$cur_path" new_path
+        [ "$MODULE_CANCELED" = true ] && return 0
+        [ -z "$new_path" ] && new_path="$cur_path"
+        [[ "$new_path" != /* ]] && new_path="/${new_path}"
     fi
 
-    generate_xray_reality_credentials || return 1
-    XRAY_UUID="$GEN_X_UUID"
-    XRAY_PRIV="$GEN_X_PRIV"
-    XRAY_PUB="$GEN_X_PUB"
-    XRAY_SHORT_ID="$GEN_X_SHORT_ID"
-    XRAY_SNI="$new_sni"
-    XRAY_REALITY_DEST="$new_dest"
-    XRAY_XHTTP_PATH="$new_path"
-
-    sed -i '/^XRAY_UUID=/d;/^XRAY_PRIV=/d;/^XRAY_PUB=/d;/^XRAY_SHORT_ID=/d;/^XRAY_SNI=/d;/^XRAY_REALITY_DEST=/d;/^XRAY_XHTTP_PATH=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-    {
-        printf 'XRAY_UUID=%q\n' "$XRAY_UUID"
-        printf 'XRAY_PRIV=%q\n' "$XRAY_PRIV"
-        printf 'XRAY_PUB=%q\n' "$XRAY_PUB"
-        printf 'XRAY_SHORT_ID=%q\n' "$XRAY_SHORT_ID"
-        printf 'XRAY_SNI=%q\n' "$XRAY_SNI"
-        printf 'XRAY_REALITY_DEST=%q\n' "$XRAY_REALITY_DEST"
-        printf 'XRAY_XHTTP_PATH=%q\n' "$XRAY_XHTTP_PATH"
-    } >> /etc/default/bobarev-cascade
-
-    if [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ] && [ -n "${S2_XRAY_IP:-}" ]; then
-        render_xray_cascade_s1_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$S2_XRAY_IP" "$S2_XRAY_PORT" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "$S2_XRAY_SNI" "$XRAY_XHTTP_PATH" "${S2_XRAY_PATH:-/}" "$XRAY_REALITY_DEST"
-    elif [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ]; then
-        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+    local regen_keys=false
+    if [ "$mode" = "keys_only" ]; then
+        if prompt_yn "Перевыпустить глобальные ключи (UUID, x25519, ShortId) с сохранением порта ${new_port}/tcp и SNI ${new_sni}?" "true"; then
+            regen_keys=true
+        else
+            return 0
+        fi
     else
-        local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
-        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$out_m" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+        if prompt_yn "Перегенерировать также UUID и ключи x25519?\n\n• Да — полный перевыпуск новых ключей и ссылок\n• Нет — сохранить текущие UUID и ключи x25519 (обновить только порт/SNI/Path)" "false"; then
+            regen_keys=true
+        fi
     fi
 
-    systemctl restart bobarev-xray.service || true
-    echo -e "${C_GREEN} Ключи VLESS-XHTTP, Path (${XRAY_XHTTP_PATH}) и SNI (${XRAY_SNI}) успешно обновлены!${C_RESET}"
+    if [ "$regen_keys" = true ]; then
+        generate_xray_reality_credentials || return 1
+        save_global_vless_credentials "$new_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_PUB" "$GEN_X_SHORT_ID" "$new_sni" "$new_dest" "$new_path"
+    else
+        save_global_vless_credentials "$new_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$new_sni" "$new_dest" "$new_path"
+    fi
+
+    apply_global_vless_to_active_xray || true
+    echo -e "${C_GREEN} ✔ Глобальная учетная запись VLESS-XHTTP (порт ${XRAY_PORT}/tcp, Path: ${XRAY_XHTTP_PATH}, SNI: ${XRAY_SNI}) обновлена для всех режимов сервера!${C_RESET}"
     print_vless_shadowrocket_links
 }
 
 manage_vless_users_menu() {
     while true; do
         MODULE_CANCELED=false
+        local g_status="Не создана (будет создана при первом запуске любого режима)"
+        if load_global_vless_credentials; then
+            g_status="Активна (Порт: ${XRAY_PORT}/tcp | SNI: ${XRAY_SNI} | Path: ${XRAY_XHTTP_PATH})"
+        fi
         local u_choice=""
-        if ! smart_menu "Управление ключами VLESS-XHTTP, Path и SNI" "\nВыберите действие:" 15 "$WT_WIDTH" 4 "u_choice" \
-            "1" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket / V2Box / Streisand" \
-            "2" " Перевыпустить ключи (UUID / x25519 / ShortId) или сменить SNI и Path" \
+        if ! smart_menu "Глобальная учетная запись VLESS-XHTTP (Единая для всего сервера)" "
+Статус глобального профиля: ${g_status}
+
+Эта учетная запись и ее ссылки едины для всех режимов и каскадов (2-1 .. 2-6) на этом сервере. Любое изменение здесь применяется глобально:" 18 "$WT_WIDTH" 4 "u_choice" \
+            "1" " Показать глобальные ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
+            "2" " Изменить порт, SNI или Path (с сохранением или сменой ключей)" \
+            "3" " Перевыпустить ключи (UUID / x25519 / ShortId) глобально" \
             "0" " Назад" || [ "$u_choice" = "0" ]; then
             break
         fi
@@ -639,7 +803,11 @@ manage_vless_users_menu() {
                 pause_enter
                 ;;
             2)
-                rotate_vless_credentials_interactive
+                rotate_vless_credentials_interactive "params_only"
+                pause_enter
+                ;;
+            3)
+                rotate_vless_credentials_interactive "keys_only"
                 pause_enter
                 ;;
         esac
@@ -812,12 +980,16 @@ get_wan_global_ipv6() {
 }
 
 print_vless_shadowrocket_links() {
-    if [ ! -f /etc/default/bobarev-cascade ]; then
-        echo -e "${C_YELLOW} Профиль VLESS-XHTTP / Hysteria 2 еще не настроен на этом сервере.${C_RESET}"
+    load_global_vless_credentials || true
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+    fi
+    load_global_vless_credentials || true
+    if [ -z "${XRAY_UUID:-}" ] && [ -z "${HYSTERIA_PASS:-}" ]; then
+        echo -e "${C_YELLOW} Глобальный профиль VLESS-XHTTP / Hysteria 2 еще не создан на этом сервере.${C_RESET}"
         return 0
     fi
-    # shellcheck disable=SC1091
-    source /etc/default/bobarev-cascade
 
     local wan_dev pub_ip4 pub_ip6
     wan_dev=$(get_wan_if)
@@ -1506,79 +1678,12 @@ setup_standalone_vless_wg() {
                 ;;
             5)
                 echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО VLESS / XHTTP (SplitHTTP + REALITY) ===${C_RESET}"
-                local x_port="443"
-                local x_sni="www.microsoft.com"
-                if [ -f /etc/default/bobarev-cascade ]; then
-                    # shellcheck disable=SC1091
-                    source /etc/default/bobarev-cascade
-                    x_port="${XRAY_PORT:-443}"
-                    x_sni="${XRAY_SNI:-www.microsoft.com}"
-                fi
-                prompt_default "1/2. Введите TCP-порт для VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
-                [ "$MODULE_CANCELED" = true ] && continue
-                x_port="${x_port//[^0-9]/}"
-                [ -z "$x_port" ] && x_port="443"
-
-                local allow_self=""
-                [ "$is_configured" = true ] && allow_self="xray"
-                if ! scan_and_warn_occupied_ports_interactive "Пункт 1 — Автономный VLESS-REALITY (+ WG Dual-Gateway)" "$allow_self" "${x_port}/tcp"; then
-                    pause_enter
-                    continue
-                fi
-
-                local x_sni_choice="" x_dest=""
-                echo -e "\n${C_BOLD}Выберите режим маскировки SNI:${C_RESET}"
-                echo -e "  ${C_CYAN}1)${C_RESET} www.microsoft.com (По умолчанию — глобальный CDN Microsoft, TLS 1.3 / H2)"
-                echo -e "  ${C_CYAN}2)${C_RESET} itunes.apple.com  (Глобальный CDN Apple, отличная проходимость на iOS/macOS)"
-                echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
-                echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
-                echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
-                read -r -p "Ваш выбор [1-5, Enter=1]: " x_sni_choice
-                case "${x_sni_choice:-1}" in
-                    1) x_sni="www.microsoft.com" ;;
-                    2) x_sni="itunes.apple.com" ;;
-                    3) x_sni="www.amd.com" ;;
-                    4)
-                        prompt_default "Введите внешний домен для маскировки (SNI):" "$x_sni" x_sni
-                        [ "$MODULE_CANCELED" = true ] && continue
-                        ;;
-                    5)
-                        local self_domain=""
-                        prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
-                        [ "$MODULE_CANCELED" = true ] && continue
-                        if [[ -n "$self_domain" ]]; then
-                            x_sni="$self_domain"
-                            if setup_self_steal_local_backend "$x_sni" "8443"; then
-                                x_dest="127.0.0.1:8443"
-                            else
-                                echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
-                                pause_enter; continue
-                            fi
-                        else
-                            x_sni="www.microsoft.com"
-                        fi
-                        ;;
-                    *) x_sni="www.microsoft.com" ;;
-                esac
-                [[ -z "$x_dest" ]] && x_dest="${x_sni}:443"
-
-                ensure_xray_installed || { pause_enter; continue; }
+                ensure_or_init_global_vless_inbound_interactive "Пункт 1 — Автономный VLESS-XHTTP (+ WG Dual-Gateway)" || { pause_enter; continue; }
+                local x_port="$XRAY_PORT"
+                local x_sni="$XRAY_SNI"
+                local x_dest="$XRAY_REALITY_DEST"
                 enable_routing_optimizations || true
-                apply_naive_tcp_tuning_profile "balanced"
-                local reuse_keys=false
-                if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
-                    if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
-                        reuse_keys=true
-                        GEN_X_UUID="$XRAY_UUID"
-                        GEN_X_PRIV="$XRAY_PRIV"
-                        GEN_X_PUB="$XRAY_PUB"
-                        GEN_X_SHORT_ID="$XRAY_SHORT_ID"
-                        GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-                    fi
-                fi
-                if [ "$reuse_keys" = false ]; then
-                    generate_xray_reality_credentials || { pause_enter; continue; }
-                fi
+                apply_naive_tcp_tuning_profile "balanced" 
 
                 local wan_dev pub_ip pub_ip6
                 wan_dev=$(get_wan_if)
@@ -2312,70 +2417,15 @@ setup_standalone_vless_masque() {
                 ;;
             7)
                 echo -e "${C_CYAN} === НАСТРОЙКА СВЯЗКИ VLESS / XHTTP (SplitHTTP + REALITY) + CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
-                local x_port="443"
-                local x_sni="www.microsoft.com"
-                if [ -f /etc/default/bobarev-cascade ]; then
-                    # shellcheck disable=SC1091
-                    source /etc/default/bobarev-cascade
-                    x_port="${XRAY_PORT:-443}"
-                    x_sni="${XRAY_SNI:-www.microsoft.com}"
-                fi
-
-                prompt_default "1/3. TCP-порт для VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
-                [ "$MODULE_CANCELED" = true ] && continue
-                x_port="${x_port//[^0-9]/}"
-                [ -z "$x_port" ] && x_port="443"
-
-                local x_sni_choice="" x_dest=""
-                echo -e "\n${C_BOLD}Выберите режим маскировки SNI:${C_RESET}"
-                echo -e "  ${C_CYAN}1)${C_RESET} www.microsoft.com (По умолчанию — глобальный CDN Microsoft, TLS 1.3 / H2)"
-                echo -e "  ${C_CYAN}2)${C_RESET} itunes.apple.com  (Глобальный CDN Apple, отличная проходимость на iOS/macOS)"
-                echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
-                echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
-                echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
-                read -r -p "Ваш выбор [1-5, Enter=1]: " x_sni_choice
-                case "${x_sni_choice:-1}" in
-                    1) x_sni="www.microsoft.com" ;;
-                    2) x_sni="itunes.apple.com" ;;
-                    3) x_sni="www.amd.com" ;;
-                    4)
-                        prompt_default "Введите внешний домен для маскировки (SNI):" "$x_sni" x_sni
-                        [ "$MODULE_CANCELED" = true ] && continue
-                        ;;
-                    5)
-                        local self_domain=""
-                        prompt_default "Введите ваш домен (DNS A-запись должна указывать на IP этого VPS):" "" self_domain
-                        [ "$MODULE_CANCELED" = true ] && continue
-                        if [[ -n "$self_domain" ]]; then
-                            x_sni="$self_domain"
-                            if setup_self_steal_local_backend "$x_sni" "8443"; then
-                                x_dest="127.0.0.1:8443"
-                            else
-                                echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
-                                pause_enter; continue
-                            fi
-                        else
-                            x_sni="www.microsoft.com"
-                        fi
-                        ;;
-                    *) x_sni="www.microsoft.com" ;;
-                esac
-                [[ -z "$x_dest" ]] && x_dest="${x_sni}:443"
+                ensure_or_init_global_vless_inbound_interactive "Пункт 2 — Автономный VLESS-XHTTP (+ Cloudflare MASQUE)" "1080/tcp" "10808/tcp" || { pause_enter; continue; }
+                local x_port="$XRAY_PORT"
+                local x_sni="$XRAY_SNI"
+                local x_dest="$XRAY_REALITY_DEST"
 
                 local enable_hy2_backup=false
-                if prompt_yn "3/3. Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
-(VLESS-REALITY работает на ${x_port}/tcp, а Hysteria 2 на ${x_port}/udp — они не мешают друг другу!)" "true"; then
+                if prompt_yn "Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
+(VLESS-XHTTP работает на ${x_port}/tcp, а Hysteria 2 на ${x_port}/udp — они не мешают друг другу!)" "true"; then
                     enable_hy2_backup=true
-                fi
-
-                local allow_self=""
-                [ "$is_configured" = true ] && allow_self="xray|usque|hysteria"
-                local ports_to_scan=("${x_port}/tcp" "1080/tcp" "10808/tcp")
-                [ "$enable_hy2_backup" = true ] && ports_to_scan+=("${x_port}/udp")
-
-                if ! scan_and_warn_occupied_ports_interactive "Пункт 2 — Автономный VLESS-REALITY (+ Cloudflare MASQUE)" "$allow_self" "${ports_to_scan[@]}"; then
-                    pause_enter
-                    continue
                 fi
 
                 ensure_ipv4_precedence_and_host_dns
@@ -2392,23 +2442,8 @@ setup_standalone_vless_masque() {
                     source /etc/default/bobarev-cascade
                     target_usque_mode="${USQUE_MODE:-$target_usque_mode}"
                 fi
-
-                # Шаг 2: Установка и настройка Xray VLESS-REALITY (XTLS Vision)
-                local reuse_keys=false
-                if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
-                    if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
-                        reuse_keys=true
-                        GEN_X_UUID="$XRAY_UUID"
-                        GEN_X_PRIV="$XRAY_PRIV"
-                        GEN_X_PUB="$XRAY_PUB"
-                        GEN_X_SHORT_ID="$XRAY_SHORT_ID"
-                        GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-                    fi
-                fi
-                if [ "$reuse_keys" = false ]; then
-                    generate_xray_reality_credentials || { pause_enter; continue; }
-                fi
-                apply_naive_tcp_tuning_profile "balanced"
+                load_global_vless_credentials || true
+                apply_naive_tcp_tuning_profile "balanced" 
 
                 render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH" "$x_dest"
                 write_xray_service
@@ -2517,33 +2552,18 @@ setup_standalone_naive_masque() {
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS / XHTTP (SplitHTTP + REALITY) -> TAILSCALE ===${C_RESET}"
-    local saved_exit="" x_port="443" x_sni="www.microsoft.com" cur_role=""
+    local saved_exit=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         saved_exit="${EXIT_TS_IP:-}"
-        x_port="${XRAY_PORT:-443}"
-        x_sni="${XRAY_SNI:-www.microsoft.com}"
-        cur_role="${CASCADE_ROLE:-}"
     fi
 
-    prompt_default "1/3. TCP-порт для VLESS-REALITY на этом РФ-сервере (рекомендуется 443 или 8443):" "$x_port" x_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
-    x_port="${x_port//[^0-9]/}"
-    [ -z "$x_port" ] && x_port="443"
+    ensure_or_init_global_vless_inbound_interactive "Пункт 6 — Каскад: VLESS-XHTTP + Tailscale (Сервер 1 РФ)" || return 0
+    local x_port="$XRAY_PORT"
+    local x_sni="$XRAY_SNI"
+    local x_dest="$XRAY_REALITY_DEST"
 
-    local allow_self=""
-    [ "$cur_role" = "ru_entry" ] && allow_self="xray"
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 6 — Каскад: VLESS-REALITY + Tailscale (Сервер 1 РФ)" "$allow_self" "${x_port}/tcp"; then
-        return 0
-    fi
-
-    local x_dest=""
-    select_reality_sni_and_dest_interactive "$x_sni" || return 0
-    x_sni="$SELECT_SNI_RESULT"
-    x_dest="$SELECT_DEST_RESULT"
-
-    ensure_xray_installed || return 1
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
@@ -2556,21 +2576,8 @@ setup_cascade_server1_ru() {
         echo -e "${C_RED} Ошибка: Выходной сервер (Exit Node) не выбран!${C_RESET}"
         return 1
     fi
-
-    local reuse_keys=false
-    if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
-        if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
-            reuse_keys=true
-            GEN_X_UUID="$XRAY_UUID"
-            GEN_X_PRIV="$XRAY_PRIV"
-            GEN_X_PUB="$XRAY_PUB"
-            GEN_X_SHORT_ID="$XRAY_SHORT_ID"
-            GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-        fi
-    fi
-    if [ "$reuse_keys" = false ]; then
-        generate_xray_reality_credentials || return 1
-    fi
+    silent_run systemctl stop hysteria-client.service 2>/dev/null || true
+    load_global_vless_credentials || true
 
     local wan_dev pub_ip pub_ip6
     wan_dev=$(get_wan_if)
@@ -2762,14 +2769,35 @@ change_cascade_tailscale_exit_node_interactive() {
         return 1
     fi
 
-    echo -e "${C_BLUE} Переключение Tailscale Exit Node на ${new_exit} (ключи и ссылки VLESS-XHTTP не меняются)...${C_RESET}"
+    ensure_or_init_global_vless_inbound_interactive "Выбор выходного сервера (Tailscale / Mullvad Exit Node)" || return 1
+    silent_run systemctl stop hysteria-client.service 2>/dev/null || true
+
+    echo -e "${C_BLUE} Активация выходного сервера Tailscale / Mullvad (${new_exit}) с сохранением глобальных ссылок VLESS-XHTTP...${C_RESET}"
+    render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "tailscale_exit" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+    if [ -s /etc/xray/vless_users.list ]; then
+        rebuild_xray_inbound_clients
+    fi
+    write_xray_service
+    safe_restart_systemd_service bobarev-xray.service
+
     tailscale set --exit-node="$new_exit" --exit-node-allow-lan-access=true --accept-routes=true --accept-dns=false 2>/dev/null || true
+
+    local wan_dev pub_ip pub_ip6
+    wan_dev=$(get_wan_if)
+    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
+    pub_ip6=$(get_wan_global_ipv6)
 
     mkdir -p /etc/default
     touch /etc/default/bobarev-cascade
-    sed -i '/^EXIT_TS_IP=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-    printf 'EXIT_TS_IP="%s"\n' "$new_exit" >> /etc/default/bobarev-cascade
-    chmod 600 /etc/default/bobarev-cascade
+    sed -i '/^CASCADE_ROLE=/d;/^VLESS_OUT_MODE=/d;/^EXIT_TS_IP=/d;/^SERVER_PUB_IP=/d;/^SERVER_PUB_IPV6=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    {
+        printf 'CASCADE_ROLE="ru_entry"\n'
+        printf 'VLESS_OUT_MODE="mullvad_ts"\n'
+        printf 'EXIT_TS_IP="%s"\n' "$new_exit"
+        printf 'SERVER_PUB_IP="%s"\n' "$pub_ip"
+        printf 'SERVER_PUB_IPV6="%s"\n' "$pub_ip6"
+    } >> /etc/default/bobarev-cascade
+    save_global_vless_credentials "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$XRAY_SNI" "$XRAY_REALITY_DEST" "$XRAY_XHTTP_PATH"
 
     write_bobarev_cascade_ru_script
     /usr/local/bin/bobarev-cascade-ru.sh
@@ -2866,7 +2894,7 @@ manage_cascade_naive_ts_warp() {
 Выберите действие:" 21 "$WT_WIDTH" 8 "c_choice" \
             "1" " Сервер 1 (РФ): VLESS-XHTTP -> Tailscale Exit Node" \
             "2" " Сервер 2 (Зарубеж): Tailscale -> Выход (Чистый IP / MASQUE)" \
-            "3" " Сменить выходной сервер (Exit Node) на Сервере 1 БЕЗ смены ключей VLESS" \
+            "3" " Выбрать выходной сервер (Exit Node)" \
             "4" " Транспорт между серверами (41641/udp): IPv4+IPv6 / Только IPv4 / Только IPv6" \
             "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
             "6" " Показать ссылки и QR-коды для Shadowrocket" \
@@ -3385,25 +3413,16 @@ setup_cascade_hysteria_server1_ru() {
         return 1
     fi
 
-    prompt_default "2/3. TCP-порт на этом РФ-сервере для приема VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
-    x_port="${x_port//[^0-9]/}"
-    [ -z "$x_port" ] && x_port="443"
-
-    local allow_self=""
-    [ "$cur_role" = "ru_hysteria_entry" ] && allow_self="xray|hysteria"
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 4 — Каскад: VLESS-REALITY -> Hysteria 2 (Сервер 1 РФ)" "$allow_self" "${x_port}/tcp" "1080/tcp"; then
-        return 0
-    fi
-
-    local x_dest=""
-    select_reality_sni_and_dest_interactive "$x_sni" || return 0
-    x_sni="$SELECT_SNI_RESULT"
-    x_dest="$SELECT_DEST_RESULT"
+    ensure_or_init_global_vless_inbound_interactive "Пункт 4 — Каскад: VLESS-XHTTP -> Hysteria 2 (Сервер 1 РФ)" "1080/tcp" || return 0
+    local x_port="$XRAY_PORT"
+    local x_sni="$XRAY_SNI"
+    local x_dest="$XRAY_REALITY_DEST"
 
     ensure_hysteria_installed || return 1
-    ensure_xray_installed || return 1
     enable_routing_optimizations || true
+    if command -v tailscale &>/dev/null; then
+        silent_run tailscale set --exit-node= 2>/dev/null || true
+    fi
 
     echo -e "${C_BLUE} Запуск клиентского моста Hysteria 2 (127.0.0.1:1080) без остановки приоритетного соединения Tailscale...${C_RESET}"
     silent_run systemctl stop hysteria-client.service
@@ -3478,20 +3497,7 @@ SVC_EOF
         return 1
     fi
 
-    local reuse_keys=false
-    if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
-        if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
-            reuse_keys=true
-            GEN_X_UUID="$XRAY_UUID"
-            GEN_X_PRIV="$XRAY_PRIV"
-            GEN_X_PUB="$XRAY_PUB"
-            GEN_X_SHORT_ID="$XRAY_SHORT_ID"
-            GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-        fi
-    fi
-    if [ "$reuse_keys" = false ]; then
-        generate_xray_reality_credentials || return 1
-    fi
+    load_global_vless_credentials || true
     apply_naive_tcp_tuning_profile "balanced"
 
     render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "hysteria_local" "$GEN_X_PATH" "$x_dest"
@@ -3634,10 +3640,7 @@ change_cascade_hysteria_exit_server_interactive() {
         cur_srv="${HYSTERIA_SERVER:-}"
         cur_port="${HYSTERIA_PORT:-}"
     fi
-    if [ -z "${XRAY_UUID:-}" ] || [ ! -f /etc/xray/config.json ]; then
-        echo -e "${C_YELLOW} Входной сервер VLESS-XHTTP еще не настроен в этом каскаде. Сначала выполните первичную настройку в Пункте 2.${C_RESET}"
-        return 1
-    fi
+    ensure_or_init_global_vless_inbound_interactive "Выбор выходного сервера Hysteria 2" || return 1
 
     echo -e "${C_BLUE} Текущий выходной сервер Hysteria 2: ${C_BOLD}${cur_srv:-не задан}:${cur_port:-36533}${C_RESET}"
     echo -e "${C_BLUE} Входные ключи, порт (${XRAY_PORT:-443}/tcp), SNI (${XRAY_SNI:-}) и клиентские ссылки VLESS в Shadowrocket останутся неизменными!${C_RESET}\n"
@@ -3706,8 +3709,20 @@ change_cascade_hysteria_exit_server_interactive() {
         test_ip=$(probe_hysteria_socks_exit_ip)
     fi
 
-    sed -i '/^HYSTERIA_SERVER=/d;/^HYSTERIA_SERVER_V6=/d;/^HYSTERIA_PORT=/d;/^HYSTERIA_PASS=/d;/^HYSTERIA_CERT_PIN=/d;/^CASCADE_TRANSPORT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    if command -v tailscale &>/dev/null; then
+        silent_run tailscale set --exit-node= 2>/dev/null || true
+    fi
+    render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+    if [ -s /etc/xray/vless_users.list ]; then
+        rebuild_xray_inbound_clients
+    fi
+    write_xray_service
+    safe_restart_systemd_service bobarev-xray.service
+
+    touch /etc/default/bobarev-cascade
+    sed -i '/^CASCADE_ROLE=/d;/^HYSTERIA_SERVER=/d;/^HYSTERIA_SERVER_V6=/d;/^HYSTERIA_PORT=/d;/^HYSTERIA_PASS=/d;/^HYSTERIA_CERT_PIN=/d;/^CASCADE_TRANSPORT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
     {
+        printf 'CASCADE_ROLE="ru_hysteria_entry"\n'
         printf 'CASCADE_TRANSPORT_MODE="%s"\n' "$cur_mode"
         printf 'HYSTERIA_SERVER="%s"\n' "${s2_ipv4:-$s2_ip}"
         printf 'HYSTERIA_SERVER_V6="%s"\n' "${s2_ipv6}"
@@ -3715,7 +3730,7 @@ change_cascade_hysteria_exit_server_interactive() {
         printf 'HYSTERIA_PASS="%s"\n' "$s2_pass"
         printf 'HYSTERIA_CERT_PIN="%s"\n' "$s2_pin"
     } >> /etc/default/bobarev-cascade
-    chmod 600 /etc/default/bobarev-cascade
+    save_global_vless_credentials "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$XRAY_SNI" "$XRAY_REALITY_DEST" "$XRAY_XHTTP_PATH" 
 
     [ -z "$test_ip" ] && test_ip="Проверьте доступность UDP-порта ${s2_port} на новом Сервере 2"
     echo -e "\n${C_GREEN} ✔ Выходной сервер Hysteria 2 успешно переключен на ${C_BOLD}${active_target}:${s2_port}${C_RESET}${C_GREEN}!${C_RESET}"
@@ -3878,7 +3893,7 @@ manage_cascade_hysteria_menu() {
 Выберите действие:" 22 "$WT_WIDTH" 9 "c_choice" \
         "1" " Сервер 2 (Зарубеж или Автономный): Hysteria 2 QUIC -> Выход" \
         "2" " Сервер 1 (РФ): VLESS-XHTTP -> Hysteria 2 QUIC" \
-        "3" " Сменить выходной сервер (новый Токен Hysteria 2) БЕЗ смены ключей VLESS" \
+        "3" " Выбрать выходной сервер (Токен Hysteria 2)" \
         "4" " Транспорт между серверами: IPv4+IPv6 / Только IPv4 / Только IPv6" \
         "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
         "6" " Показать ссылки и QR-коды для Shadowrocket" \
@@ -4664,24 +4679,16 @@ setup_cascade_xray_server1_ru() {
         return 1
     fi
 
-    prompt_default "2/3. TCP-порт на этом РФ-сервере для подключения ваших устройств (рекомендуется 443):" "$s1_port" s1_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$s1_port" ]; then return 0; fi
-    s1_port="${s1_port//[^0-9]/}"
-    [ -z "$s1_port" ] && s1_port="443"
+    ensure_or_init_global_vless_inbound_interactive "Пункт 3 — Каскад: VLESS-XHTTP + Finalmask (Сервер 1 РФ)" "10808/tcp" || return 0
+    s1_port="$XRAY_PORT"
+    s1_sni="$XRAY_SNI"
+    local s1_dest="$XRAY_REALITY_DEST"
 
-    local allow_self=""
-    [ "$cur_role" = "ru_xray_entry" ] && allow_self="xray"
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 3 — Каскад: VLESS-XHTTP + Finalmask (Сервер 1 РФ)" "$allow_self" "${s1_port}/tcp" "10808/tcp"; then
-        return 0
-    fi
-
-    local s1_dest=""
-    select_reality_sni_and_dest_interactive "$s1_sni" || return 0
-    s1_sni="$SELECT_SNI_RESULT"
-    s1_dest="$SELECT_DEST_RESULT"
-
-    ensure_xray_installed || return 1
     enable_routing_optimizations || true
+    silent_run systemctl stop hysteria-client.service 2>/dev/null || true
+    if command -v tailscale &>/dev/null; then
+        silent_run tailscale set --exit-node= 2>/dev/null || true
+    fi
 
     echo -e "${C_BLUE} Запуск каскадного моста VLESS-XHTTP (Finalmask -> ${s2_ip}:${s2_port}, Path: ${s2_path}) без остановки Tailscale...${C_RESET}"
     while ip rule del priority 101 2>/dev/null; do :; done
@@ -4689,20 +4696,7 @@ setup_cascade_xray_server1_ru() {
     [ -n "$s2_ipv4" ] && ip rule add to "$s2_ipv4" lookup main priority 101 2>/dev/null || true
     [ -n "$s2_ipv6" ] && ip -6 rule add to "$s2_ipv6" lookup main priority 101 2>/dev/null || true
 
-    local reuse_keys=false
-    if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
-        if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
-            reuse_keys=true
-            GEN_X_UUID="$XRAY_UUID"
-            GEN_X_PRIV="$XRAY_PRIV"
-            GEN_X_PUB="$XRAY_PUB"
-            GEN_X_SHORT_ID="$XRAY_SHORT_ID"
-            GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-        fi
-    fi
-    if [ "$reuse_keys" = false ]; then
-        generate_xray_reality_credentials || return 1
-    fi
+    load_global_vless_credentials || true
     local s1_uuid="$GEN_X_UUID"
     local s1_priv="$GEN_X_PRIV"
     local s1_pub="$GEN_X_PUB"
@@ -4814,13 +4808,16 @@ probe_xray_cascade_exit_ip() {
 }
 
 change_cascade_xray_exit_server_interactive() {
-    echo -e "${C_CYAN} === СМЕНА ВЫХОДНОГО СЕРВЕРА (VLESS-XHTTP + FINALMASK) БЕЗ СМЕНЫ КЛЮЧЕЙ VLESS ===${C_RESET}"
-    if [ ! -f /etc/default/bobarev-cascade ]; then
-        echo -e "${C_YELLOW} Конфигурация каскада (/etc/default/bobarev-cascade) не найдена. Сначала выполните настройку Сервера 1 в Пункте 2.${C_RESET}"
-        return 1
+    echo -e "${C_CYAN} === ВЫБОР ВЫХОДНОГО СЕРВЕРА (VLESS-XHTTP + FINALMASK) С СОХРАНЕНИЕМ КЛЮЧЕЙ VLESS ===${C_RESET}"
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
     fi
-    # shellcheck disable=SC1091
-    source /etc/default/bobarev-cascade
+    ensure_or_init_global_vless_inbound_interactive "Выбор выходного сервера VLESS-XHTTP" || return 1
+    silent_run systemctl stop hysteria-client.service 2>/dev/null || true
+    if command -v tailscale &>/dev/null; then
+        silent_run tailscale set --exit-node= 2>/dev/null || true
+    fi
 
     local s1_port="${XRAY_PORT:-443}"
     local s1_uuid="${XRAY_UUID:-}"
@@ -4829,12 +4826,7 @@ change_cascade_xray_exit_server_interactive() {
     local s1_short_id="${XRAY_SHORT_ID:-}"
     local s1_sni="${XRAY_SNI:-www.microsoft.com}"
     local s1_dest="${XRAY_REALITY_DEST:-${s1_sni}:443}"
-    local s1_path="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-
-    if [ -z "$s1_uuid" ] || [ -z "$s1_priv" ] || [ -z "$s1_pub" ] || [ -z "$s1_short_id" ]; then
-        echo -e "${C_YELLOW} На этом сервере еще не созданы входные ключи VLESS-XHTTP. Сначала выполните Пункт 2.${C_RESET}"
-        return 1
-    fi
+    local s1_path="${XRAY_XHTTP_PATH:-/xhttp-stream}" 
 
     echo -e "${C_BLUE} Текущий выходной Сервер 2: ${C_BOLD}${S2_XRAY_IP:-${XRAY_SERVER:-не задан}}:${S2_XRAY_PORT:-443}${C_RESET}"
     echo -e "${C_BLUE} Входные ключи Сервера 1 (порт ${s1_port}/tcp, SNI: ${s1_sni}, Path: ${s1_path}) и клиентские ссылки в Shadowrocket останутся неизменными!${C_RESET}\n"
@@ -5062,7 +5054,7 @@ manage_cascade_xray_menu() {
         if ! smart_menu " Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)" "\nСтатус моста: $c_state\nВыберите действие:" 22 "$WT_WIDTH" 10 "c_choice" \
         "1" " Сервер 2 (Зарубеж): VLESS-XHTTP (SplitHTTP) -> Выход" \
         "2" " Сервер 1 (РФ): VLESS-XHTTP -> Finalmask -> Сервер 2" \
-        "3" " Сменить выходной сервер (новый Токен Сервера 2) БЕЗ смены ключей VLESS" \
+        "3" " Выбрать выходной сервер (Токен Сервера 2)" \
         "4" " Транспорт между серверами: IPv4+IPv6 / Только IPv4 / Только IPv6" \
         "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
         "6" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
@@ -5955,8 +5947,8 @@ mod_user_setup() {
     for sfile in /etc/sudoers.d/*; do
         [ ! -f "$sfile" ] && continue
         [[ "$(basename "$sfile")" == "README" || "$sfile" == *.bak ]] && continue
-        if grep -qE "^[[:space:]]*${username}[[:space:]]+" "$sfile" 2>/dev/null; then
-            sed -i -E "/^[[:space:]]*${username}[[:space:]]+/d" "$sfile" 2>/dev/null || true
+        if grep -qE "^[[:space:]]*$[[:space:]]+" "$sfile" 2>/dev/null; then
+            sed -i -E "/^[[:space:]]*$[[:space:]]+/d" "$sfile" 2>/dev/null || true
             if ! grep -qE "^[[:space:]]*[^#[:space:]]" "$sfile" 2>/dev/null; then
                 rm -f "$sfile" 2>/dev/null || true
             fi
@@ -7848,24 +7840,41 @@ audit_section() {
 }
 
 audit_profile_state() {
-    local label="$1" file="$2" key expected actual total=0 matched=0 missing=0
+    local label="$1" file="$2" key expected actual norm_exp norm_act total=0 matched=0 missing=0
+    local -a diff_keys=()
     if [ ! -r "$file" ]; then
-        audit_human_row "$label" "${C_BLUE}Профиль скрипта не найден${C_RESET}"
+        audit_human_row "$label" "${C_BLUE}Не применялся (включается в разделе 1)${C_RESET}"
         return 0
     fi
     while read -r key expected; do
         [ -n "$key" ] || continue
         total=$((total+1))
         if actual=$(sysctl -n "$key" 2>/dev/null); then
-            [ "$actual" != "$expected" ] || matched=$((matched+1))
-        else missing=$((missing+1)); fi
+            norm_exp=$(printf '%s' "$expected" | tr '\t\n\r' '   ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+            norm_act=$(printf '%s' "$actual" | tr '\t\n\r' '   ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+            if [ "$norm_act" = "$norm_exp" ]; then
+                matched=$((matched+1))
+            else
+                diff_keys+=("${key##*.}=${norm_act}")
+            fi
+        else
+            missing=$((missing+1))
+        fi
     done < <(awk -F= '/^[[:space:]]*[a-zA-Z0-9_.]+[[:space:]]*=/ {gsub(/[[:space:]]/,"",$1);sub(/#.*/,"",$2);gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);print $1,$2}' "$file")
     if [ "$total" -eq 0 ]; then
         audit_human_row "$label" "${C_BLUE}Нет параметров для проверки${C_RESET}"
     elif [ "$matched" -eq "$total" ]; then
-        audit_human_row "$label" "${C_GREEN}Применён ($matched из $total параметров)${C_RESET}"
+        audit_human_row "$label" "${C_GREEN}✔ Полностью применён (все $total параметров активны)${C_RESET}"
     else
-        audit_human_row "$label" "${C_YELLOW}Совпадает $matched из $total; недоступно: $missing${C_RESET}"
+        local diff_hint=""
+        if [ "${#diff_keys[@]}" -gt 0 ]; then
+            local joined_diffs
+            joined_diffs=$(printf '%s, ' "${diff_keys[@]:0:3}")
+            joined_diffs="${joined_diffs%, }"
+            [ "${#diff_keys[@]}" -gt 3 ] && joined_diffs="${joined_diffs} ..."
+            diff_hint=" (отличаются: ${joined_diffs})"
+        fi
+        audit_human_row "$label" "${C_GREEN}✔ Активен ($matched из $total)${C_RESET}${C_BLUE}${diff_hint}${C_RESET}"
     fi
 }
 
@@ -8221,6 +8230,31 @@ mod_server_audit() {
     esac
     audit_human_row 'Учётная запись root:' "$root_pw_human"
 
+    # Проверки политики безопасности по стандарту vps-audit (Журналирование sudo, парольная политика, SUID)
+    if grep -qrE "^[[:space:]]*Defaults.*logfile" /etc/sudoers /etc/sudoers.d 2>/dev/null; then
+        audit_human_row 'Журнал команд Sudo:' "${C_GREEN}✔ Ведется отдельный аудит-лог команд sudo${C_RESET}"
+    else
+        audit_human_row 'Журнал команд Sudo:' "${C_BLUE}Стандартный системный журнал (journald)${C_RESET}"
+    fi
+
+    if [ -f /etc/security/pwquality.conf ]; then
+        local minlen_val
+        minlen_val=$(grep -E '^[[:space:]]*minlen[[:space:]]*=' /etc/security/pwquality.conf 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]' || true)
+        if [[ "$minlen_val" =~ ^[0-9]+$ ]] && [ "$minlen_val" -ge 12 ]; then
+            audit_human_row 'Сложность паролей (PAM):' "${C_GREEN}✔ Строгая (minlen=${minlen_val})${C_RESET}"
+        elif [[ "$minlen_val" =~ ^[0-9]+$ ]]; then
+            audit_human_row 'Сложность паролей (PAM):' "${C_BLUE}Базовая (minlen=${minlen_val})${C_RESET}"
+        fi
+    fi
+
+    local suid_suspect=0
+    suid_suspect=$(find /tmp /var/tmp /home /root /opt /srv -xdev -type f -perm -4000 2>/dev/null | wc -l || echo 0)
+    if [ "${suid_suspect:-0}" -eq 0 ] 2>/dev/null; then
+        audit_human_row 'Контроль SUID-бинарников:' "${C_GREEN}✔ Подозрительных SUID в пользовательских папках нет${C_RESET}"
+    else
+        audit_human_row 'Контроль SUID-бинарников:' "${C_YELLOW}⚠ Найдено ${suid_suspect} нестандартных SUID-файлов${C_RESET}"
+    fi
+
     audit_section '4' 'Безопасность и конфигурация SSH'
     local ssh_port=unknown sshd_cmd ssh_eff='' root_text pass_text key_text valid_text
     sshd_cmd=$(get_sshd_cmd)
@@ -8279,7 +8313,25 @@ mod_server_audit() {
     if [ -z "$guards" ]; then protection="${C_YELLOW}Не установлена (доступно в разделе 1 -> п. 7)${C_RESET}"
     elif [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then protection="${C_GREEN}✔ Активна (${guards}, журнал SSH контролируется)${C_RESET}"
     else protection="${C_GREEN}✔ Активна (${guards})${C_RESET}"; fi
-    audit_human_row 'Защита от перебора:' "$protection"
+        audit_human_row 'Защита от перебора:' "$protection"
+    # Проверка совпадения порта SSH и правил Fail2ban (по методике nuver-labs/vps-audit)
+    if systemctl is-active --quiet fail2ban.service 2>/dev/null && [ -d /etc/fail2ban ] && [[ "$ssh_port" =~ ^[0-9]+$ ]]; then
+        local f2b_port="" f2b_banaction="" f2b_file=""
+        for f2b_file in /etc/fail2ban/jail.conf /etc/fail2ban/jail.d/*.conf /etc/fail2ban/jail.local /etc/fail2ban/jail.d/*.local; do
+            [ -f "$f2b_file" ] || continue
+            local p_val b_val
+            p_val=$(awk '$0 ~ /^\[sshd\]/{in_s=1;next} $0 ~ /^\[/{in_s=0} in_s && $0 ~ /^[[:space:]]*port[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,""); print $0}' "$f2b_file" 2>/dev/null | tail -n 1 || true)
+            b_val=$(awk '$0 ~ /^\[(sshd|DEFAULT)\]/{in_s=1;next} $0 ~ /^\[/{in_s=0} in_s && $0 ~ /^[[:space:]]*banaction[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,""); print $0}' "$f2b_file" 2>/dev/null | tail -n 1 || true)
+            [ -n "$p_val" ] && f2b_port="$p_val"
+            [ -n "$b_val" ] && f2b_banaction="$b_val"
+        done
+        [ -z "$f2b_port" ] && f2b_port="ssh"
+        if [[ "$f2b_banaction" == *allports* ]] || [[ "$f2b_port" == *"$ssh_port"* ]] || { [ "$ssh_port" = "22" ] && [[ "$f2b_port" == *"ssh"* ]]; }; then
+            audit_human_row 'Синхронизация порта Fail2Ban:' "${C_GREEN}✔ Джейл [sshd] защищает активный порт SSH (${ssh_port}/tcp)${C_RESET}"
+        else
+            audit_human_row 'Синхронизация порта Fail2Ban:' "${C_RED}⚠ Джейл [sshd] настроен на '${f2b_port}', а SSH слушает ${ssh_port}/tcp!${C_RESET}"
+        fi
+    fi
     if [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then
         audit_human_row 'Системные журналы:' "${C_GREEN}События SSH доступны${C_RESET}"
     else audit_human_row 'Системные журналы:' "${C_YELLOW}События SSH не найдены / нет доступа${C_RESET}"; fi
@@ -8611,7 +8663,11 @@ mod_server_audit() {
     fi
 
     bobarev_network_human_audit scheme
-    audit_section '8' 'Сетевые интерфейсы и Открытые порты'
+    audit_section '8' 'Сетевые интерфейсы, Соединения и Открытые порты'
+    local running_svcs=0 active_conns=0
+    running_svcs=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l || echo 0)
+    active_conns=$(ss -Htun state established 2>/dev/null | wc -l || echo 0)
+    audit_human_row 'Активные службы и сессии:' "${C_BLUE}Запущено служб: ${running_svcs} | Установлено соединений: ${active_conns}${C_RESET}" 
     local active_ifs=$(ip -br link show | grep -v "DOWN" | awk '{print $1}' | sed 's/@.*//' || echo "")
     for iface in $active_ifs; do
         local mtu=$(cat /sys/class/net/"$iface"/mtu 2>/dev/null || echo "N/A")
@@ -10596,36 +10652,19 @@ BOBAREV_ENGINE_3146
 
 setup_vless_reality_mullvad_inbound() {
     echo -e "${C_CYAN} === НАСТРОЙКА ШЛЮЗА: VLESS-XHTTP (SplitHTTP + REALITY, Dual-Stack) -> MULLVAD / TAILSCALE EXIT NODE ===${C_RESET}"
-    local saved_exit="" x_port="443" x_sni="www.microsoft.com" cur_role="" cur_ts_trans="dualstack"
+    local saved_exit="" cur_ts_trans="dualstack"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         saved_exit="${EXIT_TS_IP:-}"
-        x_port="${XRAY_PORT:-443}"
-        x_sni="${XRAY_SNI:-www.microsoft.com}"
-        cur_role="${CASCADE_ROLE:-}"
         cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
     fi
 
-    prompt_default "1/3. TCP-порт для VLESS-XHTTP на этом сервере-прослойке (рекомендуется 443 или 8443):" "$x_port" x_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
-    x_port="${x_port//[^0-9]/}"
-    if [ -z "$x_port" ] || [ "$x_port" -lt 1 ] || [ "$x_port" -gt 65535 ]; then
-        echo -e "${C_RED} Ошибка: укажите корректный TCP-порт (1..65535).${C_RESET}"
-        return 1
-    fi
+    ensure_or_init_global_vless_inbound_interactive "Пункт 5 — Шлюз: VLESS-XHTTP + Tailscale / Mullvad" || return 0
+    local x_port="$XRAY_PORT"
+    local x_sni="$XRAY_SNI"
+    local x_dest="$XRAY_REALITY_DEST"
 
-    local allow_self="xray"
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 5 — Шлюз: VLESS-XHTTP + Tailscale / Mullvad" "$allow_self" "${x_port}/tcp"; then
-        return 1
-    fi
-
-    local x_dest=""
-    select_reality_sni_and_dest_interactive "$x_sni" || return 0
-    x_sni="$SELECT_SNI_RESULT"
-    x_dest="$SELECT_DEST_RESULT"
-
-    ensure_xray_installed || return 1
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
@@ -10638,21 +10677,8 @@ setup_vless_reality_mullvad_inbound() {
         echo -e "${C_RED} Ошибка: Выходной сервер Mullvad / Tailscale Exit Node не выбран!${C_RESET}"
         return 1
     fi
-
-    local reuse_keys=false
-    if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
-        if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
-            reuse_keys=true
-            GEN_X_UUID="$XRAY_UUID"
-            GEN_X_PRIV="$XRAY_PRIV"
-            GEN_X_PUB="$XRAY_PUB"
-            GEN_X_SHORT_ID="$XRAY_SHORT_ID"
-            GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-        fi
-    fi
-    if [ "$reuse_keys" = false ]; then
-        generate_xray_reality_credentials || return 1
-    fi
+    silent_run systemctl stop hysteria-client.service 2>/dev/null || true
+    load_global_vless_credentials || true
 
     local wan_dev pub_ip pub_ip6
     wan_dev=$(get_wan_if)
@@ -10735,14 +10761,13 @@ manage_naive_mullvad_menu() {
 Статус шлюза: $c_state
 
 Сервер работает как прослойка между вашими устройствами (iPhone / Shadowrocket по VLESS-XHTTP) и выходными серверами Mullvad / Tailscale (MTU 1280, MSS 1220, BBR, буферы 16 МБ).
-Выберите действие:" 22 "$WT_WIDTH" 8 "c_choice" \
+Выберите действие:" 21 "$WT_WIDTH" 7 "c_choice" \
             "1" " Настроить шлюз «под ключ»: VLESS-XHTTP -> Mullvad / Tailscale Exit Node" \
-            "2" " Список доступных серверов Mullvad / Tailscale Exit Nodes" \
-            "3" " Сменить выходной сервер (Exit Node)" \
-            "4" " Транспорт между серверами (IPv4+IPv6 / Только IPv4 / Только IPv6)" \
-            "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
-            "6" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
-            "7" " Отключить Exit Node / Остановить компоненты шлюза" \
+            "2" " Выбрать выходной сервер (Exit Node)" \
+            "3" " Транспорт между серверами (IPv4+IPv6 / Только IPv4 / Только IPv6)" \
+            "4" " Управление глобальными ключами VLESS-XHTTP, Path и SNI" \
+            "5" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
+            "6" " Отключить Exit Node / Остановить компоненты шлюза" \
             "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -10754,30 +10779,21 @@ manage_naive_mullvad_menu() {
                 pause_enter
                 ;;
             2)
-                echo -e "${C_CYAN} === ДОСТУПНЫЕ СЕРВЕРЫ MULLVAD / TAILSCALE EXIT NODES ===${C_RESET}\n"
-                if command -v tailscale >/dev/null 2>&1; then
-                    tailscale exit-node list 2>/dev/null || tailscale status 2>/dev/null || true
-                else
-                    echo -e "${C_YELLOW} Tailscale еще не установлен (выполните Пункт 1).${C_RESET}"
-                fi
-                pause_enter
-                ;;
-            3)
                 change_cascade_tailscale_exit_node_interactive || true
                 pause_enter
                 ;;
-            4)
+            3)
                 toggle_tailscale_ipv6_transport_menu || true
                 pause_enter
                 ;;
-            5)
+            4)
                 manage_vless_users_menu
                 ;;
-            6)
+            5)
                 print_vless_shadowrocket_links
                 pause_enter
                 ;;
-            7)
+            6)
                 if prompt_yn "Отключить выход через Mullvad / Tailscale Exit Node и остановить службу VLESS-XHTTP на этом сервере?" "false"; then
                     silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service
                     apply_tailscale_p2p_transport_rules "dualstack"

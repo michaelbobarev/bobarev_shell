@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.17 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
-# Поддерживает горячую смену выходного сервера (Пункт 3) и выбор транспорта между серверами (Пункт 4: Dual-Stack IPv4+IPv6 / Только IPv4 / Только IPv6) во всех каскадах (2-3, 2-4, 2-5, 2-6) без смены ключей VLESS.
+# Bobarev Shell v3.20.18 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Поддерживает равноправный Dual-Stack (IPv4 + IPv6), горячую смену выходного сервера с выпадающим списком Exit Nodes (Пункт 3) и выбор транспорта между серверами (Пункт 4) во всех каскадах и шлюзах (2-3, 2-4, 2-5, 2-6).
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.17"
+SCRIPT_VERSION="3.20.18"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1656,17 +1656,12 @@ is_usque_active() {
 }
 
 ensure_ipv4_precedence_and_host_dns() {
-    # 1. Настраиваем приоритет IPv4 над IPv6 в /etc/gai.conf (RFC 6724) БЕЗ отключения IPv6:
-    #    если VPS поддерживает и IPv4, и IPv6 (Dual-Stack), оба протокола остаются полностью рабочими,
-    #    но исключается уход трафика в виртуальный ULA-адрес tailscale0 (fd7a:115c:a1e0::/48) при отсутствии IPv6 на WAN.
+    # 1. Сохраняем нативный равноправный Dual-Stack (IPv4 + IPv6) без принудительного занижения IPv6 в /etc/gai.conf:
+    #    если ранее скрипт раскомментировал или добавлял precedence ::ffff:0:0/96 100, возвращаем стандартное состояние.
     if [ -f /etc/gai.conf ]; then
-        if grep -qE '^[[:space:]]*#[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
-            sed -i -E 's/^[[:space:]]*#[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)/\1/' /etc/gai.conf 2>/dev/null || true
-        elif ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
-            echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
+        if [ "$(grep -vE '^[[:space:]]*(#|$)' /etc/gai.conf 2>/dev/null | wc -l)" -eq 1 ] && grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
+            sed -i -E 's/^[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)/#\1/' /etc/gai.conf 2>/dev/null || true
         fi
-    else
-        echo "precedence ::ffff:0:0/96  100" > /etc/gai.conf
     fi
 
     # 2. Если осталась старая служба bobarev-shell-dns.service от Mullvad, но сам маршрут exit-node в таблице 52 не активен,
@@ -1753,15 +1748,11 @@ get_wan_dev() {
     ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
 }
 
-# 1. Приоритет IPv4 над IPv6 в /etc/gai.conf (без отключения IPv6)
+# 1. Нативный Dual-Stack (IPv4 + IPv6): не перезаписываем приоритет протоколов в /etc/gai.conf
 if [ -f /etc/gai.conf ]; then
-    if grep -qE '^[[:space:]]*#[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
-        sed -i -E 's/^[[:space:]]*#[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)//' /etc/gai.conf 2>/dev/null || true
-    elif ! grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
-        echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf
+    if [ "$(grep -vE '^[[:space:]]*(#|$)' /etc/gai.conf 2>/dev/null | wc -l)" -eq 1 ] && grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
+        sed -i -E 's/^[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)/#\1/' /etc/gai.conf 2>/dev/null || true
     fi
-else
-    echo "precedence ::ffff:0:0/96  100" > /etc/gai.conf
 fi
 
 # 2. Защита от «зависшего» или недоступного Tailscale Exit-Node после перезагрузки:
@@ -2556,16 +2547,13 @@ setup_cascade_server1_ru() {
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
-    local ts_peers
-    ts_peers=$(tailscale status 2>/dev/null | awk 'NR>1 {print $1 " (" $2 ")"}' | tr '\n' ' ' || echo "")
-    [ -n "$ts_peers" ] && echo -e "${C_BLUE} Доступные узлы в вашей сети Tailscale: $ts_peers${C_RESET}"
-
     local exit_ts_ip=""
-    prompt_default "3/3. Введите Tailscale IP вашего Зарубежного Сервера 2 (например, 100.x.y.z):" "${saved_exit:-}" exit_ts_ip
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-    exit_ts_ip=$(printf '%s' "$exit_ts_ip" | tr -d '[:space:]')
+    if ! select_tailscale_exit_node_dropdown "${saved_exit:-}"; then
+        return 0
+    fi
+    exit_ts_ip="$SELECT_EXIT_NODE_RESULT"
     if [ -z "$exit_ts_ip" ]; then
-        echo -e "${C_RED} Ошибка: Tailscale IP Зарубежного Сервера 2 не указан!${C_RESET}"
+        echo -e "${C_RED} Ошибка: Выходной сервер (Exit Node) не выбран!${C_RESET}"
         return 1
     fi
 
@@ -2682,8 +2670,76 @@ EOF
     echo -e "${C_YELLOW} Не забудьте в админ-панели Tailscale (https://login.tailscale.com/admin/machines) включить галочку 'Use as exit node' для этого сервера, а на Сервере 1 (РФ) указать IP ${my_ts_ip}!${C_RESET}"
 }
 
+SELECT_EXIT_NODE_RESULT=""
+
+select_tailscale_exit_node_dropdown() {
+    local default_node="${1:-}"
+    SELECT_EXIT_NODE_RESULT=""
+    local -a menu_items=()
+    local -A seen_ips=()
+    local line ip host country city status desc
+
+    if command -v tailscale &>/dev/null; then
+        # 1. Считываем список выходных узлов из 'tailscale exit-node list' (Mullvad и личные Exit Nodes)
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(.*)$ ]] || continue
+            ip="${BASH_REMATCH[1]}"
+            host="${BASH_REMATCH[2]}"
+            desc=$(printf '%s' "${BASH_REMATCH[3]}" | sed -E 's/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//')
+            [ -n "${seen_ips[$ip]:-}" ] && continue
+            seen_ips["$ip"]=1
+            local label="${host}"
+            [ -n "$desc" ] && label="${host} (${desc})"
+            [ "$ip" = "$default_node" ] && label="★ ${label} [ТЕКУЩИЙ]"
+            menu_items+=("$ip" "${label:0:62}")
+        done < <(tailscale exit-node list 2>/dev/null || true)
+
+        # 2. Дополняем узлами из 'tailscale status' (если личный сервер еще не попал в список выше)
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(.*)$ ]] || continue
+            ip="${BASH_REMATCH[1]}"
+            host="${BASH_REMATCH[2]}"
+            desc="${BASH_REMATCH[3]}"
+            [ -n "${seen_ips[$ip]:-}" ] && continue
+            seen_ips["$ip"]=1
+            local badge=""
+            [[ "$desc" == *"exit node"* ]] && badge=" [Exit Node]"
+            [[ "$desc" == *"offline"* ]] && badge="${badge} (offline)"
+            local label="${host}${badge}"
+            [ "$ip" = "$default_node" ] && label="★ ${label} [ТЕКУЩИЙ]"
+            menu_items+=("$ip" "${label:0:62}")
+        done < <(tailscale status 2>/dev/null || true)
+    fi
+
+    menu_items+=("MANUAL" "✍ Ввести Tailscale IP или имя узла вручную...")
+
+    local chosen=""
+    if [ "${#menu_items[@]}" -gt 2 ]; then
+        if ! chosen=$(whiptail --title "Выбор выходного сервера (Mullvad / Tailscale Exit Node)" \
+            --menu "\nВыберите выходной сервер из списка (стрелки Вверх/Вниз и Enter):\nТекущий узел: ${default_node:-не выбран}" \
+            22 "$WT_WIDTH" 12 "${menu_items[@]}" 3>&1 1>&2 2>&3); then
+            MODULE_CANCELED=true
+            return 1
+        fi
+    else
+        chosen="MANUAL"
+    fi
+
+    if [ "$chosen" = "MANUAL" ]; then
+        local manual_ip=""
+        prompt_default "Введите Tailscale IP или имя выходного сервера (например, 100.x.y.z):" "$default_node" manual_ip
+        if [ "$MODULE_CANCELED" = true ] || [ -z "$manual_ip" ]; then
+            return 1
+        fi
+        chosen=$(printf '%s' "$manual_ip" | tr -d '[:space:]')
+    fi
+
+    SELECT_EXIT_NODE_RESULT="$chosen"
+    return 0
+}
+
 change_cascade_tailscale_exit_node_interactive() {
-    echo -e "${C_CYAN} === СМЕНА ВЫХОДНОГО СЕРВЕРА (TAILSCALE EXIT NODE) БЕЗ СМЕНЫ КЛЮЧЕЙ VLESS ===${C_RESET}"
+    echo -e "${C_CYAN} === СМЕНА ВЫХОДНОГО СЕРВЕРА (MULLVAD / TAILSCALE EXIT NODE) БЕЗ СМЕНЫ КЛЮЧЕЙ VLESS ===${C_RESET}"
     local cur_exit=""
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
@@ -2696,14 +2752,11 @@ change_cascade_tailscale_exit_node_interactive() {
         return 1
     fi
 
-    echo -e "${C_BLUE} Доступные узлы в вашей сети Tailscale:${C_RESET}"
-    tailscale status 2>/dev/null | awk 'NR>1 {printf "   • %-16s %-22s %s\n", $1, $2, ($0 ~ /exit node/ ? "[Exit Node]" : "")}' || true
-    echo ""
-
     local new_exit=""
-    prompt_default "Введите Tailscale IP нового выходного сервера (например, 100.x.y.z):" "$cur_exit" new_exit
-    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
-    new_exit=$(printf '%s' "$new_exit" | tr -d '[:space:]')
+    if ! select_tailscale_exit_node_dropdown "$cur_exit"; then
+        return 0
+    fi
+    new_exit="$SELECT_EXIT_NODE_RESULT"
     if [ -z "$new_exit" ]; then
         echo -e "${C_RED} Ошибка: Tailscale IP не может быть пустым.${C_RESET}"
         return 1
@@ -5796,7 +5849,7 @@ mod_apt_update() {
     export DEBIAN_FRONTEND=noninteractive
 
     install_universal_dns_boot_guard
-    echo -e "${C_BLUE} Включены приоритет IPv4 над IPv6 и универсальная защита DNS при перезагрузке.${C_RESET}"
+    echo -e "${C_BLUE} Включена универсальная защита DNS при перезагрузке (равноправный Dual-Stack IPv4 + IPv6 сохранен).${C_RESET}"
 
     apt-get update && apt-get upgrade -yq
 
@@ -10542,141 +10595,201 @@ BOBAREV_ENGINE_3146
 }
 
 setup_vless_reality_mullvad_inbound() {
- echo -e "${C_CYAN} === ВХОД VLESS / XHTTP (SplitHTTP + REALITY, IPv4 + IPv6) -> MULLVAD EXIT NODE ===${C_RESET}"
- local x_port="443"
- prompt_default "1/2. Введите TCP-порт для VLESS-REALITY (рекомендуется 443 или 8443):" "$x_port" x_port
- if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
- x_port="${x_port//[^0-9]/}"
- if [ -z "$x_port" ] || [ "$x_port" -lt 1 ] || [ "$x_port" -gt 65535 ]; then
-  echo -e "${C_RED} Ошибка: укажите корректный TCP-порт (1..65535).${C_RESET}"
-  return 1
- fi
- if ! scan_and_warn_occupied_ports_interactive "Пункт 5 — Шлюз: VLESS-REALITY + Tailscale / Mullvad" "xray" "${x_port}/tcp"; then
-  return 1
- fi
- ensure_xray_installed || return 1
- local x_sni="www.microsoft.com" x_dest=""
- select_reality_sni_and_dest_interactive "$x_sni" || return 0
- x_sni="$SELECT_SNI_RESULT"
- x_dest="$SELECT_DEST_RESULT"
+    echo -e "${C_CYAN} === НАСТРОЙКА ШЛЮЗА: VLESS-XHTTP (SplitHTTP + REALITY, Dual-Stack) -> MULLVAD / TAILSCALE EXIT NODE ===${C_RESET}"
+    local saved_exit="" x_port="443" x_sni="www.microsoft.com" cur_role="" cur_ts_trans="dualstack"
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        saved_exit="${EXIT_TS_IP:-}"
+        x_port="${XRAY_PORT:-443}"
+        x_sni="${XRAY_SNI:-www.microsoft.com}"
+        cur_role="${CASCADE_ROLE:-}"
+        cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
+    fi
 
- local reuse_keys=false
- if [ -f /etc/default/bobarev-cascade ]; then
-  # shellcheck disable=SC1091
-  source /etc/default/bobarev-cascade
- fi
- if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
-  if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
-   reuse_keys=true
-   GEN_X_UUID="$XRAY_UUID"
-   GEN_X_PRIV="$XRAY_PRIV"
-   GEN_X_PUB="$XRAY_PUB"
-   GEN_X_SHORT_ID="$XRAY_SHORT_ID"
-   GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
-  fi
- fi
- if [ "$reuse_keys" = false ]; then
-  generate_xray_reality_credentials || return 1
- fi
- local x_priv="$GEN_X_PRIV"
- local x_pub="$GEN_X_PUB"
- local x_uuid="$GEN_X_UUID"
- local x_short_id="$GEN_X_SHORT_ID"
+    prompt_default "1/3. TCP-порт для VLESS-XHTTP на этом сервере-прослойке (рекомендуется 443 или 8443):" "$x_port" x_port
+    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
+    x_port="${x_port//[^0-9]/}"
+    if [ -z "$x_port" ] || [ "$x_port" -lt 1 ] || [ "$x_port" -gt 65535 ]; then
+        echo -e "${C_RED} Ошибка: укажите корректный TCP-порт (1..65535).${C_RESET}"
+        return 1
+    fi
 
- render_xray_server_config "$x_port" "$x_uuid" "$x_priv" "$x_short_id" "$x_sni" "mullvad" "$GEN_X_PATH" "$x_dest"
- write_xray_service
- safe_restart_systemd_service bobarev-xray.service
- sleep 1
- if ! systemctl is-active --quiet bobarev-xray.service; then
-  echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
-  journalctl -u bobarev-xray.service -n 20 --no-pager || true
-  return 1
- fi
+    local allow_self="xray"
+    if ! scan_and_warn_occupied_ports_interactive "Пункт 5 — Шлюз: VLESS-XHTTP + Tailscale / Mullvad" "$allow_self" "${x_port}/tcp"; then
+        return 1
+    fi
 
- if command -v ufw &>/dev/null; then
-  silent_run ufw allow "${x_port}/tcp" comment 'Xray VLESS REALITY Mullvad'
- fi
+    local x_dest=""
+    select_reality_sni_and_dest_interactive "$x_sni" || return 0
+    x_sni="$SELECT_SNI_RESULT"
+    x_dest="$SELECT_DEST_RESULT"
 
- local wan_dev
- wan_dev=$(get_wan_if)
- local pub_ip=""
- if [ -f /var/lib/bobarev-shell-mullvad/config ]; then
-  pub_ip=$(awk -F= '/^DIRECT_IP=/{gsub(/["'"'"']/, "", $2); print $2; exit}' /var/lib/bobarev-shell-mullvad/config 2>/dev/null | tr -d '[:space:]' || true)
- fi
- if [ -z "$pub_ip" ]; then
-  pub_ip=$(ip -4 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
- fi
- local pub_ipv6
- pub_ipv6=$(ip -6 -o addr show dev "${wan_dev:-ens3}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
- [ -z "$pub_ip" ] && pub_ip="IP_СЕРВЕРА"
+    ensure_xray_installed || return 1
+    ensure_tailscale_installed || true
+    enable_routing_optimizations || true
 
- mkdir -p /var/lib/bobarev-shell-mullvad
- cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="standalone_vless"
+    local exit_ts_ip=""
+    if ! select_tailscale_exit_node_dropdown "${saved_exit:-}"; then
+        return 0
+    fi
+    exit_ts_ip="$SELECT_EXIT_NODE_RESULT"
+    if [ -z "$exit_ts_ip" ]; then
+        echo -e "${C_RED} Ошибка: Выходной сервер Mullvad / Tailscale Exit Node не выбран!${C_RESET}"
+        return 1
+    fi
+
+    local reuse_keys=false
+    if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
+        if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
+            reuse_keys=true
+            GEN_X_UUID="$XRAY_UUID"
+            GEN_X_PRIV="$XRAY_PRIV"
+            GEN_X_PUB="$XRAY_PUB"
+            GEN_X_SHORT_ID="$XRAY_SHORT_ID"
+            GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
+        fi
+    fi
+    if [ "$reuse_keys" = false ]; then
+        generate_xray_reality_credentials || return 1
+    fi
+
+    local wan_dev pub_ip pub_ip6
+    wan_dev=$(get_wan_if)
+    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || echo "")
+    pub_ip6=$(get_wan_global_ipv6)
+
+    # Используем чистый профиль tailscale_exit (UseIPv4v6, tcpNoDelay, без двойного finalmask внутри tailscale0)
+    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH" "$x_dest"
+    if [ -s /etc/xray/vless_users.list ]; then
+        rebuild_xray_inbound_clients
+    fi
+    write_xray_service
+    safe_restart_systemd_service bobarev-xray.service
+    sleep 1
+    if ! systemctl is-active --quiet bobarev-xray.service; then
+        echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
+        journalctl -u bobarev-xray.service -n 20 --no-pager || true
+        return 1
+    fi
+
+    cat << EOF > /etc/default/bobarev-cascade
+CASCADE_ROLE="ru_entry"
 VLESS_OUT_MODE="mullvad_ts"
+EXIT_TS_IP="${exit_ts_ip}"
+TS_TRANSPORT_MODE="${cur_ts_trans}"
 MULLVAD_VLESS_PORT="${x_port}"
 XRAY_PORT="${x_port}"
-XRAY_UUID="${x_uuid}"
-XRAY_PRIV="${x_priv}"
-XRAY_PUB="${x_pub}"
-XRAY_SHORT_ID="${x_short_id}"
+XRAY_UUID="${GEN_X_UUID}"
+XRAY_PRIV="${GEN_X_PRIV}"
+XRAY_PUB="${GEN_X_PUB}"
+XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_REALITY_DEST="${x_dest}"
 XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
-SERVER_PUB_IPV6="${pub_ipv6}"
+SERVER_PUB_IPV6="${pub_ip6}"
+TCP_TUNE_PROFILE="balanced"
 EOF
- chmod 600 /etc/default/bobarev-cascade
+    chmod 600 /etc/default/bobarev-cascade
 
- local vless_v4="vless://${x_uuid}@${pub_ip}:${x_port}?encryption=none&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=xhttp&path=%2F${GEN_X_PATH#/}&mode=stream-one&fragment=40-60,30-50,tlshello#VPS-Mullvad-IPv4"
- {
-  echo "=== VLESS-REALITY (XTLS VISION) ССЫЛКИ ДЛЯ SHADOWROCKET / V2BOX (ВЫХОД ЧЕРЕЗ TAILSCALE MULLVAD) ==="
-  echo "IPv4: $vless_v4"
-  if [ -n "$pub_ipv6" ]; then
-   echo "IPv6: vless://${x_uuid}@[${pub_ipv6}]:${x_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${x_sni}&fp=chrome&pbk=${x_pub}&sid=${x_short_id}&type=tcp#VPS-Mullvad-IPv6"
-  fi
- } > /var/lib/bobarev-shell-mullvad/vless-links.txt
- chmod 600 /var/lib/bobarev-shell-mullvad/vless-links.txt
+    apply_naive_tcp_tuning_profile "balanced"
+    install_universal_dns_boot_guard >/dev/null 2>&1 || true
+    write_bobarev_cascade_ru_script
+    /usr/local/bin/bobarev-cascade-ru.sh
 
- echo -e "\n${C_GREEN} Вход VLESS-REALITY (XTLS Vision) на порту ${x_port}/tcp запущен! Весь трафик с него уходит в активный Tailscale Mullvad Exit Node.${C_RESET}"
- print_vless_shadowrocket_links
+    if command -v ufw &>/dev/null; then
+        silent_run ufw allow "${x_port}/tcp" comment 'Xray VLESS XHTTP Mullvad'
+    fi
+
+    echo -e "${C_BLUE} Проверка сквозного выхода через Mullvad / Tailscale Exit Node (${exit_ts_ip})...${C_RESET}"
+    local ts_out_ip=""
+    ts_out_ip=$(curl -4 -s --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+    [ -z "$ts_out_ip" ] && ts_out_ip=$(curl -s --max-time 6 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+    if [ -n "$ts_out_ip" ] && [ "$ts_out_ip" != "$pub_ip" ]; then
+        echo -e "${C_GREEN} ✔ Выходной IP шлюза (Mullvad / Tailscale): ${C_BOLD}${ts_out_ip}${C_RESET}"
+    elif [ -n "$ts_out_ip" ]; then
+        echo -e "${C_YELLOW} ⚠ Текущий выходной IP (${ts_out_ip}) совпадает с IP сервера. Убедитесь, что для этого сервера разрешен доступ к Mullvad Exit Nodes в админке Tailscale.${C_RESET}"
+    fi
+
+    echo -e "\n${C_GREEN} Шлюз VLESS-XHTTP -> Mullvad / Tailscale Exit Node (Dual-Stack IPv4+IPv6, MTU 1280, MSS 1220) успешно запущен!${C_RESET}"
+    print_vless_shadowrocket_links
 }
 
 manage_naive_mullvad_menu() {
- local pick='' profile=''
- local ctl=/usr/local/lib/bobarev-shell/mullvad.sh
- install_bobarev_mullvad_runtime || return 1
- while true;do
-  smart_menu 'BOBAREV SHELL — VLESS-REALITY (XTLS Vision) + Tailscale / Mullvad' \
-   'VPS IPv4 + Dual-Stack IPv6. Мастер с резервной копией, conntrack return-path (IPv4/IPv6), строгим DoT и откатом. Позволяет подключаться с iPhone по VLESS-REALITY (XTLS Vision, без домена и без Caddy!) и выходить через Mullvad Exit Node в Tailscale.' \
-   24 "$WT_WIDTH" 11 pick \
-   1 'Мастер под ключ: Tailscale + DNS + Mullvad Exit Node + VLESS-REALITY' \
-   2 'Список доступных exit nodes' \
-   3 'Сменить выходной сервер (Exit Node) БЕЗ смены ключей VLESS' \
-   4 'Транспорт между серверами (41641/udp): IPv4+IPv6 / Только IPv4 / Только IPv6' \
-   5 'Прямой WAN (сохранить DNS и return-path)' \
-   6 'Восстановить последнюю транзакцию / отменить незавершённую' \
-   7 'Настроить / перевыпустить вход VLESS-REALITY (порт 443/8443) -> Mullvad' \
-   8 'Показать ссылки и QR-коды VLESS-REALITY для Shadowrocket' \
-   9 'Диагностика и проверка после перезагрузки' \
-   10 'Диагностический MSS: auto / 1140 (с откатом)' \
-   0 'Назад' || return 0
-  case "$pick" in
-   0) return 0;;
-   1) if bash "$ctl" exit; then setup_vless_reality_mullvad_inbound || true; else echo 'Мастер завершился без подтверждённого успеха; проверьте сообщения и откат.'; fi; pause_enter;;
-   2) if command -v tailscale >/dev/null;then tailscale exit-node list || true;else echo 'Tailscale ещё не установлен: пункт 1.';fi;pause_enter;;
-   3) bash "$ctl" exit || echo 'Изменения не подтверждены; проверьте откат.';pause_enter;;
-   4) toggle_tailscale_ipv6_transport_menu || true;pause_enter;;
-   5) if prompt_yn 'Отключить exit node? DNS и обратный путь будут сохранены.' 'false';then bash "$ctl" direct || echo 'Не удалось отключить exit node.';fi;pause_enter;;
-   6) if prompt_yn 'Восстановить сохранённые файлы и прежний exit node? Поздние ручные изменения могут быть заменены.' 'false';then
-       if [[ -f /var/lib/bobarev-shell-mullvad/pending ]];then bash "$ctl" recover pending || echo 'Откат неполный!';else bash "$ctl" recover latest || echo 'Откат неполный!';fi
-      fi;pause_enter;;
-   7) setup_vless_reality_mullvad_inbound || true;pause_enter;;
-   8) print_vless_shadowrocket_links; [ -f /var/lib/bobarev-shell-mullvad/vless-links.txt ] && cat /var/lib/bobarev-shell-mullvad/vless-links.txt || true;pause_enter;;
-   9) bash "$ctl" diag || true;pause_enter;;
-   10) MODULE_CANCELED=false;prompt_default 'Профиль: auto (без принудительного MSS) или diagnostic1140' auto profile
-      if [[ "$MODULE_CANCELED" == false ]];then bash "$ctl" mss "$profile" || echo 'Профиль не применён.';fi;pause_enter;;
-  esac
- done
+    while true; do
+        MODULE_CANCELED=false
+        local c_state="Не активен"
+        if is_vless_active && [ -f /etc/default/bobarev-cascade ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            if [ -n "${EXIT_TS_IP:-}" ]; then
+                c_state="Активен (VLESS-XHTTP :${XRAY_PORT:-443} -> Exit Node ${EXIT_TS_IP} [${TS_TRANSPORT_MODE:-dualstack}])"
+            elif [ "${VLESS_OUT_MODE:-}" = "mullvad_ts" ]; then
+                c_state="Активен (VLESS-XHTTP :${XRAY_PORT:-443} -> Tailscale / Mullvad)"
+            fi
+        fi
+
+        local c_choice=""
+        if ! smart_menu "Шлюз: VLESS-XHTTP + Tailscale / Mullvad Exit Node (Dual-Stack)" "
+Статус шлюза: $c_state
+
+Сервер работает как прослойка между вашими устройствами (iPhone / Shadowrocket по VLESS-XHTTP) и выходными серверами Mullvad / Tailscale (MTU 1280, MSS 1220, BBR, буферы 16 МБ).
+Выберите действие:" 22 "$WT_WIDTH" 8 "c_choice" \
+            "1" " Настроить шлюз «под ключ»: VLESS-XHTTP -> Mullvad / Tailscale Exit Node" \
+            "2" " Список доступных серверов Mullvad / Tailscale Exit Nodes" \
+            "3" " Сменить выходной сервер (Exit Node)" \
+            "4" " Транспорт между серверами (IPv4+IPv6 / Только IPv4 / Только IPv6)" \
+            "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
+            "6" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
+            "7" " Отключить Exit Node / Остановить компоненты шлюза" \
+            "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
+            break
+        fi
+
+        clear
+        case "$c_choice" in
+            1)
+                setup_vless_reality_mullvad_inbound || true
+                pause_enter
+                ;;
+            2)
+                echo -e "${C_CYAN} === ДОСТУПНЫЕ СЕРВЕРЫ MULLVAD / TAILSCALE EXIT NODES ===${C_RESET}\n"
+                if command -v tailscale >/dev/null 2>&1; then
+                    tailscale exit-node list 2>/dev/null || tailscale status 2>/dev/null || true
+                else
+                    echo -e "${C_YELLOW} Tailscale еще не установлен (выполните Пункт 1).${C_RESET}"
+                fi
+                pause_enter
+                ;;
+            3)
+                change_cascade_tailscale_exit_node_interactive || true
+                pause_enter
+                ;;
+            4)
+                toggle_tailscale_ipv6_transport_menu || true
+                pause_enter
+                ;;
+            5)
+                manage_vless_users_menu
+                ;;
+            6)
+                print_vless_shadowrocket_links
+                pause_enter
+                ;;
+            7)
+                if prompt_yn "Отключить выход через Mullvad / Tailscale Exit Node и остановить службу VLESS-XHTTP на этом сервере?" "false"; then
+                    silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service
+                    apply_tailscale_p2p_transport_rules "dualstack"
+                    silent_run tailscale set --exit-node=
+                    rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
+                    silent_run systemctl daemon-reload
+                    echo -e "${C_GREEN} Шлюз остановлен, Exit Node отключен.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
 }
 
 mod_network_reset() {

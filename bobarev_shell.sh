@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.12 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, Kariz Tunnel, MASQUE) и сетевого аудита.
+# Bobarev Shell v3.20.13 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
 # Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, src_valid_mark=1, LimitNOFILE=512000), разделяет P2P-трафик Tailscale (fwmark 0x80000 / table 52) и автоматически защищает DNS при перезагрузке.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.12"
+SCRIPT_VERSION="3.20.13"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -612,8 +612,6 @@ rotate_vless_credentials_interactive() {
         render_xray_cascade_s1_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$S2_XRAY_IP" "$S2_XRAY_PORT" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "$S2_XRAY_SNI" "$XRAY_XHTTP_PATH" "${S2_XRAY_PATH:-/}" "$XRAY_REALITY_DEST"
     elif [ "${CASCADE_ROLE:-}" = "ru_hysteria_entry" ]; then
         render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "hysteria_local" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
-    elif [ "${CASCADE_ROLE:-}" = "ru_kariz_entry" ]; then
-        render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "kariz_local" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
     else
         local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
         render_xray_server_config "$cur_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "$out_m" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
@@ -696,7 +694,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.12: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.13: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -743,7 +741,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.12: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+# Bobarev Shell v3.20.13: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -961,19 +959,40 @@ for m_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
 done
 
 if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
+    while ip rule del fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null; do :; done
+    ip rule add fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null || true
     if [ -n "$PUB_IP" ]; then
         while ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null; do :; done
         ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
     fi
+    PUB_IP6="${SERVER_PUB_IPV6:-}"
+    if [ -n "$PUB_IP6" ]; then
+        while ip -6 rule del from "$PUB_IP6" lookup main priority 100 2>/dev/null; do :; done
+        ip -6 rule add from "$PUB_IP6" lookup main priority 100 2>/dev/null || true
+    fi
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
-    # Для связки NaiveProxy -> Tailscale (MTU 1280 + Disco) фиксируем MSS 1140
+    # Для связки VLESS-XHTTP -> Tailscale (MTU 1280 + Disco) фиксируем MSS 1140
     iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     iptables -t mangle -I OUTPUT 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
     if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
-        tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true 2>/dev/null || true
+        tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true --accept-dns=false 2>/dev/null || true
+    fi
+elif [ "${CASCADE_ROLE:-}" = "foreign_warp_exit" ]; then
+    ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
+    if [ -n "$WAN_IF" ]; then
+        iptables -C FORWARD -i tailscale0 -o "$WAN_IF" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$WAN_IF" -j ACCEPT
+        iptables -C FORWARD -i "$WAN_IF" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$WAN_IF" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        iptables -t nat -C POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
+    fi
+    iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+    iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+    iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+    while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
+    if [ "${FOREIGN_EXIT_MODE:-warp}" != "direct" ]; then
+        iptables -t nat -I PREROUTING 1 -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null || true
     fi
 fi
 RU_SH_EOF
@@ -981,9 +1000,9 @@ RU_SH_EOF
 
     cat << 'RU_SVC_EOF' > /etc/systemd/system/bobarev-cascade-ru.service
 [Unit]
-Description=Bobarev Cascade RU Routing (NaiveProxy -> Tunnel)
-After=network-online.target caddy.service
-Wants=network-online.target
+Description=Bobarev Cascade Tailscale Routing Guard
+After=network-online.target tailscaled.service bobarev-xray.service
+Wants=network-online.target tailscaled.service
 
 [Service]
 Type=oneshot
@@ -2462,6 +2481,11 @@ setup_cascade_server1_ru() {
     local exit_ts_ip=""
     prompt_default "3/3. Введите Tailscale IP вашего Зарубежного Сервера 2 (например, 100.x.y.z):" "${saved_exit:-}" exit_ts_ip
     if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+    exit_ts_ip=$(printf '%s' "$exit_ts_ip" | tr -d '[:space:]')
+    if [ -z "$exit_ts_ip" ]; then
+        echo -e "${C_RED} Ошибка: Tailscale IP Зарубежного Сервера 2 не указан!${C_RESET}"
+        return 1
+    fi
 
     generate_xray_reality_credentials || return 1
 
@@ -2473,6 +2497,13 @@ setup_cascade_server1_ru() {
     render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH" "$x_dest"
     write_xray_service
     safe_restart_systemd_service bobarev-xray.service
+    sleep 1
+
+    if ! systemctl is-active --quiet bobarev-xray.service; then
+        echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
+        journalctl -u bobarev-xray.service -n 15 --no-pager || true
+        return 1
+    fi
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_entry"
@@ -2483,6 +2514,7 @@ XRAY_PRIV="${GEN_X_PRIV}"
 XRAY_PUB="${GEN_X_PUB}"
 XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
 XRAY_SNI="${x_sni}"
+XRAY_REALITY_DEST="${x_dest}"
 XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
@@ -2491,12 +2523,24 @@ EOF
     chmod 600 /etc/default/bobarev-cascade
 
     apply_naive_tcp_tuning_profile "balanced"
+    install_universal_dns_boot_guard >/dev/null 2>&1 || true
     write_bobarev_cascade_ru_script
     /usr/local/bin/bobarev-cascade-ru.sh
 
     if command -v ufw &>/dev/null; then
         silent_run ufw allow "${x_port}/tcp" comment 'VLESS REALITY XTLS Vision'
         echo -e "${C_GREEN} Порт ${x_port}/tcp открыт в UFW.${C_RESET}"
+    fi
+
+    echo -e "${C_BLUE} Проверка сквозного выхода через Tailscale Exit Node (${exit_ts_ip})...${C_RESET}"
+    local ts_out_ip=""
+    ts_out_ip=$(curl -4 -s --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+    if [ -n "$ts_out_ip" ] && [ "$ts_out_ip" != "$pub_ip" ]; then
+        echo -e "${C_GREEN} ✔ Выходной IP каскада через Tailscale: ${C_BOLD}${ts_out_ip}${C_RESET}"
+    elif [ -n "$ts_out_ip" ]; then
+        echo -e "${C_YELLOW} ⚠ Текущий выходной IP (${ts_out_ip}) совпадает с РФ-сервером. Проверьте в админ-панели Tailscale, что на Сервере 2 включен 'Use as exit node'!${C_RESET}"
+    else
+        echo -e "${C_YELLOW} ⚠ Не удалось проверить внешний IP через Exit Node ${exit_ts_ip}. Проверьте 'tailscale status' и разрешение Exit Node в админке Tailscale.${C_RESET}"
     fi
 
     echo -e "${C_GREEN} Сервер 1 (Вход в РФ на базе VLESS-REALITY XTLS Vision + Tailscale [MTU 1280, MSS 1140]) успешно настроен и запущен!${C_RESET}"
@@ -2524,6 +2568,8 @@ setup_cascade_server2_warp() {
     fi
 
     silent_run tailscale set --advertise-exit-node=true
+    apply_naive_tcp_tuning_profile "balanced"
+    install_universal_dns_boot_guard >/dev/null 2>&1 || true
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="foreign_warp_exit"
 FOREIGN_EXIT_MODE="$exit_mode"
@@ -2702,9 +2748,6 @@ apply_foreign_exit_mode() {
         elif [ "${CASCADE_ROLE:-}" = "foreign_hysteria_exit" ] && [ -n "${HYSTERIA_PORT:-}" ]; then
             render_hysteria_server_config "$HYSTERIA_PORT" "${HYSTERIA_PASS:-SecretPass2026}" "$exit_mode"
             silent_run systemctl restart hysteria-server.service
-        elif [ "${CASCADE_ROLE:-}" = "foreign_kariz_exit" ]; then
-            render_kariz_exit_xray_config "${KARIZ_BRIDGE_PORT:-10809}" "$exit_mode"
-            safe_restart_systemd_service bobarev-xray.service
         elif [ "${CASCADE_ROLE:-}" = "foreign_warp_exit" ]; then
             if [ "$exit_mode" != "direct" ]; then
                 ensure_xray_installed || true
@@ -2719,14 +2762,31 @@ apply_foreign_exit_mode() {
       "listen": "0.0.0.0",
       "port": 10809,
       "protocol": "dokodemo-door",
-      "settings": { "network": "tcp", "followRedirect": true }
+      "settings": { "network": "tcp", "followRedirect": true },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      }
     }
   ],
   "outbounds": [
     {
       "tag": "masque-out",
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "dialerProxy": "usque-raw",
+          "domainStrategy": "UseIPv4",
+          "tcpNoDelay": true
+        }
+      }
+    },
+    {
+      "tag": "usque-raw",
       "protocol": "socks",
-      "settings": { "servers": [{ "address": "127.0.0.1", "port": 1080 }] }
+      "settings": { "servers": [{ "address": "127.0.0.1", "port": 1080 }] },
+      "streamSettings": { "sockopt": { "tcpNoDelay": true } }
     }
   ]
 }
@@ -2734,12 +2794,16 @@ TS_MASQUE_EOF
                     chmod 600 /etc/xray/config.json
                     write_xray_service
                     safe_restart_systemd_service bobarev-xray.service
+                    if command -v ufw &>/dev/null; then
+                        silent_run ufw allow in on tailscale0 to any port 10809 proto tcp comment 'Tailscale to Xray MASQUE'
+                    fi
                     iptables -t nat -I PREROUTING 1 -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null || true
                 fi
             else
                 silent_run systemctl stop bobarev-xray.service
                 silent_run systemctl disable bobarev-xray.service
             fi
+            write_bobarev_cascade_ru_script
         fi
     fi
 }
@@ -3474,25 +3538,6 @@ EOF
         ]
       }
     }'
-    elif [ "$exit_mode" = "kariz_local" ]; then
-        local k_port="${KARIZ_BRIDGE_PORT:-10809}"
-        outbound_json='{
-      "tag": "direct",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "127.0.0.1",
-            "port": '"${k_port}"'
-          }
-        ]
-      },
-      "streamSettings": {
-        "sockopt": {
-          "tcpNoDelay": true
-        }
-      }
-    }'
     else
         local iface_field=""
         if [ "$exit_mode" = "direct" ]; then
@@ -4120,482 +4165,6 @@ manage_cascade_xray_menu() {
                         sed -i 's/CASCADE_ROLE="ru_xray_entry"/CASCADE_ROLE="none"/' /etc/default/bobarev-cascade 2>/dev/null || true
                     fi
                     echo -e "${C_GREEN} Службы Xray остановлены и отключены.${C_RESET}"
-                fi
-                pause_enter
-                ;;
-        esac
-    done
-}
-
-# ==============================================================================
-# МОДУЛЬ 21B: КАСКАД 7 (VLESS-XHTTP REALITY -> KARIZ TUNNEL -> CLOUDFLARE MASQUE)
-# ==============================================================================
-render_kariz_exit_xray_config() {
-    local k_port="${1:-10809}"
-    local exit_mode="${2:-warp}"
-    mkdir -p /etc/xray
-
-    if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
-        cat << EOF > /etc/xray/config.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "kariz-socks-in",
-      "listen": "127.0.0.1",
-      "port": ${k_port},
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": true
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "masque-out",
-      "protocol": "freedom",
-      "streamSettings": {
-        "sockopt": {
-          "dialerProxy": "usque-raw",
-          "domainStrategy": "UseIPv4",
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "usque-raw",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "127.0.0.1",
-            "port": 1080
-          }
-        ]
-      },
-      "streamSettings": {
-        "sockopt": {
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "direct-udp",
-      "protocol": "freedom",
-      "streamSettings": {
-        "sockopt": {
-          "domainStrategy": "UseIPv4v6"
-        }
-      }
-    }
-  ],
-  "routing": {
-    "domainStrategy": "AsIs",
-    "rules": [
-      {
-        "type": "field",
-        "network": "udp",
-        "outboundTag": "direct-udp"
-      },
-      {
-        "type": "field",
-        "network": "tcp",
-        "outboundTag": "masque-out"
-      }
-    ]
-  }
-}
-EOF
-    else
-        local wan_dev iface_field=""
-        wan_dev=$(get_wan_if)
-        if [ -n "$wan_dev" ] && [ -d "/sys/class/net/$wan_dev" ]; then
-            iface_field=""interface": "${wan_dev}","
-        fi
-        cat << EOF > /etc/xray/config.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "kariz-socks-in",
-      "listen": "127.0.0.1",
-      "port": ${k_port},
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": true
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "streamSettings": {
-        "finalmask": {
-          "tcp": [
-            {
-              "type": "fragment",
-              "settings": {
-                "packets": "tlshello",
-                "length": "40-60",
-                "delay": "30-50"
-              }
-            }
-          ]
-        },
-        "sockopt": {
-          ${iface_field}
-          "domainStrategy": "UseIPv4v6",
-          "tcpNoDelay": true
-        }
-      }
-    }
-  ]
-}
-EOF
-    fi
-    chmod 600 /etc/xray/config.json
-}
-
-print_kariz_tunnel_wizard_guide() {
-    local k_bridge_port="${1:-10809}"
-    local k_tun_port="${2:-3080}"
-    echo -e "\n${C_CYAN} === ШПАРГАЛКА ПО СОЗДАНИЮ ТУННЕЛЯ В ВЕБ-ПАНЕЛИ KARIZ (Erfan-XRay) ===${C_RESET}"
-    echo -e "  1) На ${C_BOLD}Зарубежном Сервере 2${C_RESET} в веб-панели Kariz нажмите ${C_GREEN}Add Server (Добавить сервер)${C_RESET}:"
-    echo -e "     • Имя: ${C_GREEN}RU-Entry${C_RESET} | Способ: ${C_GREEN}Internet (Напрямую)${C_RESET} или ${C_YELLOW}GRE Link${C_RESET} (если провайдер режет прямые пакеты)"
-    echo -e "     • Скопируйте однострочную команду подключения Агента и выполните её на ${C_BOLD}Сервере 1 (РФ)${C_RESET} (пункт меню ${C_CYAN}2 -> 7 -> 3${C_RESET})."
-    echo -e "  2) Откройте вкладку ${C_GREEN}Tunnels -> New Tunnel (Новый туннель)${C_RESET}:"
-    echo -e "     • ${C_BOLD}Entry (Вход):${C_RESET} выберите ваш российский сервер (${C_GREEN}RU-Entry${C_RESET})"
-    echo -e "     • ${C_BOLD}Exit (Выход):${C_RESET} выберите ваш зарубежный сервер (${C_GREEN}Foreign-Exit${C_RESET})"
-    echo -e "     • Нажмите ${C_YELLOW}Benchmark (Махак / Тест транспортов)${C_RESET} или выберите транспорт:"
-    echo -e "       - ${C_GREEN}kcp${C_RESET} / ${C_GREEN}quic${C_RESET} (UDP — максимальная скорость на каналах с потерями и ретрансмитами)"
-    echo -e "       - ${C_GREEN}wss${C_RESET} (TLS WebSocket с фейковым SNI, например speedtest.net — максимальная маскировка)"
-    echo -e "       - ${C_GREEN}paqet${C_RESET} (KCP внутри сырых TCP-сегментов без рукопожатия — если UDP блокируется)"
-    echo -e "     • ${C_BOLD}Порт туннеля Kariz между серверами:${C_RESET} ${C_GREEN}${k_tun_port}${C_RESET}"
-    echo -e "     • ${C_BOLD}Порт проброса (Config / Forward Port):${C_RESET} укажите ${C_BOLD}${C_GREEN}${k_bridge_port}${C_RESET} -> цель ${C_GREEN}127.0.0.1:${k_bridge_port}${C_RESET} (${C_GREEN}TCP + UDP${C_RESET})."
-    echo -e "  3) После нажатия ${C_GREEN}Create Tunnel${C_RESET} весь трафик VLESS-XHTTP с Сервера 1 (РФ) пойдет через туннель Kariz в Cloudflare MASQUE на Сервере 2!"
-}
-
-run_kariz_official_manager() {
-    local sub_k=""
-    if ! smart_menu "Менеджер Kariz (Erfan-XRay: Панель / Агент / Команда связки)" "\nВыберите действие для управления ядром, веб-панелью или агентом Kariz:" 18 "$WT_WIDTH" 4 "sub_k" \
-        "1" " Запустить официальный скрипт Kariz (Установка Веб-Панели / Ядра / Обновление)" \
-        "2" " Вставить однострочную команду подключения Kariz Agent (из Веб-Панели)" \
-        "3" " Показать инструкцию по настройке портов в Веб-Панели Kariz" \
-        "0" " Назад" || [ "$sub_k" = "0" ]; then
-        return 0
-    fi
-    clear
-    case "$sub_k" in
-        1)
-            echo -e "${C_BLUE} Запуск официального установщика/менеджера Kariz (https://github.com/Erfan-XRay/Kariz)...${C_RESET}"
-            bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) || true
-            ;;
-        2)
-            local join_cmd=""
-            prompt_clean "Вставьте полную однострочную команду установки/подключения Kariz Agent из веб-панели:" join_cmd
-            if [ "$MODULE_CANCELED" = true ] || [ -z "$join_cmd" ]; then return 0; fi
-            echo -e "${C_BLUE} Выполнение команды подключения Kariz Agent...${C_RESET}"
-            eval "$join_cmd" || true
-            ;;
-        3)
-            local k_bp="10809" k_tp="3080"
-            if [ -f /etc/default/bobarev-cascade ]; then
-                # shellcheck disable=SC1091
-                source /etc/default/bobarev-cascade
-                k_bp="${KARIZ_BRIDGE_PORT:-10809}"
-                k_tp="${KARIZ_TUNNEL_PORT:-3080}"
-            fi
-            print_kariz_tunnel_wizard_guide "$k_bp" "$k_tp"
-            ;;
-    esac
-}
-
-verify_kariz_cascade_exit_ip() {
-    local k_bridge_port="${1:-10809}"
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        k_bridge_port="${KARIZ_BRIDGE_PORT:-$k_bridge_port}"
-    fi
-    echo -e "${C_BLUE} Проверка сквозного выходного IP через локальный вход туннеля Kariz (127.0.0.1:${k_bridge_port})...${C_RESET}"
-    local test_ip="" probe_url=""
-    for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org" "https://ip.gs"; do
-        if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
-            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname "127.0.0.1:${k_bridge_port}" --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-        else
-            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname "127.0.0.1:${k_bridge_port}" --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
-        fi
-        if [[ "$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; else test_ip=""; fi
-    done
-    if [ -n "$test_ip" ]; then
-        echo -e "${C_GREEN} ✔ Туннель Kariz активен! Выходной IP каскада (Сервер 2 / Cloudflare MASQUE): ${C_BOLD}${test_ip}${C_RESET}"
-    else
-        echo -e "${C_YELLOW} ℹ Локальный порт 127.0.0.1:${k_bridge_port} пока не вернул внешний IP.${C_RESET}"
-        echo -e "   Убедитесь, что в веб-панели Kariz создан туннель (Entry РФ -> Exit Зарубеж) с пробросом порта ${C_BOLD}${k_bridge_port}${C_RESET} -> ${C_BOLD}127.0.0.1:${k_bridge_port}${C_RESET}."
-    fi
-}
-
-setup_cascade_kariz_server2_foreign() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): KARIZ EXIT -> CLOUDFLARE MASQUE / ЧИСТЫЙ IP ===${C_RESET}"
-    local cur_role="" k_bridge_port="10809" k_tun_port="3080"
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        cur_role="${CASCADE_ROLE:-}"
-        k_bridge_port="${KARIZ_BRIDGE_PORT:-10809}"
-        k_tun_port="${KARIZ_TUNNEL_PORT:-3080}"
-    fi
-
-    prompt_default "1/3. Локальный порт приема трафика из туннеля Kariz (по умолчанию 10809):" "$k_bridge_port" k_bridge_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$k_bridge_port" ]; then return 0; fi
-    k_bridge_port="${k_bridge_port//[^0-9]/}"
-    [ -z "$k_bridge_port" ] && k_bridge_port="10809"
-
-    prompt_default "2/3. Внешний порт туннеля Kariz между серверами для открытия в UFW (по умолчанию 3080):" "$k_tun_port" k_tun_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$k_tun_port" ]; then return 0; fi
-    k_tun_port="${k_tun_port//[^0-9]/}"
-    [ -z "$k_tun_port" ] && k_tun_port="3080"
-
-    local exit_choice=""
-    if ! smart_menu "3/3. Выход в интернет на Зарубежном Сервере 2 (Kariz Exit)" "
-Как выпускать трафик из туннеля Kariz в интернет?" 16 "$WT_WIDTH" 2 "exit_choice" \
-        "1" " Через Cloudflare MASQUE (Usque — чистый IP CDN Cloudflare без капч и блокировок)" \
-        "2" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)"; then
-        return 0
-    fi
-
-    local exit_mode="warp"
-    [ "$exit_choice" = "2" ] && exit_mode="direct"
-
-    local allow_self="xray|usque|kariz"
-    local ports_to_scan=("${k_bridge_port}/tcp")
-    [ "$exit_mode" = "warp" ] && ports_to_scan+=("1080/tcp")
-
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 7 — Каскад: Kariz Exit + MASQUE (Сервер 2 Зарубеж)" "$allow_self" "${ports_to_scan[@]}"; then
-        return 0
-    fi
-
-    ensure_xray_installed || return 1
-    enable_routing_optimizations || true
-    apply_naive_tcp_tuning_profile "balanced"
-    install_universal_dns_boot_guard >/dev/null 2>&1 || true
-
-    apply_foreign_exit_mode "$exit_mode"
-    render_kariz_exit_xray_config "$k_bridge_port" "$exit_mode"
-    write_xray_service
-    safe_restart_systemd_service bobarev-xray.service
-    sleep 1
-
-    if ! systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_RED} Служба локального шлюза bobarev-xray (127.0.0.1:${k_bridge_port}) НЕ запустилась! Журнал:${C_RESET}"
-        journalctl -u bobarev-xray.service -n 15 --no-pager || true
-        return 1
-    fi
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${k_tun_port}/tcp" comment 'Kariz Tunnel TCP'
-        silent_run ufw allow "${k_tun_port}/udp" comment 'Kariz Tunnel UDP'
-        silent_run ufw allow 443/tcp comment 'Kariz Panel / HTTPS'
-        silent_run ufw allow 80/tcp comment 'Kariz ACME TLS'
-    fi
-
-    local wan_dev pub_ip="" pub_ipv6=""
-    wan_dev=$(get_wan_if)
-    if [ -n "$wan_dev" ]; then
-        pub_ip=$(ip -4 -o addr show dev "$wan_dev" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
-        pub_ipv6=$(ip -6 -o addr show dev "$wan_dev" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || true)
-    fi
-    [ -z "$pub_ipv6" ] && pub_ipv6=$(get_wan_global_ipv6)
-
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="foreign_kariz_exit"
-FOREIGN_EXIT_MODE="${exit_mode}"
-KARIZ_BRIDGE_PORT="${k_bridge_port}"
-KARIZ_TUNNEL_PORT="${k_tun_port}"
-SERVER_PUB_IP="${pub_ip}"
-SERVER_PUB_IPV6="${pub_ipv6}"
-TCP_TUNE_PROFILE="balanced"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    echo -e "\n${C_GREEN} ✔ Выходной каскадный шлюз Сервера 2 (127.0.0.1:${k_bridge_port} -> ${exit_mode}) успешно запущен!${C_RESET}"
-    if prompt_yn "Запустить сейчас официальный установщик Kariz (чтобы установить Веб-Панель или Агент Kariz на этом сервере)?" "true"; then
-        bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) || true
-    fi
-    print_kariz_tunnel_wizard_guide "$k_bridge_port" "$k_tun_port"
-}
-
-setup_cascade_kariz_server1_ru() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS-XHTTP (REALITY + STREAM-ONE) -> ТУННЕЛЬ KARIZ ===${C_RESET}"
-    local x_port="443" x_sni="www.microsoft.com" k_bridge_port="10809" k_tun_port="3080"
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        x_port="${XRAY_PORT:-443}"
-        x_sni="${XRAY_SNI:-www.microsoft.com}"
-        k_bridge_port="${KARIZ_BRIDGE_PORT:-10809}"
-        k_tun_port="${KARIZ_TUNNEL_PORT:-3080}"
-    fi
-
-    prompt_default "1/3. TCP-порт на этом РФ-сервере для подключения iPhone / Shadowrocket по VLESS-XHTTP (рекомендуется 443 или 8443):" "$x_port" x_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$x_port" ]; then return 0; fi
-    x_port="${x_port//[^0-9]/}"
-    [ -z "$x_port" ] && x_port="443"
-
-    prompt_default "2/3. Локальный порт входа в туннель Kariz на этом сервере (по умолчанию 10809):" "$k_bridge_port" k_bridge_port
-    if [ "$MODULE_CANCELED" = true ] || [ -z "$k_bridge_port" ]; then return 0; fi
-    k_bridge_port="${k_bridge_port//[^0-9]/}"
-    [ -z "$k_bridge_port" ] && k_bridge_port="10809"
-
-    local allow_self="xray|kariz"
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 7 — Каскад: VLESS-XHTTP -> Kariz (Сервер 1 РФ)" "$allow_self" "${x_port}/tcp"; then
-        return 0
-    fi
-
-    local x_dest=""
-    select_reality_sni_and_dest_interactive "$x_sni" || return 0
-    x_sni="$SELECT_SNI_RESULT"
-    x_dest="$SELECT_DEST_RESULT"
-
-    ensure_xray_installed || return 1
-    enable_routing_optimizations || true
-    apply_naive_tcp_tuning_profile "balanced"
-    install_universal_dns_boot_guard >/dev/null 2>&1 || true
-
-    generate_xray_reality_credentials || return 1
-    KARIZ_BRIDGE_PORT="$k_bridge_port"
-    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "kariz_local" "$GEN_X_PATH" "$x_dest"
-    write_xray_service
-    safe_restart_systemd_service bobarev-xray.service
-    sleep 1
-
-    if ! systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
-        journalctl -u bobarev-xray.service -n 15 --no-pager || true
-        return 1
-    fi
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${x_port}/tcp" comment 'VLESS XHTTP REALITY Kariz Entry'
-        silent_run ufw allow "${k_tun_port}/tcp" comment 'Kariz Tunnel TCP'
-        silent_run ufw allow "${k_tun_port}/udp" comment 'Kariz Tunnel UDP'
-    fi
-
-    local wan_dev pub_ip pub_ip6
-    wan_dev=$(get_wan_if)
-    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
-    pub_ip6=$(get_wan_global_ipv6)
-
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="ru_kariz_entry"
-KARIZ_BRIDGE_PORT="${k_bridge_port}"
-KARIZ_TUNNEL_PORT="${k_tun_port}"
-XRAY_PORT="${x_port}"
-XRAY_UUID="${GEN_X_UUID}"
-XRAY_PRIV="${GEN_X_PRIV}"
-XRAY_PUB="${GEN_X_PUB}"
-XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
-XRAY_SNI="${x_sni}"
-XRAY_REALITY_DEST="${x_dest}"
-XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
-SERVER_PUB_IP="${pub_ip}"
-SERVER_PUB_IPV6="${pub_ip6}"
-TCP_TUNE_PROFILE="balanced"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    echo -e "\n${C_GREEN} ✔ Вход VLESS-XHTTP (порт ${x_port}/tcp, mode=stream-one, REALITY SNI: ${x_sni}) -> Kariz (127.0.0.1:${k_bridge_port}) успешно запущен!${C_RESET}"
-
-    local k_act=""
-    if smart_menu "Подключение туннеля Kariz на Сервере 1 (РФ)" "
-Как подключить этот российский сервер к Kariz?" 16 "$WT_WIDTH" 3 "k_act" \
-        "1" " Вставить готовую команду подключения Агента (Join Command) из Веб-Панели Kariz" \
-        "2" " Запустить официальный скрипт-менеджер Kariz (kariz.sh)" \
-        "3" " Пропустить (Kariz уже установлен и настроен)"; then
-        clear
-        if [ "$k_act" = "1" ]; then
-            local join_cmd=""
-            prompt_clean "Вставьте однострочную команду подключения Kariz Agent из веб-панели Сервера 2:" join_cmd
-            if [ "$MODULE_CANCELED" != true ] && [ -n "$join_cmd" ]; then
-                echo -e "${C_BLUE} Выполнение команды подключения Kariz Agent...${C_RESET}"
-                eval "$join_cmd" || true
-            fi
-        elif [ "$k_act" = "2" ]; then
-            bash <(curl -fsSL https://raw.githubusercontent.com/Erfan-XRay/Kariz/main/scripts/kariz.sh) || true
-        fi
-    fi
-
-    verify_kariz_cascade_exit_ip "$k_bridge_port"
-    print_kariz_tunnel_wizard_guide "$k_bridge_port" "$k_tun_port"
-    print_vless_shadowrocket_links
-}
-
-manage_cascade_kariz_menu() {
-    while true; do
-        MODULE_CANCELED=false
-        local c_state="Не активен"
-        if systemctl is-active --quiet bobarev-xray.service 2>/dev/null && [ -f /etc/default/bobarev-cascade ]; then
-            # shellcheck disable=SC1091
-            source /etc/default/bobarev-cascade
-            if [ "${CASCADE_ROLE:-}" = "foreign_kariz_exit" ]; then
-                if is_warp_active; then
-                    c_state="Активен Сервер 2 (Зарубеж: Kariz Exit 127.0.0.1:${KARIZ_BRIDGE_PORT:-10809} -> Cloudflare MASQUE)"
-                else
-                    c_state="Активен Сервер 2 (Зарубеж: Kariz Exit 127.0.0.1:${KARIZ_BRIDGE_PORT:-10809} -> Чистый IP)"
-                fi
-            elif [ "${CASCADE_ROLE:-}" = "ru_kariz_entry" ]; then
-                c_state="Активен Сервер 1 (РФ: VLESS-XHTTP :${XRAY_PORT:-443} -> Kariz 127.0.0.1:${KARIZ_BRIDGE_PORT:-10809})"
-            fi
-        fi
-
-        local c_choice=""
-        if ! smart_menu " Каскад: VLESS-XHTTP + Kariz Tunnel (Rust / MASQUE)" "\nСтатус каскада: $c_state\nВыберите действие:" 21 "$WT_WIDTH" 8 "c_choice" \
-            "1" " Сервер 2 (Зарубеж): Выход Kariz -> Cloudflare MASQUE / Чистый IP" \
-            "2" " Сервер 1 (РФ): Вход VLESS-XHTTP (REALITY) -> Туннель Kariz" \
-            "3" " Менеджер Kariz (Панель / Агент / Команда связки / Шпаргалка)" \
-            "4" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
-            "5" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
-            "6" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
-            "7" " Проверить сквозной выходной IP через туннель Kariz" \
-            "8" " Остановить службы каскада VLESS-XHTTP + Kariz" \
-            "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
-            break
-        fi
-
-        clear
-        case "$c_choice" in
-            1) setup_cascade_kariz_server2_foreign || true; pause_enter ;;
-            2) setup_cascade_kariz_server1_ru || true; pause_enter ;;
-            3) run_kariz_official_manager || true; pause_enter ;;
-            4) manage_vless_users_menu || true ;;
-            5) print_vless_shadowrocket_links || true; pause_enter ;;
-            6) toggle_foreign_warp_menu || true; pause_enter ;;
-            7) verify_kariz_cascade_exit_ip || true; pause_enter ;;
-            8)
-                if prompt_yn "Остановить и отключить службы Xray для каскада Kariz на этом сервере?" "false"; then
-                    silent_run systemctl stop bobarev-xray.service
-                    silent_run systemctl disable bobarev-xray.service
-                    if [ -f /etc/default/bobarev-cascade ]; then
-                        sed -i 's/CASCADE_ROLE="ru_kariz_entry"/CASCADE_ROLE="none"/;s/CASCADE_ROLE="foreign_kariz_exit"/CASCADE_ROLE="none"/' /etc/default/bobarev-cascade 2>/dev/null || true
-                    fi
-                    echo -e "${C_GREEN} Службы каскадного шлюза Xray для Kariz остановлены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -11602,7 +11171,7 @@ menu_connections_proxies() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-REALITY, HYSTERIA 2 & KARIZ)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 20 "$WT_WIDTH" 8 sub_choice             "1" "Автономный VLESS-XHTTP (Один сервер + WG Dual-Gateway)"             "2" "Автономный VLESS-XHTTP (Один сервер + Cloudflare MASQUE)"             "3" "Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)"             "4" "Каскад / Сервер: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)"             "5" "Шлюз: VLESS-XHTTP + Tailscale / Mullvad Exit Node"             "6" "Каскад: VLESS-XHTTP + Tailscale (2 сервера + MASQUE)"             "7" "Каскад: VLESS-XHTTP + Kariz Tunnel (Rust / 2 сервера + MASQUE)"             "0" "⬅ Назад"; then
+        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-REALITY & HYSTERIA 2)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 19 "$WT_WIDTH" 7 sub_choice             "1" "Автономный VLESS-XHTTP (Один сервер + WG Dual-Gateway)"             "2" "Автономный VLESS-XHTTP (Один сервер + Cloudflare MASQUE)"             "3" "Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)"             "4" "Каскад / Сервер: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)"             "5" "Шлюз: VLESS-XHTTP + Tailscale / Mullvad Exit Node"             "6" "Каскад: VLESS-XHTTP + Tailscale (2 сервера + MASQUE)"             "0" "⬅ Назад"; then
             return 0
         fi
         if [ -z "$sub_choice" ] || [ "$sub_choice" = "0" ]; then return 0; fi
@@ -11614,7 +11183,6 @@ menu_connections_proxies() {
             4) manage_cascade_hysteria_menu || true ;;
             5) manage_naive_mullvad_menu || true ;;
             6) manage_cascade_naive_ts_warp || true ;;
-            7) manage_cascade_kariz_menu || true ;;
         esac
     done
 }

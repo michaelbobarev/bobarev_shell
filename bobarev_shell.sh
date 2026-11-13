@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.15 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
-# Поддерживает горячую смену выходного зарубежного сервера во всех типах каскадов (Пункт 3 в меню 2-3, 2-4, 2-5, 2-6) с полным сохранением входных ключей и клиентских ссылок VLESS в Shadowrocket.
+# Bobarev Shell v3.20.16 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Поддерживает горячую смену выходного сервера (Пункт 3) и выбор транспорта между серверами (Пункт 4: Dual-Stack IPv4+IPv6 / Только IPv4 / Только IPv6) во всех каскадах (2-3, 2-4, 2-5, 2-6) без смены ключей VLESS.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.15"
+SCRIPT_VERSION="3.20.16"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -977,14 +977,21 @@ for m_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
     fi
 done
 
-# Управление транспортом P2P Tailscale (41641/udp): Dual-Stack (IPv4+IPv6) или Только IPv4
+# Управление транспортом P2P Tailscale (41641/udp): Dual-Stack (IPv4+IPv6), Только IPv4 или Только IPv6
+while iptables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
+while iptables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
 if command -v ip6tables &>/dev/null; then
     while ip6tables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
     while ip6tables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
-    if [ "${TS_TRANSPORT_MODE:-dualstack}" = "ipv4_only" ]; then
+fi
+if [ "${TS_TRANSPORT_MODE:-dualstack}" = "ipv4_only" ]; then
+    if command -v ip6tables &>/dev/null; then
         ip6tables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
         ip6tables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
     fi
+elif [ "${TS_TRANSPORT_MODE:-dualstack}" = "ipv6_only" ]; then
+    iptables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
+    iptables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
 fi
 
 if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
@@ -2723,6 +2730,25 @@ change_cascade_tailscale_exit_node_interactive() {
     echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними."
 }
 
+apply_tailscale_p2p_transport_rules() {
+    local mode="${1:-dualstack}"
+    while iptables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
+    while iptables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
+    if command -v ip6tables &>/dev/null; then
+        while ip6tables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
+        while ip6tables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
+    fi
+    if [ "$mode" = "ipv4_only" ]; then
+        if command -v ip6tables &>/dev/null; then
+            ip6tables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
+            ip6tables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
+        fi
+    elif [ "$mode" = "ipv6_only" ]; then
+        iptables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
+        iptables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
+    fi
+}
+
 toggle_tailscale_ipv6_transport_menu() {
     local cur_trans="dualstack"
     if [ -f /etc/default/bobarev-cascade ]; then
@@ -2732,19 +2758,22 @@ toggle_tailscale_ipv6_transport_menu() {
     fi
     local cur_desc="Dual-Stack (IPv4 + IPv6 одновременно — универсальный режим)"
     [ "$cur_trans" = "ipv4_only" ] && cur_desc="Только IPv4 для P2P 41641/udp (защита от медленного IPv6-транзита между хостерами)"
+    [ "$cur_trans" = "ipv6_only" ] && cur_desc="Только IPv6 для P2P 41641/udp (обход блокировок IPv4 UDP по IPv6)"
 
     local t_choice=""
     if ! smart_menu "Транспорт Tailscale между серверами (41641/udp)" "
 Текущий режим: ${cur_desc}
 
-Выберите, как демону tailscaled устанавливать P2P-туннель между серверами (внутри самого туннеля и на входе VLESS IPv4 + IPv6 продолжают работать одновременно):" 18 "$WT_WIDTH" 2 "t_choice" \
-        "1" " Dual-Stack: IPv4 + IPv6 одновременно (По умолчанию — подходит для любых серверов, включая IPv6-only)" \
-        "2" " Только IPv4 для туннеля 41641/udp (Отключить IPv6 P2P в Tailscale, если IPv6-маршрут хостера дает потери/рассинхрон)"; then
+Выберите, как демону tailscaled устанавливать P2P-туннель между двумя серверами (внутри самого туннеля и на входе VLESS IPv4 + IPv6 продолжают работать одновременно, ключи VLESS не меняются):" 19 "$WT_WIDTH" 3 "t_choice" \
+        "1" " Dual-Stack: IPv4 + IPv6 одновременно (По умолчанию — подходит для любых серверов)" \
+        "2" " Только IPv4 между серверами (Отключить IPv6 P2P в Tailscale при потерях на IPv6-маршруте)" \
+        "3" " Только IPv6 между серверами (Принудительно пустить P2P-туннель 41641/udp по IPv6)"; then
         return 0
     fi
 
     local new_trans="dualstack"
     [ "$t_choice" = "2" ] && new_trans="ipv4_only"
+    [ "$t_choice" = "3" ] && new_trans="ipv6_only"
 
     mkdir -p /etc/default
     touch /etc/default/bobarev-cascade
@@ -2752,9 +2781,12 @@ toggle_tailscale_ipv6_transport_menu() {
     printf 'TS_TRANSPORT_MODE="%s"\n' "$new_trans" >> /etc/default/bobarev-cascade
     chmod 600 /etc/default/bobarev-cascade
 
-    write_bobarev_cascade_ru_script
-    /usr/local/bin/bobarev-cascade-ru.sh
-    echo -e "${C_GREEN} ✔ Режим транспорта Tailscale переключен на: ${C_BOLD}${new_trans}${C_RESET}"
+    apply_tailscale_p2p_transport_rules "$new_trans"
+    if grep -q 'CASCADE_ROLE="ru_entry"' /etc/default/bobarev-cascade 2>/dev/null; then
+        write_bobarev_cascade_ru_script
+        /usr/local/bin/bobarev-cascade-ru.sh
+    fi
+    echo -e "${C_GREEN} ✔ Режим межсерверного транспорта Tailscale (41641/udp) переключен на: ${C_BOLD}${new_trans}${C_RESET}"
 }
 
 manage_cascade_naive_ts_warp() {
@@ -2782,7 +2814,7 @@ manage_cascade_naive_ts_warp() {
             "1" " Сервер 1 (РФ): VLESS-XHTTP -> Tailscale Exit Node" \
             "2" " Сервер 2 (Зарубеж): Tailscale -> Выход (Чистый IP / MASQUE)" \
             "3" " Сменить выходной сервер (Exit Node) на Сервере 1 БЕЗ смены ключей VLESS" \
-            "4" " Транспорт Tailscale (41641/udp): Dual-Stack (IPv4+IPv6) <-> Только IPv4" \
+            "4" " Транспорт между серверами (41641/udp): IPv4+IPv6 / Только IPv4 / Только IPv6" \
             "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
             "6" " Показать ссылки и QR-коды для Shadowrocket" \
             "7" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
@@ -2824,10 +2856,7 @@ manage_cascade_naive_ts_warp() {
                 if prompt_yn "Остановить и отключить службы этого каскада (VLESS-XHTTP / Tailscale Exit / Cloudflare MASQUE)?" "false"; then
                     silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service usque.service
                     while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
-                    if command -v ip6tables &>/dev/null; then
-                        while ip6tables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
-                        while ip6tables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
-                    fi
+                    apply_tailscale_p2p_transport_rules "dualstack" 
                     silent_run tailscale set --exit-node=
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
                     silent_run systemctl daemon-reload
@@ -3225,11 +3254,13 @@ SVC_EOF
     fi
 
     local bridge_token
-    bridge_token=$(printf '%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" | base64 | tr -d '
+    bridge_token=$(printf '%s|%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" "$pub_ipv6" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s' "$pub_ip" "$h_port" "$h_pass" "$cert_pin" "$pub_ipv6" | base64 | tr -d '
+
  ')
     local bridge_token_v6=""
     if [ -n "$pub_ipv6" ]; then
-        bridge_token_v6=$(printf '%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" | base64 | tr -d '
+        bridge_token_v6=$(printf '%s|%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" "$pub_ip" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s' "$pub_ipv6" "$h_port" "$h_pass" "$cert_pin" "$pub_ip" | base64 | tr -d '
+
  ')
     fi
 
@@ -3281,12 +3312,20 @@ setup_cascade_hysteria_server1_ru() {
     local decoded
     decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '
 ' || echo "")
-    local s2_ip="" s2_port="" s2_pass="" s2_pin=""
-    IFS='|' read -r s2_ip s2_port s2_pass s2_pin <<< "$decoded"
+    local s2_ip="" s2_port="" s2_pass="" s2_pin="" s2_ip_alt="" s2_ipv4="" s2_ipv6=""
+    IFS='|' read -r s2_ip s2_port s2_pass s2_pin s2_ip_alt <<< "$decoded"
     s2_ip=$(printf '%s' "$s2_ip" | tr -d '[:space:]"'"'"'[]')
     s2_port=$(printf '%s' "$s2_port" | tr -dc '0-9')
     s2_pass=$(printf '%s' "$s2_pass" | tr -d '[:space:]"'"'"'')
     s2_pin=$(printf '%s' "$s2_pin" | tr -d '[:space:]"'"'"'')
+    s2_ip_alt=$(printf '%s' "${s2_ip_alt:-}" | tr -d '[:space:]"'"'"'[]')
+    if [[ "$s2_ip" == *:* ]]; then
+        s2_ipv6="$s2_ip"
+        [[ "$s2_ip_alt" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && s2_ipv4="$s2_ip_alt"
+    else
+        s2_ipv4="$s2_ip"
+        [[ "$s2_ip_alt" == *:* ]] && s2_ipv6="$s2_ip_alt"
+    fi
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ]; then
         echo -e "${C_RED} Ошибка: Неверный формат Токена Hysteria 2!${C_RESET}"
@@ -3418,10 +3457,16 @@ SVC_EOF
     pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
     pub_ip6=$(get_wan_global_ipv6)
 
+    local cur_hy_trans="${CASCADE_TRANSPORT_MODE:-dualstack}"
+    [[ -n "$s2_ipv6" && -z "$s2_ipv4" ]] && cur_hy_trans="ipv6_only"
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_hysteria_entry"
-HYSTERIA_SERVER="${s2_ip}"
+CASCADE_TRANSPORT_MODE="${cur_hy_trans}"
+HYSTERIA_SERVER="${s2_ipv4:-$s2_ip}"
+HYSTERIA_SERVER_V6="${s2_ipv6}"
 HYSTERIA_PORT="${s2_port}"
+HYSTERIA_PASS="${s2_pass}"
+HYSTERIA_CERT_PIN="${s2_pin}"
 XRAY_PORT="${x_port}"
 XRAY_UUID="${GEN_X_UUID}"
 XRAY_PRIV="${GEN_X_PRIV}"
@@ -3467,6 +3512,66 @@ ${C_GREEN} Каскад (VLESS-REALITY XTLS Vision -> Hysteria 2 QUIC -> Вых�
     print_vless_shadowrocket_links
 }
 
+write_hysteria_client_yaml() {
+    local target_ip="$1"
+    local target_port="$2"
+    local h_pass="$3"
+    local h_pin="${4:-}"
+
+    local h_server_target="${target_ip}:${target_port}"
+    if [[ "$target_ip" == *:* ]] && [[ "$target_ip" != \[*\] ]]; then
+        h_server_target="[${target_ip}]:${target_port}"
+    fi
+
+    mkdir -p /etc/hysteria
+    {
+        printf 'server: "%s"\n' "$h_server_target"
+        printf 'auth: "%s"\n\n' "$h_pass"
+        printf 'tls:\n'
+        printf '  sni: "www.bing.com"\n'
+        printf '  insecure: true\n'
+        if [ -n "$h_pin" ]; then
+            printf '  pinSHA256: "%s"\n\n' "$h_pin"
+        else
+            printf '\n'
+        fi
+        printf 'quic:\n'
+        printf '  initStreamReceiveWindow: 16777216\n'
+        printf '  maxStreamReceiveWindow: 16777216\n'
+        printf '  initConnReceiveWindow: 67108864\n'
+        printf '  maxConnReceiveWindow: 67108864\n'
+        printf '  maxIdleTimeout: 60s\n'
+        printf '  keepAlivePeriod: 15s\n'
+        printf '  disablePathMTUDiscovery: false\n\n'
+        printf 'socks5:\n'
+        printf '  listen: "127.0.0.1:1080"\n'
+    } > /etc/hysteria/client.yaml
+    chmod 600 /etc/hysteria/client.yaml
+}
+
+probe_hysteria_socks_exit_ip() {
+    local test_ip="" probe_url=""
+    for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org" "https://ip.gs"; do
+        if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
+            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+        else
+            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
+        fi
+        if [[ "$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; else test_ip=""; fi
+    done
+    if [ -z "$test_ip" ]; then
+        for probe_url in "https://[2606:4700:4700::1111]/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api64.ipify.org"; do
+            if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
+                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+            else
+                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
+            fi
+            if [[ "$test_ip" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$test_ip" == *:* || "$test_ip" == *.* ]]; then break; else test_ip=""; fi
+        done
+    fi
+    printf '%s' "$test_ip"
+}
+
 change_cascade_hysteria_exit_server_interactive() {
     echo -e "${C_CYAN} === СМЕНА ВЫХОДНОГО СЕРВЕРА (HYSTERIA 2 QUIC) БЕЗ СМЕНЫ КЛЮЧЕЙ VLESS ===${C_RESET}"
     local cur_srv="" cur_port=""
@@ -3491,15 +3596,23 @@ change_cascade_hysteria_exit_server_interactive() {
 
     local decoded
     decoded=$(printf '%s' "$b_token" | base64 -d 2>/dev/null || true)
-    local s2_ip s2_port s2_pass s2_pin
-    IFS='|' read -r s2_ip s2_port s2_pass s2_pin <<< "$decoded"
-    s2_ip=$(printf '%s' "${s2_ip:-}" | tr -d '[:space:]')
+    local s2_ip="" s2_port="" s2_pass="" s2_pin="" s2_ip_alt="" s2_ipv4="" s2_ipv6=""
+    IFS='|' read -r s2_ip s2_port s2_pass s2_pin s2_ip_alt <<< "$decoded"
+    s2_ip=$(printf '%s' "${s2_ip:-}" | tr -d '[:space:]"'"'"'[]')
     s2_port=$(printf '%s' "${s2_port:-}" | tr -dc '0-9')
     s2_pass=$(printf '%s' "${s2_pass:-}" | tr -d '[:cntrl:]')
     s2_pin=$(printf '%s' "${s2_pin:-}" | tr -d '[:space:]')
+    s2_ip_alt=$(printf '%s' "${s2_ip_alt:-}" | tr -d '[:space:]"'"'"'[]')
+    if [[ "$s2_ip" == *:* ]]; then
+        s2_ipv6="$s2_ip"
+        [[ "$s2_ip_alt" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && s2_ipv4="$s2_ip_alt"
+    else
+        s2_ipv4="$s2_ip"
+        [[ "$s2_ip_alt" == *:* ]] && s2_ipv6="$s2_ip_alt"
+    fi
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_pass" ]; then
-        echo -e "${C_RED} Ошибка: неверный формат токена Hysteria 2! Скопируйте токен с нового Сервера 2 (Пункт 2 -> 4 -> 7).${C_RESET}"
+        echo -e "${C_RED} Ошибка: неверный формат токена Hysteria 2! Скопируйте токен с нового Сервера 2 (Пункт 2 -> 4 -> 8).${C_RESET}"
         return 1
     fi
 
@@ -3507,42 +3620,18 @@ change_cascade_hysteria_exit_server_interactive() {
 
     while ip rule del priority 101 2>/dev/null; do :; done
     while ip -6 rule del priority 101 2>/dev/null; do :; done
-    if [[ "$s2_ip" == *:* ]]; then
-        ip -6 rule add to "${s2_ip}" lookup main priority 101 2>/dev/null || true
-    else
-        ip rule add to "${s2_ip}" lookup main priority 101 2>/dev/null || true
+    [ -n "$s2_ipv4" ] && ip rule add to "${s2_ipv4}" lookup main priority 101 2>/dev/null || true
+    [ -n "$s2_ipv6" ] && ip -6 rule add to "${s2_ipv6}" lookup main priority 101 2>/dev/null || true
+
+    local active_target="$s2_ip"
+    local cur_mode="${CASCADE_TRANSPORT_MODE:-dualstack}"
+    if [ "$cur_mode" = "ipv4_only" ] && [ -n "$s2_ipv4" ]; then
+        active_target="$s2_ipv4"
+    elif [ "$cur_mode" = "ipv6_only" ] && [ -n "$s2_ipv6" ]; then
+        active_target="$s2_ipv6"
     fi
 
-    local h_server_target="${s2_ip}:${s2_port}"
-    if [[ "$s2_ip" == *:* ]] && [[ "$s2_ip" != \[*\] ]]; then
-        h_server_target="[${s2_ip}]:${s2_port}"
-    fi
-
-    mkdir -p /etc/hysteria
-    {
-        printf 'server: "%s"\n' "$h_server_target"
-        printf 'auth: "%s"\n\n' "$s2_pass"
-        printf 'tls:\n'
-        printf '  sni: "www.bing.com"\n'
-        printf '  insecure: true\n'
-        if [ -n "$s2_pin" ]; then
-            printf '  pinSHA256: "%s"\n\n' "$s2_pin"
-        else
-            printf '\n'
-        fi
-        printf 'quic:\n'
-        printf '  initStreamReceiveWindow: 16777216\n'
-        printf '  maxStreamReceiveWindow: 16777216\n'
-        printf '  initConnReceiveWindow: 67108864\n'
-        printf '  maxConnReceiveWindow: 67108864\n'
-        printf '  maxIdleTimeout: 60s\n'
-        printf '  keepAlivePeriod: 15s\n'
-        printf '  disablePathMTUDiscovery: false\n\n'
-        printf 'socks5:\n'
-        printf '  listen: "127.0.0.1:1080"\n'
-    } > /etc/hysteria/client.yaml
-    chmod 600 /etc/hysteria/client.yaml
-
+    write_hysteria_client_yaml "$active_target" "$s2_port" "$s2_pass" "$s2_pin"
     safe_restart_systemd_service hysteria-client.service
     sleep 2
 
@@ -3552,37 +3641,136 @@ change_cascade_hysteria_exit_server_interactive() {
         return 1
     fi
 
-    sed -i '/^HYSTERIA_SERVER=/d;/^HYSTERIA_PORT=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    echo -e "${C_BLUE} Проверка нового выходного IP через локальный SOCKS5-мост Hysteria 2 (127.0.0.1:1080)...${C_RESET}"
+    local test_ip
+    test_ip=$(probe_hysteria_socks_exit_ip)
+    if [ -z "$test_ip" ] && [ "$cur_mode" = "dualstack" ] && [ -n "$s2_ipv6" ] && [ "$active_target" != "$s2_ipv6" ]; then
+        echo -e "${C_YELLOW} IPv4 QUIC недоступен, автоматическое переключение Dual-Stack моста Hysteria 2 на IPv6 ([${s2_ipv6}]:${s2_port})...${C_RESET}"
+        active_target="$s2_ipv6"
+        write_hysteria_client_yaml "$active_target" "$s2_port" "$s2_pass" "$s2_pin"
+        safe_restart_systemd_service hysteria-client.service
+        sleep 2
+        test_ip=$(probe_hysteria_socks_exit_ip)
+    fi
+
+    sed -i '/^HYSTERIA_SERVER=/d;/^HYSTERIA_SERVER_V6=/d;/^HYSTERIA_PORT=/d;/^HYSTERIA_PASS=/d;/^HYSTERIA_CERT_PIN=/d;/^CASCADE_TRANSPORT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
     {
-        printf 'HYSTERIA_SERVER="%s"\n' "$s2_ip"
+        printf 'CASCADE_TRANSPORT_MODE="%s"\n' "$cur_mode"
+        printf 'HYSTERIA_SERVER="%s"\n' "${s2_ipv4:-$s2_ip}"
+        printf 'HYSTERIA_SERVER_V6="%s"\n' "${s2_ipv6}"
         printf 'HYSTERIA_PORT="%s"\n' "$s2_port"
+        printf 'HYSTERIA_PASS="%s"\n' "$s2_pass"
+        printf 'HYSTERIA_CERT_PIN="%s"\n' "$s2_pin"
     } >> /etc/default/bobarev-cascade
     chmod 600 /etc/default/bobarev-cascade
 
-    echo -e "${C_BLUE} Проверка нового выходного IP через локальный SOCKS5-мост Hysteria 2 (127.0.0.1:1080)...${C_RESET}"
-    local test_ip="" probe_url=""
-    for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org" "https://ip.gs"; do
-        if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
-            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-        else
-            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
-        fi
-        if [[ "$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; else test_ip=""; fi
-    done
-    if [ -z "$test_ip" ]; then
-        for probe_url in "https://[2606:4700:4700::1111]/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api64.ipify.org"; do
-            if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
-                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-            else
-                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:1080 --connect-timeout 5 --max-time 10 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
-            fi
-            if [[ "$test_ip" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$test_ip" == *:* || "$test_ip" == *.* ]]; then break; else test_ip=""; fi
-        done
-    fi
     [ -z "$test_ip" ] && test_ip="Проверьте доступность UDP-порта ${s2_port} на новом Сервере 2"
-    echo -e "\n${C_GREEN} ✔ Выходной сервер Hysteria 2 успешно переключен на ${C_BOLD}${s2_ip}:${s2_port}${C_RESET}${C_GREEN}!${C_RESET}"
+    echo -e "\n${C_GREEN} ✔ Выходной сервер Hysteria 2 успешно переключен на ${C_BOLD}${active_target}:${s2_port}${C_RESET}${C_GREEN}!${C_RESET}"
     echo -e "   Новый выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними (служба bobarev-xray не перезапускалась)."
+}
+
+toggle_cascade_hysteria_transport_menu() {
+    if [ ! -f /etc/default/bobarev-cascade ]; then
+        echo -e "${C_YELLOW} Каскад Hysteria 2 еще не настроен. Сначала выполните настройку Сервера 1 в Пункте 2.${C_RESET}"
+        return 1
+    fi
+    # shellcheck disable=SC1091
+    source /etc/default/bobarev-cascade
+    if [ "${CASCADE_ROLE:-}" != "ru_hysteria_entry" ]; then
+        echo -e "${C_YELLOW} Эта опция предназначена для Сервера 1 (Вход РФ). Текущая роль: ${CASCADE_ROLE:-не задана}.${C_RESET}"
+        return 1
+    fi
+
+    local cur_mode="${CASCADE_TRANSPORT_MODE:-dualstack}"
+    local s2_v4="${HYSTERIA_SERVER:-}"
+    local s2_v6="${HYSTERIA_SERVER_V6:-}"
+    local s2_port="${HYSTERIA_PORT:-36533}"
+    local s2_pass="${HYSTERIA_PASS:-}"
+    local s2_pin="${HYSTERIA_CERT_PIN:-}"
+
+    if [[ "$s2_v4" == *:* ]]; then
+        [ -z "$s2_v6" ] && s2_v6="$s2_v4"
+        s2_v4=""
+    fi
+
+    if [ -z "$s2_pass" ] && [ -f /etc/hysteria/client.yaml ]; then
+        s2_pass=$(awk -F'"' '/^auth:/{print $2; exit}' /etc/hysteria/client.yaml 2>/dev/null || true)
+        s2_pin=$(awk -F'"' '/pinSHA256:/{print $2; exit}' /etc/hysteria/client.yaml 2>/dev/null || true)
+    fi
+
+    local cur_desc="Dual-Stack (IPv4 + IPv6 — автовыбор рабочего QUIC-канала с откатом на IPv6)"
+    [ "$cur_mode" = "ipv4_only" ] && cur_desc="Только IPv4 (${s2_v4:-не задан}:${s2_port})"
+    [ "$cur_mode" = "ipv6_only" ] && cur_desc="Только IPv6 ([${s2_v6:-не задан}]:${s2_port})"
+
+    local t_choice=""
+    if ! smart_menu "Транспорт Hysteria 2 между Сервером 1 и Сервером 2" "
+Текущий режим: ${cur_desc}
+Адреса Сервера 2: IPv4=${s2_v4:-не указан} | IPv6=${s2_v6:-не указан}
+
+Выберите, по какому протоколу соединять Сервер 1 (РФ) и Сервер 2 (Зарубеж) (ключи VLESS и ссылки в Shadowrocket не меняются):" 20 "$WT_WIDTH" 3 "t_choice" \
+        "1" " Dual-Stack: IPv4 + IPv6 (По умолчанию — автовыбор канала с резервом IPv6)" \
+        "2" " Только IPv4 между серверами (Строго IPv4 QUIC, исключить IPv6-транзит)" \
+        "3" " Только IPv6 между серверами (Строго IPv6 QUIC — обход блокировок IPv4 UDP)"; then
+        return 0
+    fi
+
+    local new_mode="dualstack"
+    [ "$t_choice" = "2" ] && new_mode="ipv4_only"
+    [ "$t_choice" = "3" ] && new_mode="ipv6_only"
+
+    if [ "$new_mode" = "ipv4_only" ] && [ -z "$s2_v4" ]; then
+        prompt_default "Введите IPv4-адрес Зарубежного Сервера 2:" "" s2_v4
+        if [ "$MODULE_CANCELED" = true ] || [ -z "$s2_v4" ]; then return 0; fi
+        s2_v4=$(printf '%s' "$s2_v4" | tr -d '[:space:]')
+    elif [ "$new_mode" = "ipv6_only" ] && [ -z "$s2_v6" ]; then
+        prompt_default "Введите IPv6-адрес Зарубежного Сервера 2 (без скобок):" "" s2_v6
+        if [ "$MODULE_CANCELED" = true ] || [ -z "$s2_v6" ]; then return 0; fi
+        s2_v6=$(printf '%s' "$s2_v6" | tr -d '[:space:][]')
+    elif [ "$new_mode" = "dualstack" ] && [ -z "$s2_v6" ]; then
+        if prompt_yn "Для полноценного Dual-Stack укажите IPv6-адрес Сервера 2 (или нажмите Нет, если на Сервере 2 только IPv4):" "false"; then
+            prompt_default "Введите IPv6-адрес Зарубежного Сервера 2:" "" s2_v6
+            s2_v6=$(printf '%s' "${s2_v6:-}" | tr -d '[:space:][]')
+        fi
+    fi
+
+    while ip rule del priority 101 2>/dev/null; do :; done
+    while ip -6 rule del priority 101 2>/dev/null; do :; done
+    [ -n "$s2_v4" ] && ip rule add to "$s2_v4" lookup main priority 101 2>/dev/null || true
+    [ -n "$s2_v6" ] && ip -6 rule add to "$s2_v6" lookup main priority 101 2>/dev/null || true
+
+    local target_ip="${s2_v4:-$s2_v6}"
+    [ "$new_mode" = "ipv4_only" ] && target_ip="$s2_v4"
+    [ "$new_mode" = "ipv6_only" ] && target_ip="$s2_v6"
+
+    write_hysteria_client_yaml "$target_ip" "$s2_port" "$s2_pass" "$s2_pin"
+    safe_restart_systemd_service hysteria-client.service
+    sleep 2
+
+    local test_ip
+    test_ip=$(probe_hysteria_socks_exit_ip)
+    if [ -z "$test_ip" ] && [ "$new_mode" = "dualstack" ] && [ -n "$s2_v6" ] && [ "$target_ip" != "$s2_v6" ]; then
+        echo -e "${C_YELLOW} IPv4 QUIC не ответил, переключаю Dual-Stack мост на IPv6 ([${s2_v6}]:${s2_port})...${C_RESET}"
+        target_ip="$s2_v6"
+        write_hysteria_client_yaml "$target_ip" "$s2_port" "$s2_pass" "$s2_pin"
+        safe_restart_systemd_service hysteria-client.service
+        sleep 2
+        test_ip=$(probe_hysteria_socks_exit_ip)
+    fi
+
+    sed -i '/^CASCADE_TRANSPORT_MODE=/d;/^HYSTERIA_SERVER=/d;/^HYSTERIA_SERVER_V6=/d;/^HYSTERIA_PASS=/d;/^HYSTERIA_CERT_PIN=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    {
+        printf 'CASCADE_TRANSPORT_MODE="%s"\n' "$new_mode"
+        printf 'HYSTERIA_SERVER="%s"\n' "${s2_v4:-$target_ip}"
+        printf 'HYSTERIA_SERVER_V6="%s"\n' "$s2_v6"
+        printf 'HYSTERIA_PASS="%s"\n' "$s2_pass"
+        printf 'HYSTERIA_CERT_PIN="%s"\n' "$s2_pin"
+    } >> /etc/default/bobarev-cascade
+    chmod 600 /etc/default/bobarev-cascade
+
+    echo -e "\n${C_GREEN} ✔ Режим межсерверного транспорта Hysteria 2 переключен на: ${C_BOLD}${new_mode}${C_RESET} (активный узел: ${C_BOLD}${target_ip}:${s2_port}${C_RESET})"
+    [ -n "$test_ip" ] && echo -e "   Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
+    echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними."
 }
 
 manage_cascade_hysteria_menu() {
@@ -3596,19 +3784,30 @@ manage_cascade_hysteria_menu() {
                 c_state="Активен Сервер 2 (Зарубеж: Hysteria 2 -> Чистый IP сервера)"
             fi
         elif systemctl is-active --quiet hysteria-client.service 2>/dev/null; then
-            local h_srv_info=""
+            local h_srv_info="" h_tr_mode="dualstack"
             if [ -f /etc/default/bobarev-cascade ]; then
                 # shellcheck disable=SC1091
                 source /etc/default/bobarev-cascade
                 h_srv_info="${HYSTERIA_SERVER:-}"
+                h_tr_mode="${CASCADE_TRANSPORT_MODE:-dualstack}"
             fi
-            c_state="Активен Сервер 1 (РФ: VLESS-XHTTP -> Hysteria 2 ${h_srv_info})"
+            c_state="Активен Сервер 1 (РФ: VLESS-XHTTP -> Hysteria 2 ${h_srv_info} [${h_tr_mode}])"
         fi
 
         local c_choice
         if ! smart_menu " Каскад / Сервер Hysteria 2 (VLESS-XHTTP + Hysteria 2 QUIC)" "
 Статус моста: $c_state
-Выберите действие:" 21 "$WT_WIDTH" 8 "c_choice"         "1" " Сервер 2 (Зарубеж или Автономный): Hysteria 2 QUIC -> Выход"         "2" " Сервер 1 (РФ): VLESS-XHTTP -> Hysteria 2 QUIC"         "3" " Сменить выходной сервер (новый Токен Hysteria 2) БЕЗ смены ключей VLESS"         "4" " Управление ключами VLESS-XHTTP, Path и смена SNI"         "5" " Показать ссылки и QR-коды для Shadowrocket"         "6" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE"         "7" " Показать токен подключения для Сервера 1"         "8" " Остановить службы Hysteria 2"         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
+Выберите действие:" 22 "$WT_WIDTH" 9 "c_choice" \
+        "1" " Сервер 2 (Зарубеж или Автономный): Hysteria 2 QUIC -> Выход" \
+        "2" " Сервер 1 (РФ): VLESS-XHTTP -> Hysteria 2 QUIC" \
+        "3" " Сменить выходной сервер (новый Токен Hysteria 2) БЕЗ смены ключей VLESS" \
+        "4" " Транспорт между серверами: IPv4+IPv6 / Только IPv4 / Только IPv6" \
+        "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
+        "6" " Показать ссылки и QR-коды для Shadowrocket" \
+        "7" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
+        "8" " Показать токен подключения для Сервера 1" \
+        "9" " Остановить службы Hysteria 2" \
+        "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -3617,21 +3816,22 @@ manage_cascade_hysteria_menu() {
             1) setup_cascade_hysteria_server2_foreign || true; pause_enter ;;
             2) setup_cascade_hysteria_server1_ru || true; pause_enter ;;
             3) change_cascade_hysteria_exit_server_interactive || true; pause_enter ;;
-            4) manage_vless_users_menu ;;
-            5) print_vless_shadowrocket_links; pause_enter ;;
-            6) toggle_foreign_warp_menu; pause_enter ;;
-            7)
+            4) toggle_cascade_hysteria_transport_menu || true; pause_enter ;;
+            5) manage_vless_users_menu ;;
+            6) print_vless_shadowrocket_links; pause_enter ;;
+            7) toggle_foreign_warp_menu; pause_enter ;;
+            8)
                 if [ -f /etc/default/bobarev-cascade ]; then
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${HYSTERIA_TOKEN:-}" ]; then
                         echo -e "${C_CYAN} Токены Hysteria 2 для подключения Сервера 1 (РФ):${C_RESET}
 "
-                        echo -e "   ${C_BOLD}Основной токен (IPv4):${C_RESET}"
+                        echo -e "   ${C_BOLD}Основной токен (Dual-Stack IPv4 + IPv6):${C_RESET}"
                         echo -e "    ${C_BOLD}${C_GREEN}${HYSTERIA_TOKEN}${C_RESET}
 "
                         if [ -n "${HYSTERIA_TOKEN_V6:-}" ]; then
-                            echo -e "   ${C_BOLD}Резервный токен (IPv6):${C_RESET}"
+                            echo -e "   ${C_BOLD}Резервный токен (Приоритет IPv6):${C_RESET}"
                             echo -e "    ${C_BOLD}${C_CYAN}${HYSTERIA_TOKEN_V6}${C_RESET}
 "
                         fi
@@ -3641,7 +3841,7 @@ manage_cascade_hysteria_menu() {
                 fi
                 pause_enter
                 ;;
-            8)
+            9)
                 if prompt_yn "Остановить и отключить службы Hysteria 2 на этом сервере?" "false"; then
                     silent_run systemctl stop hysteria-server.service hysteria-client.service bobarev-xray.service
                     silent_run systemctl disable hysteria-server.service hysteria-client.service bobarev-xray.service
@@ -4019,6 +4219,32 @@ render_xray_cascade_s1_config() {
         s1_srv_names="\"${s1_sni}\""
     fi
 
+    local s2_ipv6="${15:-${S2_XRAY_IPV6:-}}"
+    local tr_mode="${16:-${CASCADE_TRANSPORT_MODE:-dualstack}}"
+    local frag_domain_strategy="UseIPv4v6"
+    local active_s2_ip="$s2_ip"
+    if [ "$tr_mode" = "ipv4_only" ]; then
+        frag_domain_strategy="UseIPv4"
+    elif [ "$tr_mode" = "ipv6_only" ]; then
+        frag_domain_strategy="UseIPv6"
+        [ -n "$s2_ipv6" ] && active_s2_ip="$s2_ipv6"
+    fi
+
+    local vnext_extra=""
+    if [ "$tr_mode" = "dualstack" ] && [ -n "$s2_ipv6" ] && [ "$s2_ipv6" != "$active_s2_ip" ]; then
+        vnext_extra=",
+          {
+            \"address\": \"${s2_ipv6}\",
+            \"port\": ${s2_port},
+            \"users\": [
+              {
+                \"id\": \"${s2_uuid}\",
+                \"encryption\": \"none\"
+              }
+            ]
+          }"
+    fi
+
     local wan_dev
     wan_dev=$(get_wan_if)
     local frag_iface_line=""
@@ -4095,7 +4321,7 @@ render_xray_cascade_s1_config() {
       "settings": {
         "vnext": [
           {
-            "address": "${s2_ip}",
+            "address": "${active_s2_ip}",
             "port": ${s2_port},
             "users": [
               {
@@ -4103,7 +4329,7 @@ render_xray_cascade_s1_config() {
                 "encryption": "none"
               }
             ]
-          }
+          }${vnext_extra}
         ]
       },
       "streamSettings": {
@@ -4145,7 +4371,7 @@ render_xray_cascade_s1_config() {
         },
         "sockopt": {
           ${frag_iface_line}
-          "domainStrategy": "AsIs",
+          "domainStrategy": "${frag_domain_strategy}",
           "tcpNoDelay": true
         }
       }
@@ -4285,10 +4511,10 @@ setup_cascade_xray_server2_foreign() {
     fi
 
     local bridge_token
-    bridge_token=$(printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 | tr -d '\n\r ')
+    bridge_token=$(printf '%s|%s|%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" "$pub_ipv6" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s|%s|%s' "$pub_ip" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" "$pub_ipv6" | base64 | tr -d '\n\r ')
     local bridge_token_v6=""
     if [ -n "$pub_ipv6" ]; then
-        bridge_token_v6=$(printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" | base64 | tr -d '\n\r ')
+        bridge_token_v6=$(printf '%s|%s|%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" "$pub_ip" | base64 -w0 2>/dev/null || printf '%s|%s|%s|%s|%s|%s|%s|%s' "$pub_ipv6" "$x_port" "$x_uuid" "$x_pub" "$x_short_id" "$x_sni" "$x_path" "$pub_ip" | base64 | tr -d '\n\r ')
     fi
 
     cat << EOF > /etc/default/bobarev-cascade
@@ -4342,9 +4568,18 @@ setup_cascade_xray_server1_ru() {
     clean_b64=$(printf '%s' "$token_in" | tr -d '[:space:]')
     local decoded
     decoded=$(printf '%s' "$clean_b64" | base64 -d 2>/dev/null | tr -d '\r\n' || echo "")
-    local s2_ip="" s2_port="" s2_uuid="" s2_pub="" s2_short_id="" s2_sni="" s2_path=""
-    IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni s2_path <<< "$decoded"
+        local s2_ip="" s2_port="" s2_uuid="" s2_pub="" s2_short_id="" s2_sni="" s2_path="" s2_ip_alt="" s2_ipv4="" s2_ipv6=""
+    IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni s2_path s2_ip_alt <<< "$decoded"
     [ -z "$s2_path" ] && s2_path="/xhttp-stream"
+    s2_ip=$(printf '%s' "$s2_ip" | tr -d '[:space:][]')
+    s2_ip_alt=$(printf '%s' "${s2_ip_alt:-}" | tr -d '[:space:][]')
+    if [[ "$s2_ip" == *:* ]]; then
+        s2_ipv6="$s2_ip"
+        [[ "$s2_ip_alt" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && s2_ipv4="$s2_ip_alt"
+    else
+        s2_ipv4="$s2_ip"
+        [[ "$s2_ip_alt" == *:* ]] && s2_ipv6="$s2_ip_alt"
+    fi
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_uuid" ] || [ -z "$s2_pub" ]; then
         echo -e "${C_RED} Ошибка: Неверный формат Токена Xray! Скопируйте свежий токен с Сервера 2.${C_RESET}"
@@ -4371,10 +4606,10 @@ setup_cascade_xray_server1_ru() {
     enable_routing_optimizations || true
 
     echo -e "${C_BLUE} Запуск каскадного моста VLESS-XHTTP (Finalmask -> ${s2_ip}:${s2_port}, Path: ${s2_path}) без остановки Tailscale...${C_RESET}"
-    if [[ "$s2_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        while ip rule del to "$s2_ip" lookup main priority 101 2>/dev/null; do :; done
-        ip rule add to "$s2_ip" lookup main priority 101 2>/dev/null || true
-    fi
+    while ip rule del priority 101 2>/dev/null; do :; done
+    while ip -6 rule del priority 101 2>/dev/null; do :; done
+    [ -n "$s2_ipv4" ] && ip rule add to "$s2_ipv4" lookup main priority 101 2>/dev/null || true
+    [ -n "$s2_ipv6" ] && ip -6 rule add to "$s2_ipv6" lookup main priority 101 2>/dev/null || true
 
     local reuse_keys=false
     if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
@@ -4396,7 +4631,10 @@ setup_cascade_xray_server1_ru() {
     local s1_short_id="$GEN_X_SHORT_ID"
     local s1_path="$GEN_X_PATH"
 
-    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$s1_path" "$s2_path" "$s1_dest"
+    local cur_x_trans="${CASCADE_TRANSPORT_MODE:-dualstack}"
+    [[ -n "$s2_ipv6" && -z "$s2_ipv4" ]] && cur_x_trans="ipv6_only"
+
+    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "${s2_ipv4:-$s2_ip}" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$s1_path" "$s2_path" "$s1_dest" "$s2_ipv6" "$cur_x_trans"
     write_xray_service
 
     if ! /usr/local/bin/xray run -test -c /etc/xray/config.json >/dev/null 2>&1; then
@@ -4421,6 +4659,7 @@ setup_cascade_xray_server1_ru() {
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_xray_entry"
+CASCADE_TRANSPORT_MODE="${cur_x_trans}"
 XRAY_SERVER="${s2_ip}"
 XRAY_PORT="${s1_port}"
 XRAY_UUID="${s1_uuid}"
@@ -4430,7 +4669,8 @@ XRAY_SHORT_ID="${s1_short_id}"
 XRAY_SNI="${s1_sni}"
 XRAY_REALITY_DEST="${s1_dest}"
 XRAY_XHTTP_PATH="${s1_path}"
-S2_XRAY_IP="${s2_ip}"
+S2_XRAY_IP="${s2_ipv4:-$s2_ip}"
+S2_XRAY_IPV6="${s2_ipv6}"
 S2_XRAY_PORT="${s2_port}"
 S2_XRAY_UUID="${s2_uuid}"
 S2_XRAY_PUB="${s2_pub}"
@@ -4472,6 +4712,29 @@ EOF
     print_vless_shadowrocket_links
 }
 
+probe_xray_cascade_exit_ip() {
+    local test_ip="" probe_url=""
+    for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org" "https://ip.gs" "https://ifconfig.me/ip"; do
+        if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
+            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+        else
+            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
+        fi
+        if [[ "$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; else test_ip=""; fi
+    done
+    if [ -z "$test_ip" ]; then
+        for probe_url in "https://[2606:4700:4700::1111]/cdn-cgi/trace" "https://api64.ipify.org"; do
+            if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
+                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+            else
+                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
+            fi
+            if [[ "$test_ip" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$test_ip" == *:* || "$test_ip" == *.* ]]; then break; else test_ip=""; fi
+        done
+    fi
+    printf '%s' "$test_ip"
+}
+
 change_cascade_xray_exit_server_interactive() {
     echo -e "${C_CYAN} === СМЕНА ВЫХОДНОГО СЕРВЕРА (VLESS-XHTTP + FINALMASK) БЕЗ СМЕНЫ КЛЮЧЕЙ VLESS ===${C_RESET}"
     if [ ! -f /etc/default/bobarev-cascade ]; then
@@ -4505,32 +4768,40 @@ change_cascade_xray_exit_server_interactive() {
 
     local decoded
     decoded=$(printf '%s' "$b_token" | base64 -d 2>/dev/null || true)
-    local s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni s2_path
-    IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni s2_path <<< "$decoded"
-    s2_ip=$(printf '%s' "${s2_ip:-}" | tr -d '[:space:]')
+    local s2_ip="" s2_port="" s2_uuid="" s2_pub="" s2_short_id="" s2_sni="" s2_path="" s2_ip_alt="" s2_ipv4="" s2_ipv6=""
+    IFS='|' read -r s2_ip s2_port s2_uuid s2_pub s2_short_id s2_sni s2_path s2_ip_alt <<< "$decoded"
+    s2_ip=$(printf '%s' "${s2_ip:-}" | tr -d '[:space:][]')
     s2_port=$(printf '%s' "${s2_port:-}" | tr -dc '0-9')
     s2_uuid=$(printf '%s' "${s2_uuid:-}" | tr -d '[:space:]')
     s2_pub=$(printf '%s' "${s2_pub:-}" | tr -d '[:space:]')
     s2_short_id=$(printf '%s' "${s2_short_id:-}" | tr -dc '0-9a-fA-F')
     s2_sni=$(printf '%s' "${s2_sni:-}" | tr -d '[:space:]')
     s2_path=$(printf '%s' "${s2_path:-/xhttp-stream}" | tr -d '[:space:]')
+    s2_ip_alt=$(printf '%s' "${s2_ip_alt:-}" | tr -d '[:space:][]')
     [[ -z "$s2_path" ]] && s2_path="/xhttp-stream"
     [[ "$s2_path" != /* ]] && s2_path="/${s2_path}"
+    if [[ "$s2_ip" == *:* ]]; then
+        s2_ipv6="$s2_ip"
+        [[ "$s2_ip_alt" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && s2_ipv4="$s2_ip_alt"
+    else
+        s2_ipv4="$s2_ip"
+        [[ "$s2_ip_alt" == *:* ]] && s2_ipv6="$s2_ip_alt"
+    fi
 
     if [ -z "$s2_ip" ] || [ -z "$s2_port" ] || [ -z "$s2_uuid" ] || [ -z "$s2_pub" ]; then
-        echo -e "${C_RED} Ошибка: неверный формат токена VLESS-XHTTP! Скопируйте токен с нового Сервера 2 (Пункт 2 -> 3 -> 7).${C_RESET}"
+        echo -e "${C_RED} Ошибка: неверный формат токена VLESS-XHTTP! Скопируйте токен с нового Сервера 2 (Пункт 2 -> 3 -> 8).${C_RESET}"
         return 1
     fi
 
     while ip rule del priority 101 2>/dev/null; do :; done
     while ip -6 rule del priority 101 2>/dev/null; do :; done
-    if [[ "$s2_ip" == *:* ]]; then
-        ip -6 rule add to "${s2_ip}" lookup main priority 101 2>/dev/null || true
-    else
-        ip rule add to "${s2_ip}" lookup main priority 101 2>/dev/null || true
-    fi
+    [ -n "$s2_ipv4" ] && ip rule add to "${s2_ipv4}" lookup main priority 101 2>/dev/null || true
+    [ -n "$s2_ipv6" ] && ip -6 rule add to "${s2_ipv6}" lookup main priority 101 2>/dev/null || true
 
-    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "$s1_path" "$s2_ip" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$s2_path" "$s1_dest"
+    local cur_x_trans="${CASCADE_TRANSPORT_MODE:-dualstack}"
+    [[ -n "$s2_ipv6" && -z "$s2_ipv4" ]] && cur_x_trans="ipv6_only"
+
+    render_xray_cascade_s1_config "$s1_port" "$s1_uuid" "$s1_priv" "$s1_short_id" "$s1_sni" "${s2_ipv4:-$s2_ip}" "$s2_port" "$s2_uuid" "$s2_pub" "$s2_short_id" "$s2_sni" "$s1_path" "$s2_path" "$s1_dest" "$s2_ipv6" "$cur_x_trans"
     if [ -s /etc/xray/vless_users.list ]; then
         rebuild_xray_inbound_clients
     fi
@@ -4557,6 +4828,7 @@ change_cascade_xray_exit_server_interactive() {
 
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_xray_entry"
+CASCADE_TRANSPORT_MODE="${cur_x_trans}"
 XRAY_SERVER="${s2_ip}"
 XRAY_PORT="${s1_port}"
 XRAY_UUID="${s1_uuid}"
@@ -4566,7 +4838,8 @@ XRAY_SHORT_ID="${s1_short_id}"
 XRAY_SNI="${s1_sni}"
 XRAY_REALITY_DEST="${s1_dest}"
 XRAY_XHTTP_PATH="${s1_path}"
-S2_XRAY_IP="${s2_ip}"
+S2_XRAY_IP="${s2_ipv4:-$s2_ip}"
+S2_XRAY_IPV6="${s2_ipv6}"
 S2_XRAY_PORT="${s2_port}"
 S2_XRAY_UUID="${s2_uuid}"
 S2_XRAY_PUB="${s2_pub}"
@@ -4580,28 +4853,98 @@ EOF
     chmod 600 /etc/default/bobarev-cascade
 
     echo -e "${C_BLUE} Проверка нового выходного IP через каскадный мост VLESS-XHTTP (127.0.0.1:10808 -> Finalmask -> ${s2_ip}:${s2_port})...${C_RESET}"
-    local test_ip="" probe_url=""
-    for probe_url in "https://1.1.1.1/cdn-cgi/trace" "https://www.cloudflare.com/cdn-cgi/trace" "https://api.ipify.org" "https://ip.gs" "https://ifconfig.me/ip"; do
-        if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
-            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-        else
-            test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q -4 --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
-        fi
-        if [[ "$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; else test_ip=""; fi
-    done
-    if [ -z "$test_ip" ]; then
-        for probe_url in "https://[2606:4700:4700::1111]/cdn-cgi/trace" "https://api64.ipify.org"; do
-            if [[ "$probe_url" == *"cdn-cgi/trace"* ]]; then
-                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-            else
-                test_ip=$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy -u no_proxy -u NO_PROXY curl -q --noproxy '' --socks5-hostname 127.0.0.1:10808 --connect-timeout 6 --max-time 12 "$probe_url" 2>/dev/null | tr -d '[:space:]' || true)
-            fi
-            if [[ "$test_ip" =~ ^[0-9a-fA-F:.]+$ ]] && [[ "$test_ip" == *:* || "$test_ip" == *.* ]]; then break; else test_ip=""; fi
-        done
-    fi
+    local test_ip
+    test_ip=$(probe_xray_cascade_exit_ip)
     [ -z "$test_ip" ] && test_ip="Проверьте доступность порта ${s2_port}/tcp на новом Сервере 2 (${s2_ip})"
     echo -e "\n${C_GREEN} ✔ Выходной сервер VLESS-XHTTP успешно переключен на ${C_BOLD}${s2_ip}:${s2_port}${C_RESET}${C_GREEN}!${C_RESET}"
     echo -e "   Новый выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
+    echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними."
+}
+
+toggle_cascade_xray_transport_menu() {
+    if [ ! -f /etc/default/bobarev-cascade ]; then
+        echo -e "${C_YELLOW} Конфигурация каскада (/etc/default/bobarev-cascade) не найдена. Сначала выполните настройку Сервера 1 в Пункте 2.${C_RESET}"
+        return 1
+    fi
+    # shellcheck disable=SC1091
+    source /etc/default/bobarev-cascade
+    if [ "${CASCADE_ROLE:-}" != "ru_xray_entry" ]; then
+        echo -e "${C_YELLOW} Эта опция предназначена для Сервера 1 (Вход РФ). Текущая роль: ${CASCADE_ROLE:-не задана}.${C_RESET}"
+        return 1
+    fi
+
+    local cur_mode="${CASCADE_TRANSPORT_MODE:-dualstack}"
+    local s2_v4="${S2_XRAY_IP:-${XRAY_SERVER:-}}"
+    local s2_v6="${S2_XRAY_IPV6:-}"
+    if [[ "$s2_v4" == *:* ]]; then
+        [ -z "$s2_v6" ] && s2_v6="$s2_v4"
+        s2_v4=""
+    fi
+
+    local cur_desc="Dual-Stack (IPv4 + IPv6 одновременно — UseIPv4v6)"
+    [ "$cur_mode" = "ipv4_only" ] && cur_desc="Только IPv4 (${s2_v4:-не задан}:${S2_XRAY_PORT:-443} — UseIPv4)"
+    [ "$cur_mode" = "ipv6_only" ] && cur_desc="Только IPv6 ([${s2_v6:-не задан}]:${S2_XRAY_PORT:-443} — UseIPv6)"
+
+    local t_choice=""
+    if ! smart_menu "Транспорт VLESS-XHTTP между Сервером 1 и Сервером 2" "
+Текущий режим: ${cur_desc}
+Адреса Сервера 2: IPv4=${s2_v4:-не указан} | IPv6=${s2_v6:-не указан}
+
+Выберите, как соединять Сервер 1 (РФ) и Сервер 2 (Зарубеж) (входные ключи VLESS и ссылки в Shadowrocket не меняются):" 20 "$WT_WIDTH" 3 "t_choice" \
+        "1" " Dual-Stack: IPv4 + IPv6 одновременно (По умолчанию — UseIPv4v6)" \
+        "2" " Только IPv4 между серверами (Строго IPv4, исключить медленный IPv6-транзит)" \
+        "3" " Только IPv6 между серверами (Строго IPv6 — обход блокировок IPv4)"; then
+        return 0
+    fi
+
+    local new_mode="dualstack"
+    [ "$t_choice" = "2" ] && new_mode="ipv4_only"
+    [ "$t_choice" = "3" ] && new_mode="ipv6_only"
+
+    if [ "$new_mode" = "ipv4_only" ] && [ -z "$s2_v4" ]; then
+        prompt_default "Введите IPv4-адрес Зарубежного Сервера 2:" "" s2_v4
+        if [ "$MODULE_CANCELED" = true ] || [ -z "$s2_v4" ]; then return 0; fi
+        s2_v4=$(printf '%s' "$s2_v4" | tr -d '[:space:]')
+    elif [ "$new_mode" = "ipv6_only" ] && [ -z "$s2_v6" ]; then
+        prompt_default "Введите IPv6-адрес Зарубежного Сервера 2 (без скобок):" "" s2_v6
+        if [ "$MODULE_CANCELED" = true ] || [ -z "$s2_v6" ]; then return 0; fi
+        s2_v6=$(printf '%s' "$s2_v6" | tr -d '[:space:][]')
+    elif [ "$new_mode" = "dualstack" ] && [ -z "$s2_v6" ]; then
+        if prompt_yn "Желаете указать IPv6-адрес Сервера 2 для резервирования Dual-Stack (или нажмите Нет, если используется один адрес)?" "false"; then
+            prompt_default "Введите IPv6-адрес Зарубежного Сервера 2:" "" s2_v6
+            s2_v6=$(printf '%s' "${s2_v6:-}" | tr -d '[:space:][]')
+        fi
+    fi
+
+    while ip rule del priority 101 2>/dev/null; do :; done
+    while ip -6 rule del priority 101 2>/dev/null; do :; done
+    [ -n "$s2_v4" ] && ip rule add to "$s2_v4" lookup main priority 101 2>/dev/null || true
+    [ -n "$s2_v6" ] && ip -6 rule add to "$s2_v6" lookup main priority 101 2>/dev/null || true
+
+    local primary_ip="${s2_v4:-$s2_v6}"
+    [ "$new_mode" = "ipv6_only" ] && primary_ip="$s2_v6"
+
+    render_xray_cascade_s1_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "${XRAY_SNI:-www.microsoft.com}" "$primary_ip" "${S2_XRAY_PORT:-443}" "$S2_XRAY_UUID" "$S2_XRAY_PUB" "$S2_XRAY_SHORT_ID" "${S2_XRAY_SNI:-www.microsoft.com}" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "${S2_XRAY_PATH:-/xhttp-stream}" "${XRAY_REALITY_DEST:-${XRAY_SNI:-www.microsoft.com}:443}" "$s2_v6" "$new_mode"
+    if [ -s /etc/xray/vless_users.list ]; then
+        rebuild_xray_inbound_clients
+    fi
+
+    safe_restart_systemd_service bobarev-xray.service
+    sleep 2
+
+    sed -i '/^CASCADE_TRANSPORT_MODE=/d;/^XRAY_SERVER=/d;/^S2_XRAY_IP=/d;/^S2_XRAY_IPV6=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    {
+        printf 'CASCADE_TRANSPORT_MODE="%s"\n' "$new_mode"
+        printf 'XRAY_SERVER="%s"\n' "$primary_ip"
+        printf 'S2_XRAY_IP="%s"\n' "${s2_v4:-$primary_ip}"
+        printf 'S2_XRAY_IPV6="%s"\n' "$s2_v6"
+    } >> /etc/default/bobarev-cascade
+    chmod 600 /etc/default/bobarev-cascade
+
+    local test_ip
+    test_ip=$(probe_xray_cascade_exit_ip)
+    echo -e "\n${C_GREEN} ✔ Режим межсерверного транспорта VLESS-XHTTP переключен на: ${C_BOLD}${new_mode}${C_RESET} (активный адрес: ${C_BOLD}${primary_ip}:${S2_XRAY_PORT:-443}${C_RESET})"
+    [ -n "$test_ip" ] && echo -e "   Выходной IP каскада: ${C_BOLD}${C_GREEN}${test_ip}${C_RESET}"
     echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними."
 }
 
@@ -4620,21 +4963,22 @@ manage_cascade_xray_menu() {
                         c_state="Активен Сервер 2 (Зарубеж: VLESS-XHTTP -> Чистый IP сервера)"
                     fi
                 elif [ "${CASCADE_ROLE:-}" = "ru_xray_entry" ]; then
-                    c_state="Активен Сервер 1 (РФ: VLESS-XHTTP -> Finalmask -> Сервер 2 ${XRAY_SERVER:-})"
+                    c_state="Активен Сервер 1 (РФ: VLESS-XHTTP -> Finalmask -> Сервер 2 ${XRAY_SERVER:-} [${CASCADE_TRANSPORT_MODE:-dualstack}])"
                 fi
             fi
         fi
 
         local c_choice
-        if ! smart_menu " Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)" "\nСтатус моста: $c_state\nВыберите действие:" 21 "$WT_WIDTH" 9 "c_choice" \
+        if ! smart_menu " Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)" "\nСтатус моста: $c_state\nВыберите действие:" 22 "$WT_WIDTH" 10 "c_choice" \
         "1" " Сервер 2 (Зарубеж): VLESS-XHTTP (SplitHTTP) -> Выход" \
         "2" " Сервер 1 (РФ): VLESS-XHTTP -> Finalmask -> Сервер 2" \
         "3" " Сменить выходной сервер (новый Токен Сервера 2) БЕЗ смены ключей VLESS" \
-        "4" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
-        "5" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
-        "6" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
-        "7" " Показать токен подключения для Сервера 1" \
-        "8" " Остановить службы Xray" \
+        "4" " Транспорт между серверами: IPv4+IPv6 / Только IPv4 / Только IPv6" \
+        "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
+        "6" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
+        "7" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
+        "8" " Показать токен подключения для Сервера 1" \
+        "9" " Остановить службы Xray" \
         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -4644,19 +4988,20 @@ manage_cascade_xray_menu() {
             1) setup_cascade_xray_server2_foreign || true; pause_enter ;;
             2) setup_cascade_xray_server1_ru || true; pause_enter ;;
             3) change_cascade_xray_exit_server_interactive || true; pause_enter ;;
-            4) manage_vless_users_menu || true ;;
-            5) print_vless_shadowrocket_links || true; pause_enter ;;
-            6) toggle_foreign_warp_menu || true; pause_enter ;;
-            7)
+            4) toggle_cascade_xray_transport_menu || true; pause_enter ;;
+            5) manage_vless_users_menu || true ;;
+            6) print_vless_shadowrocket_links || true; pause_enter ;;
+            7) toggle_foreign_warp_menu || true; pause_enter ;;
+            8)
                 if [ -f /etc/default/bobarev-cascade ]; then
                     # shellcheck disable=SC1091
                     source /etc/default/bobarev-cascade
                     if [ -n "${XRAY_TOKEN:-}" ]; then
                         echo -e "${C_CYAN} Токены VLESS-XHTTP для подключения Сервера 1 (РФ):${C_RESET}\n"
-                        echo -e "   ${C_BOLD}Основной токен (IPv4):${C_RESET}"
+                        echo -e "   ${C_BOLD}Основной токен (Dual-Stack IPv4 + IPv6):${C_RESET}"
                         echo -e "    ${C_BOLD}${C_GREEN}${XRAY_TOKEN}${C_RESET}\n"
                         if [ -n "${XRAY_TOKEN_V6:-}" ]; then
-                            echo -e "   ${C_BOLD}Резервный токен (IPv6):${C_RESET}"
+                            echo -e "   ${C_BOLD}Резервный токен (Приоритет IPv6):${C_RESET}"
                             echo -e "    ${C_BOLD}${C_CYAN}${XRAY_TOKEN_V6}${C_RESET}\n"
                         fi
                     else
@@ -4665,7 +5010,7 @@ manage_cascade_xray_menu() {
                 fi
                 pause_enter
                 ;;
-            8)
+            9)
                 if prompt_yn "Остановить и отключить службы Xray на этом сервере?" "false"; then
                     silent_run systemctl stop bobarev-xray.service
                     silent_run systemctl disable bobarev-xray.service
@@ -10356,30 +10701,32 @@ manage_naive_mullvad_menu() {
  while true;do
   smart_menu 'BOBAREV SHELL — VLESS-REALITY (XTLS Vision) + Tailscale / Mullvad' \
    'VPS IPv4 + Dual-Stack IPv6. Мастер с резервной копией, conntrack return-path (IPv4/IPv6), строгим DoT и откатом. Позволяет подключаться с iPhone по VLESS-REALITY (XTLS Vision, без домена и без Caddy!) и выходить через Mullvad Exit Node в Tailscale.' \
-   24 "$WT_WIDTH" 10 pick \
+   24 "$WT_WIDTH" 11 pick \
    1 'Мастер под ключ: Tailscale + DNS + Mullvad Exit Node + VLESS-REALITY' \
    2 'Список доступных exit nodes' \
    3 'Сменить выходной сервер (Exit Node) БЕЗ смены ключей VLESS' \
-   4 'Прямой WAN (сохранить DNS и return-path)' \
-   5 'Восстановить последнюю транзакцию / отменить незавершённую' \
-   6 'Настроить / перевыпустить вход VLESS-REALITY (порт 443/8443) -> Mullvad' \
-   7 'Показать ссылки и QR-коды VLESS-REALITY для Shadowrocket' \
-   8 'Диагностика и проверка после перезагрузки' \
-   9 'Диагностический MSS: auto / 1140 (с откатом)' \
+   4 'Транспорт между серверами (41641/udp): IPv4+IPv6 / Только IPv4 / Только IPv6' \
+   5 'Прямой WAN (сохранить DNS и return-path)' \
+   6 'Восстановить последнюю транзакцию / отменить незавершённую' \
+   7 'Настроить / перевыпустить вход VLESS-REALITY (порт 443/8443) -> Mullvad' \
+   8 'Показать ссылки и QR-коды VLESS-REALITY для Shadowrocket' \
+   9 'Диагностика и проверка после перезагрузки' \
+   10 'Диагностический MSS: auto / 1140 (с откатом)' \
    0 'Назад' || return 0
   case "$pick" in
    0) return 0;;
    1) if bash "$ctl" exit; then setup_vless_reality_mullvad_inbound || true; else echo 'Мастер завершился без подтверждённого успеха; проверьте сообщения и откат.'; fi; pause_enter;;
    2) if command -v tailscale >/dev/null;then tailscale exit-node list || true;else echo 'Tailscale ещё не установлен: пункт 1.';fi;pause_enter;;
    3) bash "$ctl" exit || echo 'Изменения не подтверждены; проверьте откат.';pause_enter;;
-   4) if prompt_yn 'Отключить exit node? DNS и обратный путь будут сохранены.' 'false';then bash "$ctl" direct || echo 'Не удалось отключить exit node.';fi;pause_enter;;
-   5) if prompt_yn 'Восстановить сохранённые файлы и прежний exit node? Поздние ручные изменения могут быть заменены.' 'false';then
+   4) toggle_tailscale_ipv6_transport_menu || true;pause_enter;;
+   5) if prompt_yn 'Отключить exit node? DNS и обратный путь будут сохранены.' 'false';then bash "$ctl" direct || echo 'Не удалось отключить exit node.';fi;pause_enter;;
+   6) if prompt_yn 'Восстановить сохранённые файлы и прежний exit node? Поздние ручные изменения могут быть заменены.' 'false';then
        if [[ -f /var/lib/bobarev-shell-mullvad/pending ]];then bash "$ctl" recover pending || echo 'Откат неполный!';else bash "$ctl" recover latest || echo 'Откат неполный!';fi
       fi;pause_enter;;
-   6) setup_vless_reality_mullvad_inbound || true;pause_enter;;
-   7) print_vless_shadowrocket_links; [ -f /var/lib/bobarev-shell-mullvad/vless-links.txt ] && cat /var/lib/bobarev-shell-mullvad/vless-links.txt || true;pause_enter;;
-   8) bash "$ctl" diag || true;pause_enter;;
-   9) MODULE_CANCELED=false;prompt_default 'Профиль: auto (без принудительного MSS) или diagnostic1140' auto profile
+   7) setup_vless_reality_mullvad_inbound || true;pause_enter;;
+   8) print_vless_shadowrocket_links; [ -f /var/lib/bobarev-shell-mullvad/vless-links.txt ] && cat /var/lib/bobarev-shell-mullvad/vless-links.txt || true;pause_enter;;
+   9) bash "$ctl" diag || true;pause_enter;;
+   10) MODULE_CANCELED=false;prompt_default 'Профиль: auto (без принудительного MSS) или diagnostic1140' auto profile
       if [[ "$MODULE_CANCELED" == false ]];then bash "$ctl" mss "$profile" || echo 'Профиль не применён.';fi;pause_enter;;
   esac
  done

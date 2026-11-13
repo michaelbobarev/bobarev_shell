@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.13 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Bobarev Shell v3.20.14 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
 # Скрипт оптимизирует сетевой стек ядра (BBR, буферы 16 МБ, src_valid_mark=1, LimitNOFILE=512000), разделяет P2P-трафик Tailscale (fwmark 0x80000 / table 52) и автоматически защищает DNS при перезагрузке.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.13"
+SCRIPT_VERSION="3.20.14"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -694,7 +694,7 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.13: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.14: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -741,7 +741,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.13: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
+# Bobarev Shell v3.20.14: Zero-Bufferbloat High-Throughput Balanced XHTTP Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -924,6 +924,8 @@ write_bobarev_cascade_ru_script() {
 source /etc/default/bobarev-cascade
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null 2>&1 || true
 for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
     [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
 done
@@ -938,12 +940,22 @@ else
     sysctl -w net.ipv4.tcp_autocorking=0 >/dev/null 2>&1 || true
 fi
 WAN_IF=$(ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
+if [ -z "$WAN_IF" ]; then
+    WAN_IF=$(ip -6 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*|zt[a-z0-9]*|nebula[0-9]*|easytier[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || true)
+fi
 if [ -n "$WAN_IF" ] && command -v tc &>/dev/null; then
     tc qdisc replace dev "$WAN_IF" root fq limit 30000 flow_limit 10000 2>/dev/null || true
 fi
+if command -v tc &>/dev/null && ip link show tailscale0 >/dev/null 2>&1; then
+    tc qdisc replace dev tailscale0 root fq limit 30000 flow_limit 10000 2>/dev/null || true
+fi
 PUB_IP="${SERVER_PUB_IP:-}"
 if [ -z "$PUB_IP" ] && [ -n "$WAN_IF" ]; then
-    PUB_IP=$(ip -4 -o addr show dev "$WAN_IF" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+    PUB_IP=$(ip -4 -o addr show dev "$WAN_IF" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+fi
+PUB_IP6="${SERVER_PUB_IPV6:-}"
+if [ -z "$PUB_IP6" ] && [ -n "$WAN_IF" ]; then
+    PUB_IP6=$(ip -6 -o addr show dev "$WAN_IF" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -viE '^(fe80:|fc|fd)' | head -n 1)
 fi
 
 while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
@@ -953,19 +965,37 @@ while iptables -t mangle -D OUTPUT -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPM
 
 for m_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
     while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    while iptables -t mangle -D FORWARD -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
     while iptables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
     while iptables -t mangle -D OUTPUT -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
     while iptables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    if command -v ip6tables &>/dev/null; then
+        while ip6tables -t mangle -D FORWARD -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+        while ip6tables -t mangle -D FORWARD -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+        while ip6tables -t mangle -D OUTPUT -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+        while ip6tables -t mangle -D POSTROUTING -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$m_val" 2>/dev/null; do :; done
+    fi
 done
+
+# Управление транспортом P2P Tailscale (41641/udp): Dual-Stack (IPv4+IPv6) или Только IPv4
+if command -v ip6tables &>/dev/null; then
+    while ip6tables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
+    while ip6tables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
+    if [ "${TS_TRANSPORT_MODE:-dualstack}" = "ipv4_only" ]; then
+        ip6tables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
+        ip6tables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
+    fi
+fi
 
 if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     while ip rule del fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null; do :; done
     ip rule add fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null || true
+    while ip -6 rule del fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null; do :; done
+    ip -6 rule add fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null || true
     if [ -n "$PUB_IP" ]; then
         while ip rule del from "$PUB_IP" lookup main priority 100 2>/dev/null; do :; done
         ip rule add from "$PUB_IP" lookup main priority 100 2>/dev/null || true
     fi
-    PUB_IP6="${SERVER_PUB_IPV6:-}"
     if [ -n "$PUB_IP6" ]; then
         while ip -6 rule del from "$PUB_IP6" lookup main priority 100 2>/dev/null; do :; done
         ip -6 rule add from "$PUB_IP6" lookup main priority 100 2>/dev/null || true
@@ -973,10 +1003,19 @@ if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
-    # Для связки VLESS-XHTTP -> Tailscale (MTU 1280 + Disco) фиксируем MSS 1140
-    iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-    iptables -t mangle -I OUTPUT 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-    iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+    if command -v ip6tables &>/dev/null; then
+        while ip6tables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
+        ip6tables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || true
+    fi
+    # Двусторонний TCPMSS 1220 без дублирования в OUTPUT+POSTROUTING (IPv4 + IPv6 для MTU 1280)
+    iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        ip6tables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        ip6tables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    fi
     if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
         tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true --accept-dns=false 2>/dev/null || true
     fi
@@ -986,10 +1025,20 @@ elif [ "${CASCADE_ROLE:-}" = "foreign_warp_exit" ]; then
         iptables -C FORWARD -i tailscale0 -o "$WAN_IF" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$WAN_IF" -j ACCEPT
         iptables -C FORWARD -i "$WAN_IF" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$WAN_IF" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         iptables -t nat -C POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
+        if command -v ip6tables &>/dev/null; then
+            ip6tables -C FORWARD -i tailscale0 -o "$WAN_IF" -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i tailscale0 -o "$WAN_IF" -j ACCEPT 2>/dev/null || true
+            ip6tables -C FORWARD -i "$WAN_IF" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i "$WAN_IF" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+            ip6tables -t nat -C POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null || true
+        fi
     fi
-    iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-    iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-    iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+    iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        ip6tables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        ip6tables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    fi
     while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
     if [ "${FOREIGN_EXIT_MODE:-warp}" != "direct" ]; then
         iptables -t nat -I PREROUTING 1 -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null || true
@@ -2487,7 +2536,20 @@ setup_cascade_server1_ru() {
         return 1
     fi
 
-    generate_xray_reality_credentials || return 1
+    local reuse_keys=false
+    if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ] && [ -n "${XRAY_PUB:-}" ] && [ -n "${XRAY_SHORT_ID:-}" ]; then
+        if prompt_yn "На этом сервере уже есть ключи VLESS-XHTTP. Сохранить текущие ключи и ссылки в Shadowrocket (без перевыпуска UUID)?" "true"; then
+            reuse_keys=true
+            GEN_X_UUID="$XRAY_UUID"
+            GEN_X_PRIV="$XRAY_PRIV"
+            GEN_X_PUB="$XRAY_PUB"
+            GEN_X_SHORT_ID="$XRAY_SHORT_ID"
+            GEN_X_PATH="${XRAY_XHTTP_PATH:-/xhttp-stream}"
+        fi
+    fi
+    if [ "$reuse_keys" = false ]; then
+        generate_xray_reality_credentials || return 1
+    fi
 
     local wan_dev pub_ip pub_ip6
     wan_dev=$(get_wan_if)
@@ -2505,9 +2567,11 @@ setup_cascade_server1_ru() {
         return 1
     fi
 
+    local cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_entry"
 EXIT_TS_IP="${exit_ts_ip}"
+TS_TRANSPORT_MODE="${cur_ts_trans}"
 XRAY_PORT="${x_port}"
 XRAY_UUID="${GEN_X_UUID}"
 XRAY_PRIV="${GEN_X_PRIV}"
@@ -2543,7 +2607,7 @@ EOF
         echo -e "${C_YELLOW} ⚠ Не удалось проверить внешний IP через Exit Node ${exit_ts_ip}. Проверьте 'tailscale status' и разрешение Exit Node в админке Tailscale.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN} Сервер 1 (Вход в РФ на базе VLESS-REALITY XTLS Vision + Tailscale [MTU 1280, MSS 1140]) успешно настроен и запущен!${C_RESET}"
+    echo -e "${C_GREEN} Сервер 1 (Вход в РФ на базе VLESS-XHTTP + Tailscale Dual-Stack [MTU 1280, MSS 1220]) успешно настроен и запущен!${C_RESET}"
     print_vless_shadowrocket_links
 }
 
@@ -2585,12 +2649,96 @@ EOF
     echo -e "${C_YELLOW} Не забудьте в админ-панели Tailscale (https://login.tailscale.com/admin/machines) включить галочку 'Use as exit node' для этого сервера, а на Сервере 1 (РФ) указать IP ${my_ts_ip}!${C_RESET}"
 }
 
+change_cascade_tailscale_exit_node_interactive() {
+    echo -e "${C_CYAN} === СМЕНА ВЫХОДНОГО СЕРВЕРА (TAILSCALE EXIT NODE) БЕЗ СМЕНЫ КЛЮЧЕЙ VLESS ===${C_RESET}"
+    local cur_exit=""
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        cur_exit="${EXIT_TS_IP:-}"
+    fi
+
+    if ! command -v tailscale &>/dev/null; then
+        echo -e "${C_RED} Tailscale не установлен на этом сервере.${C_RESET}"
+        return 1
+    fi
+
+    echo -e "${C_BLUE} Доступные узлы в вашей сети Tailscale:${C_RESET}"
+    tailscale status 2>/dev/null | awk 'NR>1 {printf "   • %-16s %-22s %s\n", $1, $2, ($0 ~ /exit node/ ? "[Exit Node]" : "")}' || true
+    echo ""
+
+    local new_exit=""
+    prompt_default "Введите Tailscale IP нового выходного сервера (например, 100.x.y.z):" "$cur_exit" new_exit
+    if [ "$MODULE_CANCELED" = true ]; then return 0; fi
+    new_exit=$(printf '%s' "$new_exit" | tr -d '[:space:]')
+    if [ -z "$new_exit" ]; then
+        echo -e "${C_RED} Ошибка: Tailscale IP не может быть пустым.${C_RESET}"
+        return 1
+    fi
+
+    echo -e "${C_BLUE} Переключение Tailscale Exit Node на ${new_exit} (ключи и ссылки VLESS-XHTTP не меняются)...${C_RESET}"
+    tailscale set --exit-node="$new_exit" --exit-node-allow-lan-access=true --accept-routes=true --accept-dns=false 2>/dev/null || true
+
+    mkdir -p /etc/default
+    touch /etc/default/bobarev-cascade
+    sed -i '/^EXIT_TS_IP=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    printf 'EXIT_TS_IP="%s"\n' "$new_exit" >> /etc/default/bobarev-cascade
+    chmod 600 /etc/default/bobarev-cascade
+
+    write_bobarev_cascade_ru_script
+    /usr/local/bin/bobarev-cascade-ru.sh
+
+    local ts_out_ip=""
+    ts_out_ip=$(curl -4 -s --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+    [ -z "$ts_out_ip" ] && ts_out_ip=$(curl -s --max-time 6 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+
+    echo -e "${C_GREEN} ✔ Выходной сервер Tailscale успешно переключен на ${C_BOLD}${new_exit}${C_RESET}${C_GREEN}!${C_RESET}"
+    [ -n "$ts_out_ip" ] && echo -e "   Текущий внешний IP каскада: ${C_BOLD}${C_GREEN}${ts_out_ip}${C_RESET}"
+    echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними."
+}
+
+toggle_tailscale_ipv6_transport_menu() {
+    local cur_trans="dualstack"
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        cur_trans="${TS_TRANSPORT_MODE:-dualstack}"
+    fi
+    local cur_desc="Dual-Stack (IPv4 + IPv6 одновременно — универсальный режим)"
+    [ "$cur_trans" = "ipv4_only" ] && cur_desc="Только IPv4 для P2P 41641/udp (защита от медленного IPv6-транзита между хостерами)"
+
+    local t_choice=""
+    if ! smart_menu "Транспорт Tailscale между серверами (41641/udp)" "
+Текущий режим: ${cur_desc}
+
+Выберите, как демону tailscaled устанавливать P2P-туннель между серверами (внутри самого туннеля и на входе VLESS IPv4 + IPv6 продолжают работать одновременно):" 18 "$WT_WIDTH" 2 "t_choice" \
+        "1" " Dual-Stack: IPv4 + IPv6 одновременно (По умолчанию — подходит для любых серверов, включая IPv6-only)" \
+        "2" " Только IPv4 для туннеля 41641/udp (Отключить IPv6 P2P в Tailscale, если IPv6-маршрут хостера дает потери/рассинхрон)"; then
+        return 0
+    fi
+
+    local new_trans="dualstack"
+    [ "$t_choice" = "2" ] && new_trans="ipv4_only"
+
+    mkdir -p /etc/default
+    touch /etc/default/bobarev-cascade
+    sed -i '/^TS_TRANSPORT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    printf 'TS_TRANSPORT_MODE="%s"\n' "$new_trans" >> /etc/default/bobarev-cascade
+    chmod 600 /etc/default/bobarev-cascade
+
+    write_bobarev_cascade_ru_script
+    /usr/local/bin/bobarev-cascade-ru.sh
+    echo -e "${C_GREEN} ✔ Режим транспорта Tailscale переключен на: ${C_BOLD}${new_trans}${C_RESET}"
+}
+
 manage_cascade_naive_ts_warp() {
     while true; do
         MODULE_CANCELED=false
         local c_state="Не активен"
         if is_vless_active && [ -f /etc/default/bobarev-cascade ] && grep -q 'CASCADE_ROLE="ru_entry"' /etc/default/bobarev-cascade 2>/dev/null; then
-            c_state="Сервер 1 (РФ: VLESS-REALITY -> Tailscale)"
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            c_state="Сервер 1 (РФ: VLESS-XHTTP -> Tailscale ${EXIT_TS_IP:-} [${TS_TRANSPORT_MODE:-dualstack}])"
         elif [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
@@ -2602,9 +2750,18 @@ manage_cascade_naive_ts_warp() {
         fi
 
         local c_choice
-        if ! smart_menu "Каскад: VLESS-REALITY + Tailscale (2 сервера + Cloudflare MASQUE)" "
+        if ! smart_menu "Каскад: VLESS-XHTTP + Tailscale (Dual-Stack IPv4/IPv6 + MASQUE)" "
 Статус моста: $c_state
-Выберите действие:" 18 "$WT_WIDTH" 6 "c_choice"         "1" " Сервер 1 (РФ): VLESS-REALITY -> Tailscale"         "2" " Сервер 2 (Зарубеж): Tailscale -> Выход (Чистый IP / MASQUE)"         "3" " Управление ключами VLESS-REALITY и SNI"         "4" " Показать ссылки и QR-коды для Shadowrocket"         "5" " Переключить выход: Чистый IP <-> Cloudflare MASQUE"         "6" " Остановить компоненты каскада"         "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
+Выберите действие:" 21 "$WT_WIDTH" 8 "c_choice" \
+            "1" " Сервер 1 (РФ): VLESS-XHTTP -> Tailscale Exit Node" \
+            "2" " Сервер 2 (Зарубеж): Tailscale -> Выход (Чистый IP / MASQUE)" \
+            "3" " Сменить выходной сервер (Exit Node) на Сервере 1 БЕЗ смены ключей VLESS" \
+            "4" " Транспорт Tailscale (41641/udp): Dual-Stack (IPv4+IPv6) <-> Только IPv4" \
+            "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
+            "6" " Показать ссылки и QR-коды для Shadowrocket" \
+            "7" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
+            "8" " Остановить компоненты каскада" \
+            "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
 
@@ -2619,20 +2776,32 @@ manage_cascade_naive_ts_warp() {
                 pause_enter
                 ;;
             3)
-                manage_vless_users_menu
+                change_cascade_tailscale_exit_node_interactive || true
+                pause_enter
                 ;;
             4)
-                print_vless_shadowrocket_links
+                toggle_tailscale_ipv6_transport_menu || true
                 pause_enter
                 ;;
             5)
+                manage_vless_users_menu
+                ;;
+            6)
+                print_vless_shadowrocket_links
+                pause_enter
+                ;;
+            7)
                 toggle_foreign_warp_menu
                 pause_enter
                 ;;
-            6)
-                if prompt_yn "Остановить и отключить службы этого каскада (VLESS-REALITY / Tailscale Exit / Cloudflare MASQUE)?" "false"; then
+            8)
+                if prompt_yn "Остановить и отключить службы этого каскада (VLESS-XHTTP / Tailscale Exit / Cloudflare MASQUE)?" "false"; then
                     silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service usque.service
                     while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
+                    if command -v ip6tables &>/dev/null; then
+                        while ip6tables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
+                        while ip6tables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
+                    fi
                     silent_run tailscale set --exit-node=
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
                     silent_run systemctl daemon-reload
@@ -2691,6 +2860,7 @@ apply_foreign_exit_mode() {
     [ -z "$wan_dev" ] && wan_dev="ens3"
 
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
     disable_ufw_strict_rpfilter
     tune_fq_qdisc_interfaces
 
@@ -2714,9 +2884,17 @@ apply_foreign_exit_mode() {
         iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         apply_wan_exit_nat "$wan_dev" "true"
 
-        iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        if command -v ip6tables &>/dev/null; then
+            ip6tables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
+            ip6tables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+            ip6tables -t nat -C POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+            ip6tables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+            ip6tables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+            ip6tables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        fi
 
         if command -v ufw &>/dev/null; then
             silent_run ufw route allow in on tailscale0 out on "$wan_dev" comment 'Tailscale to WAN Direct'
@@ -2732,9 +2910,17 @@ apply_foreign_exit_mode() {
         iptables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT
         iptables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         apply_wan_exit_nat "$wan_dev" "true"
-        iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-        iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-        iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        iptables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        if command -v ip6tables &>/dev/null; then
+            ip6tables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
+            ip6tables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+            ip6tables -t nat -C POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+            ip6tables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+            ip6tables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+            ip6tables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        fi
     fi
 
     if [ -f /etc/default/bobarev-cascade ]; then
@@ -3536,6 +3722,17 @@ EOF
             "port": 1080
           }
         ]
+      }
+    }'
+    elif [ "$exit_mode" = "tailscale_exit" ]; then
+        outbound_json='{
+      "tag": "direct",
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "UseIPv4v6",
+          "tcpNoDelay": true
+        }
       }
     }'
     else

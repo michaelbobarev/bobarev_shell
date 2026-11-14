@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.20 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
-# Объединяет шлюз и двухсерверный каскад VLESS-XHTTP + Tailscale / Mullvad в единое меню с выпадающим списком любых Exit Nodes, глобальным профилем VLESS-XHTTP и компактными заголовками для мобильных SSH-терминалов.
+# Bobarev Shell v3.20.21 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Объединяет все режимы автономного сервера VLESS-XHTTP (Чистый IP / Cloudflare MASQUE / WireGuard wg0) и каскады Tailscale / Mullvad в 4 лаконичных сценария с единым глобальным профилем VLESS-XHTTP.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.20"
+SCRIPT_VERSION="3.20.21"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1414,12 +1414,20 @@ EOF
     iptables -t nat -C POSTROUTING -o wg0 -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING 1 -o wg0 -j MASQUERADE 2>/dev/null || true
 
     if [ -f /etc/default/bobarev-cascade ]; then
-        sed -i '/^NAIVE_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
-        echo 'NAIVE_OUT_MODE="wg0"' >> /etc/default/bobarev-cascade
+        sed -i '/^NAIVE_OUT_MODE=/d;/^VLESS_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+        printf 'VLESS_OUT_MODE="wg0"\nNAIVE_OUT_MODE="wg0"\n' >> /etc/default/bobarev-cascade
     fi
 
-    if systemctl is-active --quiet caddy.service 2>/dev/null; then
-        systemctl restart caddy.service || true
+    if systemctl is-active --quiet bobarev-xray.service 2>/dev/null && [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        if [ -n "${XRAY_UUID:-}" ] && [ -n "${XRAY_PRIV:-}" ]; then
+            render_xray_server_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "${XRAY_SHORT_ID:-}" "${XRAY_SNI:-www.microsoft.com}" "wg0" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "${XRAY_REALITY_DEST:-${XRAY_SNI:-www.microsoft.com}:443}"
+            if [ -s /etc/xray/vless_users.list ]; then
+                rebuild_xray_inbound_clients
+            fi
+            systemctl restart bobarev-xray.service || true
+        fi
     fi
 
     echo -e "${C_BLUE} Проверка подключения и внешнего IP...${C_RESET}"
@@ -1611,146 +1619,6 @@ NGINX_LIM
     fi
 }
 
-setup_standalone_vless_wg() {
-    while true; do
-        MODULE_CANCELED=false
-        local is_configured=false
-        local c_state="Не настроен"
-        local cur_out="direct"
-
-        if systemctl is-active --quiet bobarev-xray.service 2>/dev/null && [ -f /etc/default/bobarev-cascade ]; then
-            # shellcheck disable=SC1091
-            source /etc/default/bobarev-cascade
-            if [ "${CASCADE_ROLE:-}" = "standalone_vless" ] || [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
-                is_configured=true
-                cur_out="${VLESS_OUT_MODE:-${NAIVE_OUT_MODE:-direct}}"
-                local out_human="Прямой выход с VPS"
-                if [ "$cur_out" = "wg0" ] || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
-                    out_human="Гибридный шлюз (wg0 + Tailscale Exit Node)"
-                elif [ "$cur_out" = "masque" ] || systemctl is-active --quiet usque.service 2>/dev/null; then
-                    out_human="Cloudflare MASQUE (Usque 127.0.0.1:1080)"
-                fi
-                c_state="Активен (Порт: ${XRAY_PORT:-443}/tcp | SNI: ${XRAY_SNI:-www.microsoft.com} | ${out_human})"
-            fi
-        fi
-
-        local sc_choice=""
-        if [ "$is_configured" = true ]; then
-            if ! smart_menu " Автономный VLESS-REALITY (XTLS Vision + WG Dual-Gateway)" "
-Статус: $c_state
-
-Без домена и без SSL-сертификатов. Приоритетное соединение Tailscale не затрагивается.
-
-Выберите действие:" 19 "$WT_WIDTH" 6 "sc_choice"                 "1" " Показать ссылки и QR-коды для Shadowrocket"                 "2" " Управление ключами VLESS-REALITY и смена SNI"                 "3" " Сменить / Подключить выходной сервер WireGuard (wg0) БЕЗ смены ключей VLESS"                 "4" " Переключить на прямой выход в интернет (отключить wg0)"                 "5" " Перенастроить VLESS-REALITY (порт / SNI / ключи)"                 "6" " Остановить и удалить VLESS-REALITY + wg0"                 "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
-                break
-            fi
-        else
-            if ! smart_menu " Автономный VLESS-REALITY (XTLS Vision + WG Dual-Gateway)" "
-Статус: $c_state
-
-Преимущества VLESS-REALITY (XTLS Vision):
-  • Не нужен личный домен и выпуск сертификатов Let's Encrypt
-  • Маскировка под реальный TLS 1.3 (www.microsoft.com / dl.google.com)
-  • Полное сохранение приоритетного соединения Tailscale на сервере
-
-Выберите действие:" 18 "$WT_WIDTH" 2 "sc_choice"                 "1" " Настроить автономный VLESS-REALITY (XTLS Vision)"                 "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
-                break
-            fi
-            [ "$sc_choice" = "1" ] && sc_choice="5"
-        fi
-
-        clear
-        case "$sc_choice" in
-            1)
-                print_vless_shadowrocket_links
-                pause_enter
-                ;;
-            2)
-                manage_vless_users_menu
-                ;;
-            3)
-                setup_hybrid_wg_routing || true
-                pause_enter
-                ;;
-            4)
-                disable_hybrid_wg_routing
-                pause_enter
-                ;;
-            5)
-                echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО VLESS / XHTTP (SplitHTTP + REALITY) ===${C_RESET}"
-                ensure_or_init_global_vless_inbound_interactive "Пункт 1 — Автономный VLESS-XHTTP (+ WG Dual-Gateway)" || { pause_enter; continue; }
-                local x_port="$XRAY_PORT"
-                local x_sni="$XRAY_SNI"
-                local x_dest="$XRAY_REALITY_DEST"
-                enable_routing_optimizations || true
-                apply_naive_tcp_tuning_profile "balanced" 
-
-                local wan_dev pub_ip pub_ip6
-                wan_dev=$(get_wan_if)
-                pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
-                pub_ip6=$(get_wan_global_ipv6)
-
-                local out_m="direct"
-                if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
-                    out_m="wg0"
-                fi
-
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$out_m" "$GEN_X_PATH" "$x_dest"
-                write_xray_service
-                safe_restart_systemd_service bobarev-xray.service
-                sleep 1
-
-                if ! systemctl is-active --quiet bobarev-xray.service; then
-                    echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
-                    journalctl -u bobarev-xray.service -n 20 --no-pager || true
-                    pause_enter; continue
-                fi
-
-                if command -v ufw >/dev/null 2>&1; then
-                    ufw insert 1 allow "${x_port}/tcp" comment 'VLESS REALITY XTLS Vision' >/dev/null 2>&1 || ufw allow "${x_port}/tcp" comment 'VLESS REALITY XTLS Vision' >/dev/null 2>&1 || true
-                    silent_run ufw reload
-                fi
-
-                mkdir -p /etc/default
-                cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="standalone_vless"
-VLESS_OUT_MODE="${out_m}"
-XRAY_PORT="${x_port}"
-XRAY_UUID="${GEN_X_UUID}"
-XRAY_PRIV="${GEN_X_PRIV}"
-XRAY_PUB="${GEN_X_PUB}"
-XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
-XRAY_SNI="${x_sni}"
-XRAY_REALITY_DEST="${x_dest}"
-XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
-SERVER_PUB_IP="${pub_ip}"
-SERVER_PUB_IPV6="${pub_ip6}"
-EOF
-                chmod 600 /etc/default/bobarev-cascade
-
-                echo -e "
-${C_GREEN} Автономный VLESS-REALITY (XTLS Vision, порт ${x_port}/tcp, SNI: ${x_sni}) успешно запущен!${C_RESET}"
-                print_vless_shadowrocket_links
-                pause_enter
-                ;;
-            6)
-                if prompt_yn "Остановить и удалить службы VLESS-REALITY и туннель wg0 на этом сервере?" "false"; then
-                    disable_hybrid_wg_routing
-                    silent_run systemctl stop bobarev-xray.service
-                    silent_run systemctl disable bobarev-xray.service
-                    rm -f /etc/xray/config.json /etc/default/bobarev-cascade
-                    silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN} Служба VLESS-REALITY полностью остановлена и удалена.${C_RESET}"
-                fi
-                pause_enter
-                ;;
-        esac
-    done
-}
-
-setup_standalone_naive() {
-    setup_standalone_vless_wg
-}
 
 # ==============================================================================
 # АВТОНОМНЫЙ VLESS-REALITY (XTLS VISION) + CLOUDFLARE MASQUE (USQUE) + HYSTERIA 2
@@ -2308,160 +2176,226 @@ disable_usque_masque_routing() {
     echo -e "${C_GREEN} Служба Usque остановлена. VLESS-REALITY переведен на прямой выход с этого VPS.${C_RESET}"
 }
 
-setup_standalone_vless_masque() {
+switch_standalone_vless_exit_mode_interactive() {
+    local cur_out="direct" cur_usque_mode="l4-socks"
+    if [ -f /etc/default/bobarev-cascade ]; then
+        # shellcheck disable=SC1091
+        source /etc/default/bobarev-cascade
+        cur_out="${VLESS_OUT_MODE:-direct}"
+        cur_usque_mode="${USQUE_MODE:-l4-socks}"
+    fi
+    local cur_desc="Чистый IP самого VPS (Direct Dual-Stack IPv4+IPv6)"
+    [ "$cur_out" = "masque" ] && cur_desc="Cloudflare MASQUE (Usque ${cur_usque_mode} -> CDN Cloudflare)"
+    [ "$cur_out" = "wg0" ] && cur_desc="Внешний туннель WireGuard (wg0 Dual-Gateway)"
+
+    local m_choice=""
+    if ! smart_menu "Выбор выхода в интернет на автономном сервере" "
+Текущий выход: ${cur_desc}
+
+Выберите, как выпускать трафик клиентов VLESS-XHTTP с этого сервера (ключи и ссылки в Shadowrocket не меняются):" 18 "$WT_WIDTH" 3 "m_choice" \
+        "1" " Чистый IP самого VPS (Напрямую — максимальная скорость, Dual-Stack IPv4+IPv6)" \
+        "2" " Через Cloudflare MASQUE (Usque 127.0.0.1:1080 — защита от капч и фильтрации IP)" \
+        "3" " Через внешний туннель WireGuard (wg0 — свой или сторонний VPN-конфиг)"; then
+        return 0
+    fi
+
+    ensure_or_init_global_vless_inbound_interactive "Пункт 1 — Автономный сервер: VLESS-XHTTP" || return 1
+    load_global_vless_credentials || true
+
+    case "$m_choice" in
+        1)
+            if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+                disable_hybrid_wg_routing
+            fi
+            disable_usque_masque_routing
+            render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "direct" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+            if [ -s /etc/xray/vless_users.list ]; then
+                rebuild_xray_inbound_clients
+            fi
+            write_xray_service
+            safe_restart_systemd_service bobarev-xray.service
+            mkdir -p /etc/default
+            touch /etc/default/bobarev-cascade
+            sed -i '/^CASCADE_ROLE=/d;/^VLESS_OUT_MODE=/d;/^FOREIGN_EXIT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+            printf 'CASCADE_ROLE="standalone_vless"\nVLESS_OUT_MODE="direct"\nFOREIGN_EXIT_MODE="direct"\n' >> /etc/default/bobarev-cascade
+            echo -e "${C_GREEN} ✔ Выход автономного сервера переключен на чистый IP самого VPS (Direct Dual-Stack)!${C_RESET}"
+            ;;
+        2)
+            if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+                disable_hybrid_wg_routing
+            fi
+            mkdir -p /etc/default
+            touch /etc/default/bobarev-cascade
+            sed -i '/^CASCADE_ROLE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+            printf 'CASCADE_ROLE="standalone_vless"\n' >> /etc/default/bobarev-cascade
+            save_global_vless_credentials "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$XRAY_SNI" "$XRAY_REALITY_DEST" "$XRAY_XHTTP_PATH"
+            enable_masque_for_existing_vless "${cur_usque_mode:-l4-socks}" "false" || return 1
+            if [ -s /etc/xray/vless_users.list ]; then
+                rebuild_xray_inbound_clients
+                safe_restart_systemd_service bobarev-xray.service
+            fi
+            ;;
+        3)
+            silent_run systemctl stop usque.service 2>/dev/null || true
+            silent_run systemctl disable usque.service 2>/dev/null || true
+            if setup_hybrid_wg_routing; then
+                render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "wg0" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+                if [ -s /etc/xray/vless_users.list ]; then
+                    rebuild_xray_inbound_clients
+                fi
+                write_xray_service
+                safe_restart_systemd_service bobarev-xray.service
+                mkdir -p /etc/default
+                touch /etc/default/bobarev-cascade
+                sed -i '/^CASCADE_ROLE=/d;/^VLESS_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+                printf 'CASCADE_ROLE="standalone_vless"\nVLESS_OUT_MODE="wg0"\n' >> /etc/default/bobarev-cascade
+            fi
+            ;;
+    esac
+}
+
+manage_standalone_masque_submenu() {
     while true; do
-        MODULE_CANCELED=false
-        local is_configured=false
-        local c_state="Не настроен"
-        local cur_out="masque"
         local cur_usque_mode="l4-socks"
         local usque_srv_state="остановлен"
-
-        if is_usque_active; then
-            usque_srv_state="активен на 127.0.0.1:1080"
-        elif [ -f /etc/usque/config.json ]; then
-            usque_srv_state="зарегистрирован (остановлен)"
-        fi
-
-        if systemctl is-active --quiet bobarev-xray.service 2>/dev/null && [ -f /etc/default/bobarev-cascade ]; then
+        if [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
-            if [ "${CASCADE_ROLE:-}" = "standalone_vless" ] || [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
-                is_configured=true
-                cur_out="${VLESS_OUT_MODE:-${NAIVE_OUT_MODE:-direct}}"
-                cur_usque_mode="${USQUE_MODE:-l4-socks}"
-                local out_human="Прямой выход с VPS"
-                if [ "$cur_out" = "masque" ] && is_usque_active; then
-                    out_human="Cloudflare MASQUE (${cur_usque_mode} -> CDN Cloudflare)"
-                elif [ "$cur_out" = "masque" ]; then
-                    out_human="Cloudflare MASQUE (внимание: служба usque не активна!)"
-                elif [ "$cur_out" = "wg0" ] || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
-                    out_human="WireGuard wg0 (Dual-Gateway)"
-                fi
-                local hy2_badge=""
-                systemctl is-active --quiet hysteria-server.service 2>/dev/null && hy2_badge=" + Hysteria2 UDP"
-                c_state="Активен (VLESS ${XRAY_PORT:-443}/tcp${hy2_badge} | SNI: ${XRAY_SNI:-www.microsoft.com} | ${out_human})"
-            fi
+            cur_usque_mode="${USQUE_MODE:-l4-socks}"
+        fi
+        if is_usque_active; then
+            usque_srv_state="активен на 127.0.0.1:1080 (${cur_usque_mode})"
+        elif [ -f /etc/usque/config.json ]; then
+            usque_srv_state="зарегистрирован, остановлен (${cur_usque_mode})"
         fi
 
-        local sc_choice=""
-        if [ "$is_configured" = true ]; then
-            if ! smart_menu " Автономный VLESS-REALITY (XTLS Vision + Cloudflare MASQUE)" "
-Статус VLESS-REALITY: $c_state
-Клиент Usque (MASQUE): $usque_srv_state
+        local mq_choice=""
+        if ! smart_menu "Тонкая настройка и диагностика Cloudflare MASQUE (Usque)" "
+Состояние клиента Usque: ${usque_srv_state}
 
-Плюсы связки:
-  • Протокол VLESS-REALITY (XTLS Vision) на 443/tcp + опционально Hysteria 2 на 443/udp
-  • Умная маршрутизация Xray: TCP -> Cloudflare MASQUE, UDP DNS -> Direct
-  • Приоритетное соединение Tailscale на сервере полностью сохраняется
-
-Выберите действие:" 23 "$WT_WIDTH" 8 "sc_choice"                 "1" " Показать ссылки и QR-коды для Shadowrocket / V2Box"                 "2" " Управление ключами VLESS-REALITY и смена SNI"                 "3" " Включить / Обновить выход через Cloudflare MASQUE (Usque)"                 "4" " Сквозная диагностика и перерегистрация WARP"                 "5" " Переключить режим Usque: l4-socks (рекомендуется) / socks (MTU 1280)"                 "6" " Переключить на прямой выход с VPS (временно отключить MASQUE)"                 "7" " Перенастроить связку VLESS-REALITY (+ Hysteria 2) + Cloudflare MASQUE"                 "8" " Остановить и удалить VLESS-REALITY + Cloudflare MASQUE"                 "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
-                break
-            fi
-        else
-            if ! smart_menu " Автономный VLESS-REALITY (XTLS Vision + Cloudflare MASQUE)" "
-Статус: $c_state (Usque: $usque_srv_state)
-
-В чем главные плюсы этой связки:
-  1) Не нужен домен и SSL-сертификаты: VLESS-REALITY (XTLS Vision) маскируется
-     под реальное рукопожатие TLS 1.3 к www.microsoft.com / dl.google.com.
-  2) Мгновенная работа в Shadowrocket: Xray направляет TCP через Cloudflare MASQUE,
-     а быстрые UDP DNS-запросы (1.1.1.1:53) обрабатывает напрямую без ошибок.
-  3) Полная совместимость с установленным на сервере Tailscale (без остановки служб).
-
-Выберите действие:" 21 "$WT_WIDTH" 3 "sc_choice"                 "1" " Настроить связку VLESS-REALITY + Cloudflare MASQUE «под ключ»"                 "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
-                break
-            fi
-            [ "$sc_choice" = "1" ] && sc_choice="7"
+Выберите действие:" 18 "$WT_WIDTH" 4 "mq_choice" \
+            "1" " Сквозная диагностика цепочки Xray -> Usque MASQUE -> CDN Cloudflare" \
+            "2" " Переключить режим Usque: l4-socks (потоковый L4) <-> socks (MTU 1280)" \
+            "3" " Перерегистрировать новое устройство в Cloudflare WARP (/etc/usque/config.json)" \
+            "0" " Назад" || [ "$mq_choice" = "0" ]; then
+            break
         fi
 
         clear
-        case "$sc_choice" in
+        case "$mq_choice" in
             1)
-                print_vless_shadowrocket_links
+                verify_usque_masque_ip
                 pause_enter
                 ;;
             2)
-                manage_vless_users_menu
-                ;;
-            3)
-                if enable_masque_for_existing_vless "${cur_usque_mode:-l4-socks}" "false"; then
-                    echo ""
-                    print_vless_shadowrocket_links
-                fi
-                pause_enter
-                ;;
-            4)
-                echo -e "${C_CYAN} === СКВОЗНАЯ ДИАГНОСТИКА И ПЕРЕРЕГИСТРАЦИЯ CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
-                verify_usque_masque_ip
-                echo ""
-                if prompt_yn "Перерегистрировать новое устройство в Cloudflare WARP (создать свежий /etc/usque/config.json)?" "false"; then
-                    enable_masque_for_existing_vless "${cur_usque_mode:-l4-socks}" "true" || true
-                fi
-                pause_enter
-                ;;
-            5)
                 local next_mode="socks"
                 [ "${cur_usque_mode:-l4-socks}" = "socks" ] && next_mode="l4-socks"
                 if prompt_yn "Переключить режим прокси Usque с '${cur_usque_mode:-l4-socks}' на '${next_mode}'?
 
-• l4-socks — быстрый потоковый L4 TCP-прокси (рекомендуется для VLESS-REALITY)
+• l4-socks — быстрый потоковый L4 TCP-прокси (рекомендуется по умолчанию)
 • socks — полный эмулируемый L3-стек gVisor (IPv4 + IPv6 с MTU 1280)" "true"; then
                     enable_masque_for_existing_vless "$next_mode" "false" || true
                 fi
                 pause_enter
                 ;;
-            6)
-                disable_usque_masque_routing
+            3)
+                if prompt_yn "Перерегистрировать новое устройство в Cloudflare WARP (создать свежий /etc/usque/config.json)?" "false"; then
+                    enable_masque_for_existing_vless "${cur_usque_mode:-l4-socks}" "true" || true
+                fi
                 pause_enter
                 ;;
-            7)
-                echo -e "${C_CYAN} === НАСТРОЙКА СВЯЗКИ VLESS / XHTTP (SplitHTTP + REALITY) + CLOUDFLARE MASQUE (USQUE) ===${C_RESET}"
-                ensure_or_init_global_vless_inbound_interactive "Пункт 2 — Автономный VLESS-XHTTP (+ Cloudflare MASQUE)" "1080/tcp" "10808/tcp" || { pause_enter; continue; }
-                local x_port="$XRAY_PORT"
-                local x_sni="$XRAY_SNI"
-                local x_dest="$XRAY_REALITY_DEST"
+        esac
+    done
+}
 
-                local enable_hy2_backup=false
-                if prompt_yn "Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
+setup_standalone_vless_wizard() {
+    echo -e "${C_CYAN} === НАСТРОЙКА АВТОНОМНОГО СЕРВЕРА: VLESS-XHTTP (SplitHTTP + REALITY) ===${C_RESET}"
+    ensure_or_init_global_vless_inbound_interactive "Пункт 1 — Автономный сервер: VLESS-XHTTP" || return 0
+    local x_port="$XRAY_PORT"
+    local x_sni="$XRAY_SNI"
+    local x_dest="$XRAY_REALITY_DEST"
+
+    local out_choice=""
+    if ! smart_menu "Выбор режима выхода в интернет (Автономный сервер)" "
+Как выпускать трафик с этого сервера в интернет?
+(Вы сможете переключать этот режим в любой момент в Пункте 2 без смены ключей VLESS):" 18 "$WT_WIDTH" 3 "out_choice" \
+        "1" " Чистый IP самого VPS (Напрямую — максимальная скорость, Dual-Stack IPv4+IPv6)" \
+        "2" " Через Cloudflare MASQUE (Usque 127.0.0.1:1080 — защита от капч и фильтрации IP)" \
+        "3" " Через внешний туннель WireGuard (wg0 — свой или сторонний VPN-конфиг)"; then
+        return 0
+    fi
+
+    local enable_hy2_backup=false
+    if prompt_yn "Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
 (VLESS-XHTTP работает на ${x_port}/tcp, а Hysteria 2 на ${x_port}/udp — они не мешают друг другу!)" "true"; then
-                    enable_hy2_backup=true
-                fi
+        enable_hy2_backup=true
+    fi
 
-                ensure_ipv4_precedence_and_host_dns
-                enable_routing_optimizations || true
+    ensure_ipv4_precedence_and_host_dns
+    enable_routing_optimizations || true
+    apply_naive_tcp_tuning_profile "balanced"
+    install_universal_dns_boot_guard >/dev/null 2>&1 || true
 
-                # Шаг 1: Установка и запуск Usque (Cloudflare MASQUE) на 127.0.0.1:1080
-                local target_usque_mode="l4-socks"
-                if ! install_and_setup_usque "$target_usque_mode" "false"; then
-                    echo -e "${C_RED} Не удалось подготовить службу Usque (Cloudflare MASQUE).${C_RESET}"
-                    pause_enter; continue
-                fi
-                if [ -f /etc/default/bobarev-cascade ]; then
-                    # shellcheck disable=SC1091
-                    source /etc/default/bobarev-cascade
-                    target_usque_mode="${USQUE_MODE:-$target_usque_mode}"
-                fi
-                load_global_vless_credentials || true
-                apply_naive_tcp_tuning_profile "balanced" 
+    local target_out_mode="direct"
+    local target_foreign_mode="direct"
+    local target_usque_mode="l4-socks"
 
-                render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "masque" "$GEN_X_PATH" "$x_dest"
-                write_xray_service
-                safe_restart_systemd_service bobarev-xray.service
-                sleep 1
+    if [ "$out_choice" = "2" ]; then
+        if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+            disable_hybrid_wg_routing
+        fi
+        if ! install_and_setup_usque "$target_usque_mode" "false"; then
+            echo -e "${C_RED} Не удалось подготовить службу Usque (Cloudflare MASQUE).${C_RESET}"
+            return 1
+        fi
+        if [ -f /etc/default/bobarev-cascade ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            target_usque_mode="${USQUE_MODE:-$target_usque_mode}"
+        fi
+        target_out_mode="masque"
+        target_foreign_mode="warp"
+    elif [ "$out_choice" = "3" ]; then
+        silent_run systemctl stop usque.service 2>/dev/null || true
+        silent_run systemctl disable usque.service 2>/dev/null || true
+        if ! setup_hybrid_wg_routing; then
+            echo -e "${C_RED} Настройка туннеля WireGuard (wg0) отменена или завершилась с ошибкой.${C_RESET}"
+            return 1
+        fi
+        target_out_mode="wg0"
+        target_foreign_mode="direct"
+    else
+        if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+            disable_hybrid_wg_routing
+        fi
+        silent_run systemctl stop usque.service 2>/dev/null || true
+        silent_run systemctl disable usque.service 2>/dev/null || true
+        target_out_mode="direct"
+        target_foreign_mode="direct"
+    fi
 
-                if ! systemctl is-active --quiet bobarev-xray.service; then
-                    echo -e "${C_RED} Служба bobarev-xray не запустилась! Проверьте: journalctl -u bobarev-xray -n 30${C_RESET}"
-                    pause_enter; continue
-                fi
+    load_global_vless_credentials || true
+    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "$target_out_mode" "$GEN_X_PATH" "$x_dest"
+    if [ -s /etc/xray/vless_users.list ]; then
+        rebuild_xray_inbound_clients
+    fi
+    write_xray_service
+    safe_restart_systemd_service bobarev-xray.service
+    sleep 1
 
-                # Шаг 3 (опционально): Hysteria 2 на UDP-порту
-                local h_pass="" cert_pin=""
-                if [ "$enable_hy2_backup" = true ]; then
-                    if ensure_hysteria_installed; then
-                        h_pass=$(openssl rand -hex 16)
-                        render_hysteria_server_config "$x_port" "$h_pass" "warp"
-                        cat << 'SVC_EOF' > /etc/systemd/system/hysteria-server.service
+    if ! systemctl is-active --quiet bobarev-xray.service; then
+        echo -e "${C_RED} Служба bobarev-xray не запустилась! Проверьте: journalctl -u bobarev-xray -n 30${C_RESET}"
+        return 1
+    fi
+
+    local h_pass="" cert_pin=""
+    if [ "$enable_hy2_backup" = true ]; then
+        if ensure_hysteria_installed; then
+            h_pass=$(openssl rand -hex 16)
+            local hy_out="direct"
+            [ "$target_out_mode" = "masque" ] && hy_out="warp"
+            render_hysteria_server_config "$x_port" "$h_pass" "$hy_out"
+            cat << 'SVC_EOF' > /etc/systemd/system/hysteria-server.service
 [Unit]
 Description=Bobarev Shell Hysteria 2 Server
 After=network.target network-online.target
@@ -2480,23 +2414,23 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 SVC_EOF
-                        safe_restart_systemd_service hysteria-server.service
-                        if [ -s /etc/hysteria/server.crt ]; then
-                            cert_pin=$(openssl x509 -noout -fingerprint -sha256 -in /etc/hysteria/server.crt 2>/dev/null | awk -F= '{print $2}' | tr -d '[:space:]' || true)
-                        fi
-                    fi
-                fi
+            safe_restart_systemd_service hysteria-server.service
+            if [ -s /etc/hysteria/server.crt ]; then
+                cert_pin=$(openssl x509 -noout -fingerprint -sha256 -in /etc/hysteria/server.crt 2>/dev/null | awk -F= '{print $2}' | tr -d '[:space:]' || true)
+            fi
+        fi
+    fi
 
-                local wan_dev pub_ip pub_ip6
-                wan_dev=$(get_wan_if)
-                pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
-                pub_ip6=$(get_wan_global_ipv6)
+    local wan_dev pub_ip pub_ip6
+    wan_dev=$(get_wan_if)
+    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
+    pub_ip6=$(get_wan_global_ipv6)
 
-                mkdir -p /etc/default
-                cat << EOF > /etc/default/bobarev-cascade
+    mkdir -p /etc/default
+    cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="standalone_vless"
-VLESS_OUT_MODE="masque"
-FOREIGN_EXIT_MODE="warp"
+VLESS_OUT_MODE="${target_out_mode}"
+FOREIGN_EXIT_MODE="${target_foreign_mode}"
 USQUE_MODE="${target_usque_mode}"
 XRAY_PORT="${x_port}"
 XRAY_UUID="${GEN_X_UUID}"
@@ -2512,33 +2446,120 @@ HYSTERIA_CERT_PIN="${cert_pin}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
 EOF
-                chmod 600 /etc/default/bobarev-cascade
+    chmod 600 /etc/default/bobarev-cascade
+    save_global_vless_credentials "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_PUB" "$GEN_X_SHORT_ID" "$x_sni" "$x_dest" "${GEN_X_PATH:-/xhttp-stream}"
 
-                if command -v ufw >/dev/null 2>&1; then
-                    ufw insert 1 allow "${x_port}/tcp" comment 'VLESS REALITY XTLS Vision' >/dev/null 2>&1 || ufw allow "${x_port}/tcp" comment 'VLESS REALITY XTLS Vision' >/dev/null 2>&1 || true
-                    if [ "$enable_hy2_backup" = true ]; then
-                        ufw insert 1 allow "${x_port}/udp" comment 'Hysteria 2 QUIC UDP' >/dev/null 2>&1 || ufw allow "${x_port}/udp" comment 'Hysteria 2 QUIC UDP' >/dev/null 2>&1 || true
-                    fi
-                    silent_run ufw reload
+    if command -v ufw >/dev/null 2>&1; then
+        ufw insert 1 allow "${x_port}/tcp" comment 'VLESS REALITY XHTTP' >/dev/null 2>&1 || ufw allow "${x_port}/tcp" comment 'VLESS REALITY XHTTP' >/dev/null 2>&1 || true
+        if [ "$enable_hy2_backup" = true ]; then
+            ufw insert 1 allow "${x_port}/udp" comment 'Hysteria 2 QUIC UDP' >/dev/null 2>&1 || ufw allow "${x_port}/udp" comment 'Hysteria 2 QUIC UDP' >/dev/null 2>&1 || true
+        fi
+        silent_run ufw reload
+    fi
+
+    echo ""
+    echo -e "${C_GREEN} === АВТОНОМНЫЙ СЕРВЕР VLESS-XHTTP (Выход: ${target_out_mode}) УСПЕШНО ЗАПУЩЕН! ===${C_RESET}"
+    if [ "$target_out_mode" = "masque" ]; then
+        verify_usque_masque_ip
+        echo ""
+    fi
+    print_vless_shadowrocket_links
+}
+
+setup_standalone_vless_unified() {
+    while true; do
+        MODULE_CANCELED=false
+        local c_state="Не активен"
+        local cur_out="direct"
+        local cur_usque_mode="l4-socks"
+
+        if systemctl is-active --quiet bobarev-xray.service 2>/dev/null && [ -f /etc/default/bobarev-cascade ]; then
+            # shellcheck disable=SC1091
+            source /etc/default/bobarev-cascade
+            if [ "${CASCADE_ROLE:-}" = "standalone_vless" ] || [ "${CASCADE_ROLE:-}" = "standalone_naive" ]; then
+                cur_out="${VLESS_OUT_MODE:-${NAIVE_OUT_MODE:-direct}}"
+                cur_usque_mode="${USQUE_MODE:-l4-socks}"
+                local out_human="Чистый IP VPS (Direct)"
+                if [ "$cur_out" = "masque" ] && is_usque_active; then
+                    out_human="Cloudflare MASQUE [${cur_usque_mode}]"
+                elif [ "$cur_out" = "masque" ]; then
+                    out_human="Cloudflare MASQUE (служба usque остановлена)"
+                elif [ "$cur_out" = "wg0" ] || systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+                    out_human="WireGuard wg0 (Dual-Gateway)"
                 fi
+                local hy2_badge=""
+                systemctl is-active --quiet hysteria-server.service 2>/dev/null && hy2_badge=" + Hysteria2 UDP"
+                c_state="Активен (VLESS-XHTTP :${XRAY_PORT:-443}/tcp${hy2_badge} | Выход: ${out_human})"
+            fi
+        fi
 
-                echo ""
-                echo -e "${C_GREEN} === СВЯЗКА VLESS / XHTTP (SplitHTTP + REALITY) + CLOUDFLARE MASQUE УСПЕШНО ЗАПУЩЕНА! ===${C_RESET}"
-                verify_usque_masque_ip
-                echo ""
+        local sc_choice=""
+        if ! smart_menu "Автономный сервер: VLESS-XHTTP (Чистый IP / Cloudflare MASQUE / WireGuard wg0)" "
+Статус: $c_state
+Глобальная учетная запись VLESS-XHTTP сохраняется при любом переключении режима выхода (приоритетный Tailscale на сервере не затрагивается):" 21 "$WT_WIDTH" 8 "sc_choice" \
+            "1" " Настроить автономный сервер: VLESS-XHTTP (+ опционально Hysteria 2 UDP)" \
+            "2" " Выбрать выход в интернет: Чистый IP VPS / Cloudflare MASQUE / WireGuard (wg0)" \
+            "3" " Подключить или сменить внешний конфиг WireGuard (wg0) БЕЗ смены ключей VLESS" \
+            "4" " Тонкая настройка и диагностика Cloudflare MASQUE (l4-socks / socks / перерегистрация)" \
+            "5" " Управление глобальными ключами VLESS-XHTTP, Path и SNI" \
+            "6" " Показать ссылки и QR-коды для Shadowrocket" \
+            "7" " Остановить и отключить службы автономного сервера" \
+            "0" " Вернуться в главное меню" || [ "$sc_choice" = "0" ]; then
+            break
+        fi
+
+        clear
+        case "$sc_choice" in
+            1)
+                setup_standalone_vless_wizard || true
+                pause_enter
+                ;;
+            2)
+                switch_standalone_vless_exit_mode_interactive || true
+                pause_enter
+                ;;
+            3)
+                ensure_or_init_global_vless_inbound_interactive "Пункт 1 — Автономный сервер: VLESS-XHTTP (+ WireGuard wg0)" || { pause_enter; continue; }
+                silent_run systemctl stop usque.service 2>/dev/null || true
+                silent_run systemctl disable usque.service 2>/dev/null || true
+                if setup_hybrid_wg_routing; then
+                    load_global_vless_credentials || true
+                    render_xray_server_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$XRAY_SNI" "wg0" "$XRAY_XHTTP_PATH" "$XRAY_REALITY_DEST"
+                    if [ -s /etc/xray/vless_users.list ]; then
+                        rebuild_xray_inbound_clients
+                    fi
+                    write_xray_service
+                    safe_restart_systemd_service bobarev-xray.service
+                    mkdir -p /etc/default
+                    touch /etc/default/bobarev-cascade
+                    sed -i '/^CASCADE_ROLE=/d;/^VLESS_OUT_MODE=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+                    printf 'CASCADE_ROLE="standalone_vless"\nVLESS_OUT_MODE="wg0"\n' >> /etc/default/bobarev-cascade
+                fi
+                pause_enter
+                ;;
+            4)
+                manage_standalone_masque_submenu || true
+                ;;
+            5)
+                manage_vless_users_menu
+                ;;
+            6)
                 print_vless_shadowrocket_links
                 pause_enter
                 ;;
-            8)
-                if prompt_yn "Остановить и полностью удалить связку VLESS-REALITY, Hysteria 2 и Cloudflare MASQUE (Usque) на этом сервере?" "false"; then
+            7)
+                if prompt_yn "Остановить и отключить службы автономного сервера (VLESS-XHTTP, Hysteria 2, Cloudflare MASQUE и туннель wg0)?" "false"; then
+                    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || [ -f /etc/wireguard/wg0.conf ]; then
+                        disable_hybrid_wg_routing
+                    fi
                     silent_run systemctl stop bobarev-xray.service hysteria-server.service usque.service
                     silent_run systemctl disable bobarev-xray.service hysteria-server.service usque.service
                     rm -f /etc/systemd/system/usque.service /etc/xray/config.json /etc/default/bobarev-cascade
-                    if prompt_yn "Удалить также зарегистрированный профиль WARP (/etc/usque/config.json)?" "false"; then
+                    if [ -d /etc/usque ] && prompt_yn "Удалить также зарегистрированный профиль WARP (/etc/usque/config.json)?" "false"; then
                         rm -rf /etc/usque
                     fi
                     silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN} Связка VLESS-REALITY + Cloudflare MASQUE полностью остановлена и удалена.${C_RESET}"
+                    echo -e "${C_GREEN} Службы автономного сервера полностью остановлены и отключены.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -2546,8 +2567,20 @@ EOF
     done
 }
 
+setup_standalone_vless_wg() {
+    setup_standalone_vless_unified "$@"
+}
+
+setup_standalone_vless_masque() {
+    setup_standalone_vless_unified "$@"
+}
+
+setup_standalone_naive() {
+    setup_standalone_vless_unified "$@"
+}
+
 setup_standalone_naive_masque() {
-    setup_standalone_vless_masque
+    setup_standalone_vless_unified "$@"
 }
 
 setup_cascade_server1_ru() {
@@ -2560,7 +2593,7 @@ setup_cascade_server1_ru() {
         cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
     fi
 
-    ensure_or_init_global_vless_inbound_interactive "Пункт 5 — Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad (Сервер 1)" || return 0
+    ensure_or_init_global_vless_inbound_interactive "Пункт 4 — Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad (Сервер 1)" || return 0
     local x_port="$XRAY_PORT"
     local x_sni="$XRAY_SNI"
     local x_dest="$XRAY_REALITY_DEST"
@@ -2661,7 +2694,7 @@ setup_cascade_server2_warp() {
     local exit_mode="direct"
     if [ "$exit_choice" = "2" ]; then
         exit_mode="warp"
-        if ! scan_and_warn_occupied_ports_interactive "Пункт 5 — Каскад: Tailscale -> MASQUE (Сервер 2)" "usque|xray" "1080/tcp" "10809/tcp"; then
+        if ! scan_and_warn_occupied_ports_interactive "Пункт 4 — Каскад: Tailscale -> MASQUE (Сервер 2)" "usque|xray" "1080/tcp" "10809/tcp"; then
             return 0
         fi
     fi
@@ -4542,7 +4575,7 @@ setup_cascade_xray_server2_foreign() {
     local ports_to_scan=("${x_port}/tcp")
     [ "$exit_mode" = "warp" ] && ports_to_scan+=("1080/tcp" "10808/tcp")
 
-    if ! scan_and_warn_occupied_ports_interactive "Пункт 3 — Каскад: VLESS-XHTTP (Сервер 2 Зарубеж)" "$allow_self" "${ports_to_scan[@]}"; then
+    if ! scan_and_warn_occupied_ports_interactive "Пункт 2 — Каскад: VLESS-XHTTP (Сервер 2 Зарубеж)" "$allow_self" "${ports_to_scan[@]}"; then
         return 0
     fi
 
@@ -4686,7 +4719,7 @@ setup_cascade_xray_server1_ru() {
         return 1
     fi
 
-    ensure_or_init_global_vless_inbound_interactive "Пункт 3 — Каскад: VLESS-XHTTP + Finalmask (Сервер 1 РФ)" "10808/tcp" || return 0
+    ensure_or_init_global_vless_inbound_interactive "Пункт 2 — Каскад: VLESS-XHTTP + Finalmask (Сервер 1 РФ)" "10808/tcp" || return 0
     s1_port="$XRAY_PORT"
     s1_sni="$XRAY_SNI"
     local s1_dest="$XRAY_REALITY_DEST"
@@ -11178,23 +11211,21 @@ menu_connections_proxies() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-XHTTP)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 18 "$WT_WIDTH" 6 sub_choice \
-            "1" "Автономный VLESS-XHTTP (Один сервер + WireGuard wg0)" \
-            "2" "Автономный VLESS-XHTTP (Один сервер + Cloudflare MASQUE)" \
-            "3" "Каскад: VLESS-XHTTP + Finalmask (+ MASQUE)" \
-            "4" "Каскад: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)" \
-            "5" "Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad" \
+        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-XHTTP)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 17 "$WT_WIDTH" 5 sub_choice \
+            "1" "Автономный сервер: VLESS-XHTTP (Чистый IP / MASQUE / WG)" \
+            "2" "Каскад: VLESS-XHTTP + Finalmask (+ MASQUE)" \
+            "3" "Каскад: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)" \
+            "4" "Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad" \
             "0" "⬅ Назад"; then
             return 0
         fi
         if [ -z "$sub_choice" ] || [ "$sub_choice" = "0" ]; then return 0; fi
         clear
         case "$sub_choice" in
-            1) setup_standalone_vless_wg || true ;;
-            2) setup_standalone_vless_masque || true ;;
-            3) manage_cascade_xray_menu || true ;;
-            4) manage_cascade_hysteria_menu || true ;;
-            5) manage_cascade_naive_ts_warp || true ;;
+            1) setup_standalone_vless_unified || true ;;
+            2) manage_cascade_xray_menu || true ;;
+            3) manage_cascade_hysteria_menu || true ;;
+            4) manage_cascade_naive_ts_warp || true ;;
         esac
     done
 }

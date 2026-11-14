@@ -4,7 +4,7 @@
 
 Включает профиль ядра **Zero-Bufferbloat & High-Throughput Engine** (TCP BBR, FQ, буферы 16 МБ), управление приватными mesh-сетями [Tailscale](https://tailscale.com) и собственными ретрансляторами DERP, гибкую маршрутизацию трафика через современные протоколы транспорта ([Xray-core](https://github.com/XTLS/Xray-core) XHTTP, [Hysteria 2](https://v2.hysteria.network) QUIC, [WireGuard](https://www.wireguard.com), [Usque](https://github.com/Diniboy1123/usque) MASQUE), а также комплексный аудит безопасности и производительности хостинга.
 
-Рекомендованные площадки: **[VPS / VDS](https://apt.bobarev.com)**
+Рекомендованная площадка: **[VPS / VDS](https://apt.bobarev.com)**
 
 ## 🚀 Быстрый запуск в одну команду
 

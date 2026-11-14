@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.19 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
-# Использует единый глобальный профиль VLESS-XHTTP для всех режимов и каскадов на сервере (свободное переключение выходных серверов без смены клиентских ссылок), выпадающий список Exit Nodes и расширенный аудит безопасности.
+# Bobarev Shell v3.20.20 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Объединяет шлюз и двухсерверный каскад VLESS-XHTTP + Tailscale / Mullvad в единое меню с выпадающим списком любых Exit Nodes, глобальным профилем VLESS-XHTTP и компактными заголовками для мобильных SSH-терминалов.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.19"
+SCRIPT_VERSION="3.20.20"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -2551,15 +2551,16 @@ setup_standalone_naive_masque() {
 }
 
 setup_cascade_server1_ru() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД РФ): VLESS / XHTTP (SplitHTTP + REALITY) -> TAILSCALE ===${C_RESET}"
-    local saved_exit=""
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД / ШЛЮЗ): VLESS-XHTTP (SplitHTTP + REALITY, Dual-Stack) -> TAILSCALE / MULLVAD EXIT NODE ===${C_RESET}"
+    local saved_exit="" cur_ts_trans="dualstack"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         saved_exit="${EXIT_TS_IP:-}"
+        cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
     fi
 
-    ensure_or_init_global_vless_inbound_interactive "Пункт 6 — Каскад: VLESS-XHTTP + Tailscale (Сервер 1 РФ)" || return 0
+    ensure_or_init_global_vless_inbound_interactive "Пункт 5 — Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad (Сервер 1)" || return 0
     local x_port="$XRAY_PORT"
     local x_sni="$XRAY_SNI"
     local x_dest="$XRAY_REALITY_DEST"
@@ -2573,7 +2574,7 @@ setup_cascade_server1_ru() {
     fi
     exit_ts_ip="$SELECT_EXIT_NODE_RESULT"
     if [ -z "$exit_ts_ip" ]; then
-        echo -e "${C_RED} Ошибка: Выходной сервер (Exit Node) не выбран!${C_RESET}"
+        echo -e "${C_RED} Ошибка: Выходной сервер (Mullvad или личный Tailscale Exit Node) не выбран!${C_RESET}"
         return 1
     fi
     silent_run systemctl stop hysteria-client.service 2>/dev/null || true
@@ -2581,25 +2582,29 @@ setup_cascade_server1_ru() {
 
     local wan_dev pub_ip pub_ip6
     wan_dev=$(get_wan_if)
-    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || echo "")
+    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || echo "")
     pub_ip6=$(get_wan_global_ipv6)
 
     render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH" "$x_dest"
+    if [ -s /etc/xray/vless_users.list ]; then
+        rebuild_xray_inbound_clients
+    fi
     write_xray_service
     safe_restart_systemd_service bobarev-xray.service
     sleep 1
 
     if ! systemctl is-active --quiet bobarev-xray.service; then
         echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
-        journalctl -u bobarev-xray.service -n 15 --no-pager || true
+        journalctl -u bobarev-xray.service -n 20 --no-pager || true
         return 1
     fi
 
-    local cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
     cat << EOF > /etc/default/bobarev-cascade
 CASCADE_ROLE="ru_entry"
+VLESS_OUT_MODE="mullvad_ts"
 EXIT_TS_IP="${exit_ts_ip}"
 TS_TRANSPORT_MODE="${cur_ts_trans}"
+MULLVAD_VLESS_PORT="${x_port}"
 XRAY_PORT="${x_port}"
 XRAY_UUID="${GEN_X_UUID}"
 XRAY_PRIV="${GEN_X_PRIV}"
@@ -2620,41 +2625,43 @@ EOF
     /usr/local/bin/bobarev-cascade-ru.sh
 
     if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${x_port}/tcp" comment 'VLESS REALITY XTLS Vision'
+        silent_run ufw allow "${x_port}/tcp" comment 'VLESS REALITY XHTTP Tailscale'
         echo -e "${C_GREEN} Порт ${x_port}/tcp открыт в UFW.${C_RESET}"
     fi
 
-    echo -e "${C_BLUE} Проверка сквозного выхода через Tailscale Exit Node (${exit_ts_ip})...${C_RESET}"
+    echo -e "${C_BLUE} Проверка сквозного выхода через Tailscale / Mullvad Exit Node (${exit_ts_ip})...${C_RESET}"
     local ts_out_ip=""
     ts_out_ip=$(curl -4 -s --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+    [ -z "$ts_out_ip" ] && ts_out_ip=$(curl -s --max-time 6 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
     if [ -n "$ts_out_ip" ] && [ "$ts_out_ip" != "$pub_ip" ]; then
-        echo -e "${C_GREEN} ✔ Выходной IP каскада через Tailscale: ${C_BOLD}${ts_out_ip}${C_RESET}"
+        echo -e "${C_GREEN} ✔ Выходной IP каскада / шлюза (Tailscale / Mullvad): ${C_BOLD}${ts_out_ip}${C_RESET}"
     elif [ -n "$ts_out_ip" ]; then
-        echo -e "${C_YELLOW} ⚠ Текущий выходной IP (${ts_out_ip}) совпадает с РФ-сервером. Проверьте в админ-панели Tailscale, что на Сервере 2 включен 'Use as exit node'!${C_RESET}"
+        echo -e "${C_YELLOW} ⚠ Текущий выходной IP (${ts_out_ip}) совпадает с IP сервера. Проверьте в админке Tailscale разрешение Exit Node (или доступ к Mullvad).${C_RESET}"
     else
         echo -e "${C_YELLOW} ⚠ Не удалось проверить внешний IP через Exit Node ${exit_ts_ip}. Проверьте 'tailscale status' и разрешение Exit Node в админке Tailscale.${C_RESET}"
     fi
 
-    echo -e "${C_GREEN} Сервер 1 (Вход в РФ на базе VLESS-XHTTP + Tailscale Dual-Stack [MTU 1280, MSS 1220]) успешно настроен и запущен!${C_RESET}"
+    echo -e "
+${C_GREEN} Сервер 1 (Шлюз / Вход VLESS-XHTTP -> Tailscale / Mullvad Exit Node, Dual-Stack IPv4+IPv6, MTU 1280, MSS 1220) успешно запущен!${C_RESET}"
     print_vless_shadowrocket_links
 }
 
 setup_cascade_server2_warp() {
-    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (ЗАРУБЕЖНЫЙ ВЫХОД): TAILSCALE -> CLOUDFLARE MASQUE / ЧИСТЫЙ IP ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 2 (СВОЙ ЗАРУБЕЖНЫЙ VPS): TAILSCALE -> ЧИСТЫЙ IP / CLOUDFLARE MASQUE ===${C_RESET}"
     ensure_tailscale_installed || true
     enable_routing_optimizations || true
 
     local exit_choice=""
     if ! smart_menu "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" "
 Как выпускать трафик из Tailscale в интернет с этого зарубежного сервера?
-(Вы сможете переключать этот режим за 2 секунды в Пункте 5 меню):" 16 "$WT_WIDTH" 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)"     "2" " Через Cloudflare MASQUE (Usque — чистая репутация IP Cloudflare без капч и блокировок)"; then
+(Вы сможете переключать этот режим за 2 секунды в Пункте 7 меню):" 16 "$WT_WIDTH" 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)"     "2" " Через Cloudflare MASQUE (Usque — чистая репутация IP Cloudflare без капч и блокировок)"; then
         return 0
     fi
 
     local exit_mode="direct"
     if [ "$exit_choice" = "2" ]; then
         exit_mode="warp"
-        if ! scan_and_warn_occupied_ports_interactive "Пункт 6 — Каскад: Tailscale -> MASQUE (Сервер 2)" "usque|xray" "1080/tcp" "10809/tcp"; then
+        if ! scan_and_warn_occupied_ports_interactive "Пункт 5 — Каскад: Tailscale -> MASQUE (Сервер 2)" "usque|xray" "1080/tcp" "10809/tcp"; then
             return 0
         fi
     fi
@@ -2877,29 +2884,29 @@ manage_cascade_naive_ts_warp() {
         if is_vless_active && [ -f /etc/default/bobarev-cascade ] && grep -q 'CASCADE_ROLE="ru_entry"' /etc/default/bobarev-cascade 2>/dev/null; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
-            c_state="Сервер 1 (РФ: VLESS-XHTTP -> Tailscale ${EXIT_TS_IP:-} [${TS_TRANSPORT_MODE:-dualstack}])"
+            c_state="Сервер 1 (Шлюз: VLESS-XHTTP :${XRAY_PORT:-443} -> Exit Node ${EXIT_TS_IP:-не выбран} [${TS_TRANSPORT_MODE:-dualstack}])"
         elif [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
             if is_usque_active; then
-                c_state="Сервер 2 (Зарубеж: Tailscale -> Cloudflare MASQUE)"
+                c_state="Сервер 2 (Выход: Tailscale -> Cloudflare MASQUE)"
             elif [ "${CASCADE_ROLE:-}" = "foreign_warp_exit" ]; then
-                c_state="Сервер 2 (Зарубеж: Tailscale -> Чистый IP сервера)"
+                c_state="Сервер 2 (Выход: Tailscale -> Чистый IP сервера)"
             fi
         fi
 
-        local c_choice
-        if ! smart_menu "Каскад: VLESS-XHTTP + Tailscale (Dual-Stack IPv4/IPv6 + MASQUE)" "
-Статус моста: $c_state
-Выберите действие:" 21 "$WT_WIDTH" 8 "c_choice" \
-            "1" " Сервер 1 (РФ): VLESS-XHTTP -> Tailscale Exit Node" \
-            "2" " Сервер 2 (Зарубеж): Tailscale -> Выход (Чистый IP / MASQUE)" \
-            "3" " Выбрать выходной сервер (Exit Node)" \
+        local c_choice=""
+        if ! smart_menu "Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad" "
+Статус: $c_state
+Подходит как для 1 VPS с выходом через Mullvad Exit Node, так и для 2 своих VPS в сети Tailscale (MTU 1280, MSS 1220, BBR, буферы 16 МБ, Dual-Stack IPv4+IPv6):" 22 "$WT_WIDTH" 9 "c_choice" \
+            "1" " Сервер 1 (Вход / Шлюз): VLESS-XHTTP -> Tailscale / Mullvad Exit Node" \
+            "2" " Сервер 2 (Свой зарубежный VPS): Tailscale -> Выход (Чистый IP / MASQUE)" \
+            "3" " Выбрать выходной сервер (Exit Node: Mullvad или свой Сервер 2)" \
             "4" " Транспорт между серверами (41641/udp): IPv4+IPv6 / Только IPv4 / Только IPv6" \
-            "5" " Управление ключами VLESS-XHTTP, Path и смена SNI" \
-            "6" " Показать ссылки и QR-коды для Shadowrocket" \
-            "7" " Переключить выход Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
-            "8" " Остановить компоненты каскада" \
+            "5" " Управление глобальными ключами VLESS-XHTTP, Path и SNI" \
+            "6" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
+            "7" " Переключить выход своего Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
+            "8" " Отключить Exit Node / Остановить компоненты каскада" \
             "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -2934,14 +2941,14 @@ manage_cascade_naive_ts_warp() {
                 pause_enter
                 ;;
             8)
-                if prompt_yn "Остановить и отключить службы этого каскада (VLESS-XHTTP / Tailscale Exit / Cloudflare MASQUE)?" "false"; then
+                if prompt_yn "Отключить Exit Node и остановить службы этого каскада / шлюза (VLESS-XHTTP / Tailscale Exit / Cloudflare MASQUE)?" "false"; then
                     silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service usque.service
                     while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
-                    apply_tailscale_p2p_transport_rules "dualstack" 
+                    apply_tailscale_p2p_transport_rules "dualstack"
                     silent_run tailscale set --exit-node=
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
                     silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN} Службы каскада остановлены и отключены.${C_RESET}"
+                    echo -e "${C_GREEN} Службы каскада / шлюза остановлены, Exit Node отключен.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -5947,8 +5954,8 @@ mod_user_setup() {
     for sfile in /etc/sudoers.d/*; do
         [ ! -f "$sfile" ] && continue
         [[ "$(basename "$sfile")" == "README" || "$sfile" == *.bak ]] && continue
-        if grep -qE "^[[:space:]]*$[[:space:]]+" "$sfile" 2>/dev/null; then
-            sed -i -E "/^[[:space:]]*$[[:space:]]+/d" "$sfile" 2>/dev/null || true
+        if grep -qE "^[[:space:]]*${username}[[:space:]]+" "$sfile" 2>/dev/null; then
+            sed -i -E "/^[[:space:]]*${username}[[:space:]]+/d" "$sfile" 2>/dev/null || true
             if ! grep -qE "^[[:space:]]*[^#[:space:]]" "$sfile" 2>/dev/null; then
                 rm -f "$sfile" 2>/dev/null || true
             fi
@@ -9848,964 +9855,17 @@ br_snapshot() {
  echo "Резервная копия: $d (содержит приватные настройки; не публикуйте)"
 }
 
-# BOBAREV SHELL: isolated fail-fast network controller.
+# Унифицированные обертки шлюза / каскада VLESS-XHTTP + Tailscale / Mullvad
 install_bobarev_mullvad_runtime() {
- local lib=/usr/local/lib/bobarev-shell
- [[ $EUID == 0 ]] || { echo 'Нужен root.';return 1; }
- if [[ -f /var/lib/bobarev-shell-mullvad/pending && -x "$lib/mullvad.sh" ]];then
-  echo 'Незавершённая транзакция: используйте пункт восстановления. Контроллер сохранён.'
-  return 0
- fi
- install -d -m 700 "$lib"
- cat > "$lib/mullvad.sh.new" <<'BOBAREV_ENGINE_3146'
-#!/usr/bin/env bash
-# BOBAREV SHELL 3.14.69
-set -Eeuo pipefail
-umask 077
-export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-BASE=/var/lib/bobarev-shell-mullvad
-LIB=/usr/local/lib/bobarev-shell
-SELF=$LIB/mullvad.sh
-CFG=$BASE/config
-PENDING=$BASE/pending
-PREF=1050
-MARK=0x80000000/0x80000000
-TX=''
-log(){ printf '[BOBAREV SHELL] %s\n' "$*"; }
-die(){ log "ОШИБКА: $*" >&2; exit 1; }
-root(){ [[ $EUID == 0 && -d /run/systemd/system ]] || die 'Нужны root и systemd.'; }
-snap_file(){
- python3 - "$TX" "$1" <<'PY_SNAP'
-import json,pathlib,shutil,sys,os
-root=pathlib.Path(sys.argv[1]);p=pathlib.Path(sys.argv[2]);manifest=root/'manifest.json'
-m=json.loads(manifest.read_text()) if manifest.exists() else []
-if any(x['path']==str(p) for x in m):sys.exit(0)
-target=root/'files'/str(p).lstrip('/');target.parent.mkdir(parents=True,exist_ok=True)
-exists=os.path.lexists(p)
-if exists:
- if p.is_symlink():target.symlink_to(os.readlink(p))
- elif p.is_dir():shutil.copytree(p,target,symlinks=True)
- else:shutil.copy2(p,target)
-m.append({'path':str(p),'exists':exists});manifest.write_text(json.dumps(m,indent=2))
-PY_SNAP
-}
-unit_state(){
- local a e
- a=$(systemctl is-active "$1" 2>/dev/null) || true
- e=$(systemctl is-enabled "$1" 2>/dev/null) || true
- printf '%s\t%s\t%s\n' "$1" "$a" "$e" >> "$TX/services.tsv"
-}
-preflight(){
- root
- command -v apt-get >/dev/null || die 'Поддерживаются Debian/Ubuntu с apt.'
- command -v python3 >/dev/null || { apt-get update; apt-get install -y python3; }
- [[ ! -f /etc/bobarev-router-v2/config && ! -f /etc/default/bobarev-router ]] || die 'LAN-router обнаружен. Этот мастер предназначен для VPS, не LAN.'
- python3 - <<'PY_NET'
-import json,subprocess,sys
-r=json.loads(subprocess.check_output(['ip','-j','-4','route','show','table','main','default']))
-if len(r)!=1 or not r[0].get('dev') or r[0]['dev'].startswith(('tailscale','wg','tun','warp')):sys.exit('Нужен один обычный WAN default в table main.')
-PY_NET
- WAN=$(ip -j -4 route show table main default | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["dev"])')
- [[ "$WAN" =~ ^[a-zA-Z0-9_.:-]+$ ]] || die 'Неверное имя WAN.'
- if [[ ! -f "$CFG" ]]; then
-  if ip -4 rule show | grep -q "^$PREF:"; then die "Приоритет $PREF занят."; fi
-  if command -v iptables-save >/dev/null && iptables-save -t mangle | grep -qE 'BMGE_|0x80000000'; then die 'Конфликт mark/цепочек: нужен аудит.'; fi
- fi
- [[ ! -e "$PENDING" ]] || die 'Незавершённая транзакция: сначала восстановление.'
- [[ ! -f /etc/naiveproxy/mesh-upstream.port && ! -f /etc/naiveproxy/mesh-paused ]] || die 'Сначала штатно отключите mesh/paused режим NaiveProxy.'
- log "WAN=$WAN. Держите консоль провайдера открытой; не перезагружайте VPS до KEEP."
-}
-validate_dns(){
- python3 - "$1" <<'PY_DNS'
-import sys,ipaddress,re
-v=sys.argv[1]
-try:ip,name=v.split('#')
-except ValueError:
- ip,name=v,None
-if ipaddress.ip_address(ip).version!=4:sys.exit('Нужен IPv4 DNS')
-if name is not None and not re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?',name):sys.exit('Неверное TLS-имя')
-PY_DNS
-}
-transaction(){
- mkdir -p "$BASE/transactions"
- TX=$(mktemp -d "$BASE/transactions/tx-$(date +%Y%m%d-%H%M%S)-XXXXXX")
- chmod 700 "$TX"
- for p in /etc/ufw /etc/default/ufw /etc/resolv.conf /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d /etc/caddy /etc/naiveproxy /etc/xray /etc/default/bobarev-cascade /usr/local/bin/caddy /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/naive-return-route.service /usr/local/sbin/bobarev-mullvad-return-route.sh /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service "$CFG" "$BASE/client-links.txt" "$BASE/vless-links.txt"; do snap_file "$p"; done
- for u in ufw.service caddy.service systemd-resolved.service naive-return-route.service bobarev-shell-return.service bobarev-shell-dns.service; do unit_state "$u"; done
- if command -v resolvectl >/dev/null;then
-  python3 - "$TX" "$WAN" <<'PY_LINK_SNAPSHOT'
-import subprocess,json,sys,pathlib
-result={}
-for setting in ('dns','domain','default-route'):
- p=subprocess.run(['resolvectl',setting,sys.argv[2]],text=True,capture_output=True)
- if p.returncode==0:result[setting]=p.stdout.split('):',1)[-1].strip().split()
-pathlib.Path(sys.argv[1],'link-dns.json').write_text(json.dumps({'wan':sys.argv[2],'settings':result}))
-PY_LINK_SNAPSHOT
- fi
- ip -4 rule show > "$TX/ip-rules.txt"
- ip -4 route show table all > "$TX/routes.txt"
- if command -v iptables-save >/dev/null; then iptables-save > "$TX/iptables.txt"; fi
- for k in net.ipv4.conf.all.rp_filter net.ipv4.conf."$WAN".rp_filter; do printf '%s\t%s\n' "$k" "$(sysctl -n "$k")" >> "$TX/sysctls.tsv"; done
- if command -v tailscale >/dev/null; then tailscale debug prefs > "$TX/prefs.json"; tailscale status --json > "$TX/status.json"; fi
- trap 'cleanup_exit "$?"' EXIT
- printf '%s\n' "$$" > "$TX/wizard.pid"
- python3 - "$$" "$TX" <<'PY_WRITER_ID'
-import pathlib,sys,json
-pid=int(sys.argv[1]);p=pathlib.Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()
-pathlib.Path(sys.argv[2],'writer-id.json').write_text(json.dumps({'pid':pid,'start':p[19],'boot':pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()}))
-PY_WRITER_ID
- printf '%s\n' "$TX" > "$PENDING"
- printf '%s\n' "$TX" > "$BASE/latest"
- cat > /etc/systemd/system/bobarev-shell-rollback.service <<'UNIT_ROLL'
-[Unit]
-Description=Bobarev BOBAREV SHELL transaction recovery
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/bobarev-shell/mullvad.sh recover pending
-UNIT_ROLL
- cat > /etc/systemd/system/bobarev-shell-rollback.timer <<'UNIT_TIMER'
-[Unit]
-Description=Bobarev transaction watchdog
-[Timer]
-OnActiveSec=45min
-AccuracySec=1s
-Unit=bobarev-shell-rollback.service
-[Install]
-WantedBy=timers.target
-UNIT_TIMER
- cat > /etc/systemd/system/bobarev-shell-boot-recover.service <<'UNIT_BOOT'
-[Unit]
-Description=Recover interrupted Bobarev transaction after reboot
-After=network-online.target tailscaled.service
-Wants=network-online.target
-ConditionPathExists=/var/lib/bobarev-shell-mullvad/pending
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/bobarev-shell/mullvad.sh recover pending
-[Install]
-WantedBy=multi-user.target
-UNIT_BOOT
- systemctl daemon-reload
- systemctl enable bobarev-shell-boot-recover.service
- rm -f /run/systemd/system/bobarev-shell-rollback.timer.d/window.conf
- systemctl daemon-reload
- systemctl restart bobarev-shell-rollback.timer
- trap 'on_error "$?" "$LINENO"' ERR
- trap 'on_error 130 "$LINENO"' INT TERM HUP
- log "Резервная копия: $TX (приватные настройки, не публикуйте)."
-}
-on_error(){
- local code=$1 line=$2
- trap - ERR INT TERM HUP
- log "Ошибка $code на строке $line."
- exit "$code"
-}
-cleanup_exit(){
- local code=$1
- trap - EXIT ERR INT TERM HUP
- exec 8>&- || true
- if [[ -n "$TX" && -f "$PENDING" && $(cat "$PENDING") == "$TX" ]]; then
-  log 'Незавершённая транзакция: восстановление.'
-  "$SELF" recover pending || log 'Неполный откат: используйте консоль провайдера.'
- fi
- exit "$code"
-}
-restore_files(){
- python3 - "$TX" <<'PY_RESTORE'
-import json,pathlib,shutil,sys,os
-root=pathlib.Path(sys.argv[1])
-for entry in reversed(json.loads((root/'manifest.json').read_text())):
- p=pathlib.Path(entry['path']);s=root/'files'/str(p).lstrip('/')
- if p.is_symlink() or p.is_file():p.unlink()
- elif p.is_dir():shutil.rmtree(p)
- if not entry['exists']:continue
- p.parent.mkdir(parents=True,exist_ok=True)
- if s.is_symlink():p.symlink_to(os.readlink(s))
- elif s.is_dir():shutil.copytree(s,p,symlinks=True)
- else:shutil.copy2(s,p)
-PY_RESTORE
-}
-recover(){
- root
- mkdir -p "$BASE"
- local mode=${1:-pending}
- if [[ "$mode" == pending ]]; then [[ -f "$PENDING" ]] || { log 'Нет незавершённой транзакции.'; return 0; };TX=$(cat "$PENDING")
- else [[ -f "$BASE/latest" ]] || die 'Нет резервной копии.';TX=$(cat "$BASE/latest");fi
- [[ "$TX" == "$BASE/transactions/"* && -f "$TX/manifest.json" ]] || die 'Некорректная резервная копия.'
- [[ ! -f "$TX/restored" ]] || { log 'Транзакция уже восстановлена.';return 0; }
- python3 - "$TX" "$$" "$PPID" <<'PY_STOP_WRITER'
-import json,pathlib,sys,os,signal
-f=pathlib.Path(sys.argv[1],'writer-id.json')
-if not f.exists():sys.exit(0)
-j=json.loads(f.read_text());pid=j['pid'];me=int(sys.argv[2]);parent=int(sys.argv[3])
-if pid in (me,parent):sys.exit(0)
-try:
- stat=pathlib.Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()
- if stat[19]!=j['start'] or pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()!=j['boot']:sys.exit(0)
-except FileNotFoundError:sys.exit(0)
-parents={}
-for d in pathlib.Path('/proc').iterdir():
- if not d.name.isdecimal():continue
- try:parents[int(d.name)]=int((d/'stat').read_text().rsplit(')',1)[1].split()[1])
- except (OSError,ValueError,IndexError):pass
-victims={pid}
-while True:
- expanded=victims|{p for p,pp in parents.items() if pp in victims}
- if expanded==victims:break
- victims=expanded
-if me in victims:sys.exit(0)
-for p in sorted(victims,reverse=True):
- try:os.kill(p,signal.SIGKILL)
- except ProcessLookupError:pass
-PY_STOP_WRITER
- exec 8>"$BASE/state.lock"; flock -w 20 8 || die 'Восстановление уже работает.'
- # Re-check after obtaining the commit/recovery lock.
- [[ ! -f "$TX/restored" ]] || return 0
- if [[ "$mode" == pending && ! -f "$PENDING" ]];then return 0;fi
- local failed=0
- if command -v tailscale >/dev/null; then tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false || failed=1;fi
- systemctl stop bobarev-shell-return.service bobarev-shell-dns.service 2>/dev/null || true
- route_stop || failed=1
- if [[ -f "$TX/services.tsv" ]];then
-  while IFS=$'\t' read -r u active enabled;do
-   case "$enabled" in not-found|'') systemctl disable "$u" 2>/dev/null || true;;esac
-  done < "$TX/services.tsv"
- fi
- restore_files || failed=1
- systemctl daemon-reload || failed=1
- if [[ -f "$TX/ufw-changed" ]] && command -v ufw >/dev/null;then ufw reload || failed=1;fi
- if [[ -f "$TX/sysctls.tsv" ]]; then while IFS=$'\t' read -r k v;do sysctl -w "$k=$v" || failed=1;done < "$TX/sysctls.tsv";fi
- if [[ -f "$TX/nm.tsv" ]] && command -v nmcli >/dev/null;then
-  while IFS=$'\t' read -r uuid key value;do nmcli connection modify "$uuid" "$key" "$value" || failed=1;done < "$TX/nm.tsv"
- fi
- if systemctl is-active --quiet systemd-networkd;then networkctl reload || failed=1;fi
- if [[ -f "$TX/legacy-rules.json" ]];then
-  python3 - "$TX/legacy-rules.json" <<'PY_LEGACY_RESTORE'
-import json,sys,subprocess
-failed=False
-for args in json.load(open(sys.argv[1])):
- r=subprocess.run(['ip','-4','rule','add']+args,text=True,capture_output=True)
- if r.returncode and 'File exists' not in r.stderr:
-  print(r.stderr,file=sys.stderr);failed=True
-sys.exit(1 if failed else 0)
-PY_LEGACY_RESTORE
-  [[ $? == 0 ]] || failed=1
- fi
- if [[ -s "$TX/legacy-firewall.sh" ]];then bash -e "$TX/legacy-firewall.sh" || failed=1;fi
- if [[ -f "$TX/services.tsv" ]];then
-  while IFS=$'\t' read -r u active enabled;do
-   case "$enabled" in enabled|enabled-runtime) systemctl enable "$u" || failed=1;;disabled) systemctl disable "$u" || failed=1;;esac
-   case "$active" in active) systemctl restart "$u" || failed=1;;*) systemctl stop "$u" 2>/dev/null || true;;esac
-  done < "$TX/services.tsv"
- fi
- if [[ -f "$TX/link-dns.json" ]] && command -v resolvectl >/dev/null;then
-  python3 - "$TX/link-dns.json" <<'PY_LINK_RESTORE'
-import subprocess,json,sys
-j=json.load(open(sys.argv[1]))
-for setting,values in j['settings'].items():
- if not values and setting=='default-route':continue
- subprocess.run(['resolvectl',setting,j['wan']]+(values or ['']),check=True)
-PY_LINK_RESTORE
-  [[ $? == 0 ]] || failed=1
- fi
- if [[ -f "$TX/prefs.json" ]] && command -v tailscale >/dev/null;then
-  python3 - "$TX" <<'PY_TS_RESTORE'
-import json,subprocess,sys
-from pathlib import Path
-p=Path(sys.argv[1]);prefs=json.loads((p/'prefs.json').read_text());status=json.loads((p/'status.json').read_text())
-node=str(prefs.get('ExitNodeIP') or '')
-if node in ('invalid IP','<nil>'):node=''
-if not node and prefs.get('ExitNodeID'):
- for peer in status.get('Peer',{}).values():
-  if peer.get('ID')==prefs['ExitNodeID']:
-   node=next((ip for ip in peer.get('TailscaleIPs',[]) if ':' not in ip),'');break
- if not node:raise SystemExit('Прежний exit node не найден; оставлен WAN. Восстановите выбор вручную.')
-args=['tailscale','set','--exit-node='+node,'--exit-node-allow-lan-access='+str(bool(node and prefs.get('ExitNodeAllowLANAccess'))).lower(),'--accept-dns='+str(bool(prefs.get('CorpDNS',True))).lower(),'--accept-routes='+str(bool(prefs.get('RouteAll',False))).lower(),'--advertise-exit-node='+str(any(r in ('0.0.0.0/0','::/0') for r in prefs.get('AdvertiseRoutes',[]) or [])).lower()]
-subprocess.run(args,check=True)
-PY_TS_RESTORE
-  [[ $? == 0 ]] || failed=1
- fi
- if [[ $failed == 0 ]];then
-  touch "$TX/restored";rm -f "$PENDING"
-  if grep -q $'bobarev-shell-return.service\tactive' "$TX/services.tsv";then systemctl restart bobarev-shell-return.service || return 1;fi
-  systemctl stop bobarev-shell-rollback.timer || true
-  log "Восстановлены файлы и настройки $TX. Пакеты и кэши остаются."
- else log "Неполное восстановление: смотрите journalctl -u bobarev-shell-rollback и $TX.";return 1;fi
-}
-route_stop(){
- local rc=0
- if command -v iptables >/dev/null;then
-  while iptables -w -t mangle -D PREROUTING -j BMGE_IN 2>/dev/null;do :;done
-  while iptables -w -t mangle -D OUTPUT -j BMGE_OUT 2>/dev/null;do :;done
-  while iptables -w -t mangle -D OUTPUT -j BMGE_MSS 2>/dev/null;do :;done
-  while iptables -w -t mangle -D FORWARD -j BMGE_MSS 2>/dev/null;do :;done
-  for chain in BMGE_IN BMGE_OUT BMGE_MSS;do
-   if iptables -w -t mangle -S "$chain" >/dev/null 2>&1;then iptables -w -t mangle -F "$chain" || rc=1;iptables -w -t mangle -X "$chain" || rc=1;fi
-  done
- fi
- if command -v ip6tables >/dev/null;then
-  while ip6tables -w -t mangle -D PREROUTING -j BMGE6_IN 2>/dev/null;do :;done
-  while ip6tables -w -t mangle -D OUTPUT -j BMGE6_OUT 2>/dev/null;do :;done
-  while ip6tables -w -t mangle -D OUTPUT -j BMGE6_MSS 2>/dev/null;do :;done
-  while ip6tables -w -t mangle -D FORWARD -j BMGE6_MSS 2>/dev/null;do :;done
-  for chain in BMGE6_IN BMGE6_OUT BMGE6_MSS;do
-   if ip6tables -w -t mangle -S "$chain" >/dev/null 2>&1;then ip6tables -w -t mangle -F "$chain" || rc=1;ip6tables -w -t mangle -X "$chain" || rc=1;fi
-  done
- fi
- while ip -4 rule del pref "$PREF" fwmark "$MARK" lookup main 2>/dev/null;do :;done
- while ip -6 rule del pref "$PREF" fwmark "$MARK" lookup main 2>/dev/null;do :;done
- return "$rc"
-}
-route_start(){
- root
- [[ ! -f "$PENDING" || ${BOBAREV_APPLY:-0} == 1 ]] || { log 'Startup отложен до восстановления pending.';return 0; }
- [[ -f "$CFG" ]] || die 'Нет config.'
- source "$CFG"
- ip link show "$WAN" >/dev/null
- local other
- other=$(ip -4 rule show | awk -v p="$PREF:" '$1==p && $0 !~ /fwmark 0x80000000\/0x80000000 lookup main/ {print}')
- [[ -z "$other" ]] || die 'Конфликт приоритета обратного маршрута.'
- route_stop
- ip -4 rule add pref "$PREF" fwmark "$MARK" lookup main
- iptables -w -t mangle -N BMGE_IN
- iptables -w -t mangle -A BMGE_IN -i "$WAN" -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark "$MARK"
- iptables -w -t mangle -I PREROUTING 1 -j BMGE_IN
- iptables -w -t mangle -N BMGE_OUT
- iptables -w -t mangle -A BMGE_OUT -m connmark --mark "$MARK" -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000
- iptables -w -t mangle -A OUTPUT -j BMGE_OUT
- if command -v ip6tables >/dev/null && ip -6 addr show dev "$WAN" scope global 2>/dev/null | grep -q 'inet6';then
-  ip -6 rule add pref "$PREF" fwmark "$MARK" lookup main 2>/dev/null || true
-  ip6tables -w -t mangle -N BMGE6_IN 2>/dev/null || true
-  ip6tables -w -t mangle -A BMGE6_IN -i "$WAN" -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark "$MARK" 2>/dev/null || true
-  ip6tables -w -t mangle -I PREROUTING 1 -j BMGE6_IN 2>/dev/null || true
-  ip6tables -w -t mangle -N BMGE6_OUT 2>/dev/null || true
-  ip6tables -w -t mangle -A BMGE6_OUT -m connmark --mark "$MARK" -j CONNMARK --restore-mark --nfmask 0x80000000 --ctmask 0x80000000 2>/dev/null || true
-  ip6tables -w -t mangle -A OUTPUT -j BMGE6_OUT 2>/dev/null || true
- fi
- if [[ ${MSS_PROFILE:-auto} == diagnostic1140 ]];then
-  iptables -w -t mangle -N BMGE_MSS
-  iptables -w -t mangle -A BMGE_MSS -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
-  iptables -w -t mangle -A OUTPUT -j BMGE_MSS
-  iptables -w -t mangle -A FORWARD -j BMGE_MSS
-  if command -v ip6tables >/dev/null;then
-   ip6tables -w -t mangle -N BMGE6_MSS 2>/dev/null || true
-   ip6tables -w -t mangle -A BMGE6_MSS -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || true
-   ip6tables -w -t mangle -A OUTPUT -j BMGE6_MSS 2>/dev/null || true
-   ip6tables -w -t mangle -A FORWARD -j BMGE6_MSS 2>/dev/null || true
-  fi
- fi
- sysctl -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf."$WAN".rp_filter=2
-}
-migrate_legacy(){
- [[ -f /usr/local/sbin/bobarev-mullvad-return-route.sh ]] || return 0
- log 'Миграция старой BOBAREV SHELL Return-Path-службы; только распознанные правила.'
- python3 - "$TX" <<'PY_LEGACY'
-import re,pathlib,subprocess,json,ipaddress,sys
-text=pathlib.Path('/usr/local/sbin/bobarev-mullvad-return-route.sh').read_text()
-ip=re.search(r'^PUB_IP="([0-9.]+)"$',text,re.M);port=re.search(r'^SSH_P="([0-9]+)"$',text,re.M)
-if not ip or not port:raise SystemExit('Старый helper не распознан; нужна ручная миграция.')
-ipaddress.IPv4Address(ip[1]);p=int(port[1]);assert 1<=p<=65535
-rules=[['from',ip[1]+'/32','table','main','priority','100'],['sport',str(p),'table','main','priority','98'],['sport','443','table','main','priority','99'],['sport','80','table','main','priority','101']];removed=[]
-for args in rules:
- while subprocess.run(['ip','-4','rule','del']+args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:removed.append(args)
-pathlib.Path(sys.argv[1],'legacy-rules.json').write_text(json.dumps(removed))
-PY_LEGACY
- if systemctl is-active --quiet naive-return-route.service;then
-  install -d /run/systemd/system/naive-return-route.service.d
-  printf '[Service]\nExecStop=\n' > /run/systemd/system/naive-return-route.service.d/shell-migration.conf
-  systemctl daemon-reload;systemctl disable --now naive-return-route.service
-  rm -f /run/systemd/system/naive-return-route.service.d/shell-migration.conf
-  systemctl daemon-reload
- fi
- systemctl disable naive-return-route.service 2>/dev/null || true
- command -v iptables >/dev/null || die 'Старый helper есть, но iptables отсутствует; нужна ручная миграция.'
- : > "$TX/legacy-firewall.sh"
- for table_chain in 'nat POSTROUTING' 'mangle FORWARD' 'mangle OUTPUT' 'mangle POSTROUTING';do
-  local table chain;read -r table chain <<< "$table_chain"
-  local -a spec
-  if [[ $table == nat ]];then spec=(-o tailscale0 -j MASQUERADE);else spec=(-o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140);fi
-  while iptables -w -t "$table" -C "$chain" "${spec[@]}" 2>/dev/null;do
-   printf 'iptables -w -t %q -A %q ' "$table" "$chain" >> "$TX/legacy-firewall.sh";printf '%q ' "${spec[@]}" >> "$TX/legacy-firewall.sh";printf '\n' >> "$TX/legacy-firewall.sh"
-   iptables -w -t "$table" -D "$chain" "${spec[@]}"
-  done
- done
-}
-install_dependencies(){
- export DEBIAN_FRONTEND=noninteractive
- # Если Tailscale уже установлен и перехватывает DNS (MagicDNS),
- # отключаем это ДО apt-get update, иначе репозитории могут не резолвиться.
- if command -v tailscale >/dev/null;then
-  tailscale set --accept-dns=false --accept-routes=false 2>/dev/null || true
- fi
- if command -v resolvectl >/dev/null;then
-  resolvectl flush-caches 2>/dev/null || true
- fi
- # Отключаем LLMNR и mDNS на публичном VPS (уменьшает поверхность атаки)
- if command -v systemctl >/dev/null && systemctl is-active systemd-resolved >/dev/null 2>&1;then
-  mkdir -p /etc/systemd/resolved.conf.d
-  cat > /etc/systemd/resolved.conf.d/99-bobarev-no-llmnr.conf <<'RESOLVED_EOF'
-[Resolve]
-LLMNR=no
-MulticastDNS=no
-RESOLVED_EOF
-  systemctl restart systemd-resolved 2>/dev/null || true
- fi
- apt-get update
- apt-get install -y curl ca-certificates openssl iptables iproute2 python3 git wget tar unzip apache2-utils util-linux
- if ! command -v tailscale >/dev/null;then
-  curl -q --proto '=https' --tlsv1.2 -fSL --connect-timeout 10 --max-time 120 https://tailscale.com/install.sh -o "$TX/tailscale-install.sh"
-  sh -n "$TX/tailscale-install.sh"
-  sh "$TX/tailscale-install.sh"
- fi
- systemctl enable --now tailscaled
- local state
- state=$(tailscale status --json | python3 -c 'import json,sys;print(json.load(sys.stdin).get("BackendState",""))')
- if [[ $state != Running ]];then
-  log 'Авторизуйте Tailscale по ссылке (до 5 минут).'
-  timeout 300 tailscale up --accept-dns=false --accept-routes=false
- fi
- tailscale status --json | python3 -c 'import json,sys;assert json.load(sys.stdin).get("BackendState")=="Running"'
- tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false
-}
-manager_dns(){
- local uuid key old file name
- if systemctl is-active --quiet NetworkManager && command -v nmcli >/dev/null;then
-  uuid=$(nmcli -g GENERAL.CON-UUID device show "$WAN")
-  [[ -n $uuid && $uuid != -- ]] || die 'Не определён NM UUID WAN.'
-  for key in ipv4.ignore-auto-dns ipv6.ignore-auto-dns ipv4.dns ipv6.dns ipv4.dns-search ipv6.dns-search;do
-   old=$(nmcli -g "$key" connection show "$uuid")
-   printf '%s\t%s\t%s\n' "$uuid" "$key" "$old" >> "$TX/nm.tsv"
-   if [[ $key == *.ignore-auto-dns ]];then nmcli connection modify "$uuid" "$key" yes;else nmcli connection modify "$uuid" "$key" '';fi
-  done
- elif systemctl is-active --quiet systemd-networkd;then
-  file=$(LC_ALL=C networkctl status "$WAN" --no-pager | sed -n 's/^[[:space:]]*Network File: //p' | head -n 1)
-  [[ -n $file && $file == *.network ]] || die 'Не определён .network WAN.'
-  name=$(basename "$file")
-  local drop="/etc/systemd/network/$name.d/90-bobarev-shell-dns.conf"
-  snap_file "$drop";mkdir -p "$(dirname "$drop")"
-  cat > "$drop" <<'NETWORK_DNS'
-[Network]
-DNS=
-Domains=
-[DHCPv4]
-UseDNS=no
-UseDomains=no
-[DHCPv6]
-UseDNS=no
-UseDomains=no
-[IPv6AcceptRA]
-UseDNS=no
-UseDomains=no
-NETWORK_DNS
-  networkctl reload
- else
-  if command -v resolvconf >/dev/null || command -v dhclient >/dev/null;then
-   log 'NM/networkd не найдены: переключаю системный DNS на systemd-resolved.'
-   ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-  fi
- fi
-}
-dns_guard(){
- [[ -f "$CFG" ]] || return 0
- source "$CFG"
- if ip -4 route show table 52 default 2>/dev/null | grep -Eq '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' || [[ "${BOBAREV_APPLY:-0}" == "1" ]]; then
-  resolvectl dns "$WAN" ''
-  resolvectl domain "$WAN" ''
-  resolvectl default-route "$WAN" no
-  if ip link show tailscale0 >/dev/null 2>&1;then resolvectl revert tailscale0;fi
- else
-  resolvectl dns "$WAN" 1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 2>/dev/null || true
-  resolvectl default-route "$WAN" yes 2>/dev/null || true
- fi
-}
-configure_dns(){
- apt-get install -y systemd-resolved whiptail
- manager_dns
- mkdir -p /etc/systemd/resolved.conf.d
- for f in /etc/systemd/resolved.conf.d/*.conf;do
-  [[ -e "$f" ]] || continue
-  [[ "$f" == *90-bobarev-shell-mullvad.conf ]] && continue
-  cp -a "$f" "$TX/" || true
-  rm -f "$f"
- done
- local dot_mode=no
- [[ "$DNS" == *#* ]] && dot_mode=yes
- cat > /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf <<EOF_DNS
-[Resolve]
-DNS=
-DNS=$DNS
-FallbackDNS=1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4
-Domains=
-Domains=~.
-DNSOverTLS=$dot_mode
-DNSStubListener=yes
-Cache=yes
-EOF_DNS
- systemctl enable --now systemd-resolved
- ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
- chmod 755 /etc/systemd/resolved.conf.d
- chmod 644 /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf
- if ! systemctl restart systemd-resolved;then
-  journalctl -u systemd-resolved --since "5 minutes ago" --no-pager > "$TX/resolved-failure.log" 2>&1 || true
-  echo 'Не удалось перезапустить systemd-resolved. Последние строки журнала:' >&2
-  tail -n 60 "$TX/resolved-failure.log" >&2
-  die 'Проверьте /etc/systemd/resolved.conf.d/90-bobarev-shell-mullvad.conf.'
- fi
- sleep 2
- dns_guard
- resolvectl flush-caches || true
- systemd-analyze cat-config systemd/resolved.conf > "$TX/effective-resolved.txt"
- python3 - "$TX/effective-resolved.txt" "$DNS" <<'PY_EFFECTIVE'
-import sys
-values={'DNS':[],'FallbackDNS':[],'Domains':[]};scalar={};section=''
-for line in open(sys.argv[1]):
- line=line.strip()
- if not line or line.startswith(('#',';')):continue
- if line.startswith('['):section=line;continue
- if section!='[Resolve]' or '=' not in line:continue
- key,value=map(str.strip,line.split('=',1))
- if key in values:
-  if not value:values[key]=[]
-  else:values[key].extend(value.split())
- else:scalar[key]=value
-assert values['DNS']==[sys.argv[2]],'Сторонний DNS drop-in перекрывает выбор'
-assert values['Domains']==['~.'],'Конфликт DNS routing/fallback'
-assert scalar.get('DNSStubListener')=='yes','Конфликт режима resolver'
-PY_EFFECTIVE
- cat > /etc/systemd/system/bobarev-shell-dns.service <<'UNIT_DNS'
-[Unit]
-Description=Bobarev DNS runtime reconciliation
-Wants=network-online.target systemd-resolved.service
-After=network-online.target systemd-resolved.service tailscaled.service NetworkManager.service systemd-networkd.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/lib/bobarev-shell/mullvad.sh dns-guard
-[Install]
-WantedBy=multi-user.target
-UNIT_DNS
- systemctl daemon-reload;systemctl enable bobarev-shell-dns.service
-}
-configure_route(){
- printf 'WAN=%q\nDNS=%q\nNODE=%q\n' "$WAN" "$DNS" "$NODE" > "$CFG"
- cat > /etc/systemd/system/bobarev-shell-return.service <<'UNIT_RETURN'
-[Unit]
-Description=Bobarev BOBAREV SHELL IPv4 ingress reply routing
-Wants=network-online.target
-After=network-online.target ufw.service
-Before=tailscaled.service
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/lib/bobarev-shell/mullvad.sh route-start
-ExecStop=/usr/local/lib/bobarev-shell/mullvad.sh route-stop
-[Install]
-WantedBy=multi-user.target
-UNIT_RETURN
- systemctl daemon-reload;systemctl enable bobarev-shell-return.service
- route_start
-}
-test_dot(){
- [[ "$DNS" != *#* ]] && return 0
- local ip=${DNS%%#*} host=${DNS#*#}
- timeout 12 openssl s_client -connect "$ip:853" -servername "$host" -verify_hostname "$host" -verify_return_error -CApath /etc/ssl/certs </dev/null > "$TX/dot-tls.txt" 2>&1
-}
-probe_ip(){
- local u value
- for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com;do
-  if value=$(curl -q -4 --noproxy '*' -fsS --connect-timeout 5 --max-time 12 "$u");then
-   if python3 - "$value" <<'PY_IP'
-import ipaddress,sys
-assert ipaddress.ip_address(sys.argv[1].strip()).version==4
-PY_IP
-   then printf '%s\n' "$value";return 0;fi
-  fi
- done
- return 1
-}
-smoke(){
- local ok=0 url attempt
- for domain in www.google.com github.com;do timeout 15 resolvectl query "$domain" >/dev/null 2>&1 || true;done
- for attempt in 1 2 3;do
-  ok=0
-  for url in https://www.google.com https://www.debian.org https://www.cloudflare.com https://api.ipify.org;do
-   if curl -q -4 --noproxy '*' -fsS -o /dev/null --connect-timeout 8 --max-time 20 "$url" >>"$TX/smoke-attempt-$attempt.log" 2>&1;then
-    ok=$((ok+1))
-   fi
-  done
-  [[ $ok -gt 0 ]] && return 0
-  [[ $attempt < 3 ]] && sleep 10
- done
- {
-  echo '=== curl -v к https://www.google.com ==='
-  curl -q -4 --noproxy '*' -v -o /dev/null --connect-timeout 8 --max-time 20 https://www.google.com 2>&1 || true
-  echo '=== ip -4 route show table 52 ==='
-  ip -4 route show table 52
-  echo '=== ip -4 rule ==='
-  ip -4 rule
-  echo '=== resolvectl status ==='
-  resolvectl status 2>&1 || true
-  echo '=== journalctl -u tailscaled ==='
-  journalctl -u tailscaled --since "10 minutes ago" --no-pager 2>&1 | tail -n 60 || true
- } > "$TX/smoke-failure.log" 2>&1 || true
- echo 'HTTPS smoke-проверки не прошли после 3 попыток. Диагностика:' >&2
- tail -n 80 "$TX/smoke-failure.log" >&2
- echo "Полный лог: $TX/smoke-failure.log" >&2
- die 'Через exit node не прошёл ни один HTTPS-запрос; установка остановлена.'
-}
-check_exit(){
- local n
- for n in {1..60};do
-  if ip -4 route show table 52 default 2>/dev/null | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null;then
-   log "Маршрут exit node появился на попытке $n/60."
-   break
-  fi
-  if (( n % 12 == 0 ));then
-   echo "Маршрут exit node ещё не появился (${n}/60). Повторяю применение exit node." >&2
-   tailscale set --advertise-exit-node=false --accept-dns=false --exit-node="$NODE" --exit-node-allow-lan-access=true || true
-  fi
-  sleep 5
- done
- if ! ip -4 route show table 52 default 2>/dev/null | grep -E '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)' >/dev/null;then
-  {
-   echo '=== ip -4 route show table 52 ==='
-   ip -4 route show table 52
-   echo '=== ip -4 rule ==='
-   ip -4 rule
-   echo '=== tailscale status ==='
-   tailscale status 2>&1 || true
-   echo '=== tailscale status --json: строки про exit node ==='
-   tailscale status --json 2>/dev/null > "$TX/exit-node-status.json" || true
-   grep -n -F "$NODE" "$TX/exit-node-status.json" 2>/dev/null | head -n 60 || true
-   grep -n -E "ExitNode|Online" "$TX/exit-node-status.json" 2>/dev/null | head -n 60 || true
-   echo '=== journalctl -u tailscaled ==='
-   journalctl -u tailscaled --since "15 minutes ago" --no-pager 2>&1 | tail -n 80 || true
-  } > "$TX/exit-node-failure.log" 2>&1 || true
-  echo 'Exit node не подтвердился за 5 минут. Диагностика сохранена и показана ниже.' >&2
-  tail -n 100 "$TX/exit-node-failure.log" >&2
-  echo "Полный лог: $TX/exit-node-failure.log" >&2
-  echo "Проверьте: tailscale status — узел $NODE должен быть Online и предлагать exit node." >&2
-  die 'Exit node недоступен или не объявлен; установка остановлена до smoke-проверок.'
- fi
- tailscale status --json > "$TX/after-status.json"
- python3 - "$TX/after-status.json" <<'PY_EXIT'
-import json,sys
-j=json.load(open(sys.argv[1]))
-if not any(p.get('ExitNode') for p in j.get('Peer',{}).values()) and not (j.get('ExitNodeStatus') or {}).get('ID'):raise SystemExit('Tailscale не подтверждает выбранный exit node.')
-PY_EXIT
- test_dot;resolvectl flush-caches;smoke
- OUT_IP=$(probe_ip) || die 'Не удалось определить выходной IPv4 по трём сервисам.'
- [[ $OUT_IP != "$DIRECT_IP" ]] || die 'Внешний IPv4 не изменился: VPN не подтверждён.'
- log "WAN: $DIRECT_IP; сейчас: $OUT_IP. Проверьте соответствие выбранному узлу/стране."
-}
-renew_watchdog(){
- mkdir -p /run/systemd/system/bobarev-shell-rollback.timer.d
- printf '[Timer]\nOnActiveSec=\nOnActiveSec=45min\n' > /run/systemd/system/bobarev-shell-rollback.timer.d/window.conf
- systemctl daemon-reload;systemctl restart bobarev-shell-rollback.timer
-}
-commit(){
- local answer=''
- log 'Откройте НОВУЮ SSH-сессию по публичному IPv4 и проверьте VLESS-XHTTP / Shadowrocket.'
- log 'Проверьте выходной IP через клиентский прокси. Серверный curl этого не заменяет.'
- log 'Введите KEEP после успешной проверки VLESS-XHTTP / Shadowrocket. Автоматический откат — не ранее чем через 45 минут.'
- answer=$(whiptail --title 'BOBAREV SHELL' --inputbox 'Введите KEEP для подтверждения (ожидание без ограничения времени; автоматический откат не ранее чем через 45 минут):' 10 60 '' 3>&1 1>&2 2>&3) || die 'Нет подтверждения.'
- [[ $answer == KEEP ]] || die 'Изменения не подтверждены.'
- exec 8>"$BASE/state.lock";flock -w 10 8
- [[ -f "$PENDING" && $(cat "$PENDING") == "$TX" && ! -f "$TX/restored" ]] || die 'Транзакция уже откатилась.'
- BOBAREV_APPLY=1 route_start
- dns_guard
- systemctl stop bobarev-shell-rollback.timer
- rm -f "$PENDING";touch "$TX/committed"
- trap - ERR INT TERM HUP EXIT
- flock -u 8
- systemctl restart bobarev-shell-return.service
- systemctl restart bobarev-shell-dns.service
- log 'Применено. Теперь нужен reboot-тест. Резервная копия сохранена.'
-}
-ui_input(){
- if command -v whiptail >/dev/null;then
-  whiptail --title 'BOBAREV SHELL' --inputbox "$1" 10 60 "${2:-}" 3>&1 1>&2 2>&3
- else
-  read -r -p "$1 [${2:-}]: " REPLY
-  printf '%s' "$REPLY"
- fi
-}
-ui_yesno(){
- if command -v whiptail >/dev/null;then
-  whiptail --title 'BOBAREV SHELL' --yesno "$1" 10 60
- else
-  read -r -p "$1 [y/N]: " REPLY
-  [[ $REPLY == APPLY || $REPLY == y || $REPLY == Y ]]
- fi
-}
-apply(){
- local kind=${1:-exit} answer
- preflight
- [[ -t 0 ]] || die 'Нужен интерактивный терминал.'
- log 'Публичный Mullvad DNS объявлен к отключению 02.11.2026; по умолчанию Quad9 DoT.'
- DNS=$(ui_input 'DNS IPv4 или IPv4#TLS-hostname:' '9.9.9.9') || die 'Отменено.'
- [[ -z $DNS ]] && DNS='9.9.9.9'
- validate_dns "$DNS"
- log 'Новые исходящие соединения VPS пойдут через exit node; это НЕ VPN kill switch.'
- log 'Откат восстанавливает прежние настройки, включая прежний exit node, если он был.'
- if ! ui_yesno 'Создать резервную копию и продолжить?';then return 0;fi
- transaction
- export BOBAREV_APPLY=1
- if command -v tailscale >/dev/null;then tailscale set --exit-node= --exit-node-allow-lan-access=false --accept-dns=false;fi
- migrate_legacy
- install_dependencies
- echo ''
- echo 'Доступные exit node (Mullvad и другие):'
- local ts_list=''
- ts_list=$(tailscale exit-node list 2>&1) || true
- if [[ -n $ts_list ]];then
-  printf '%s\n' "$ts_list"
- else
-  echo '(список пуст — проверьте: tailscale status; возможно, Tailscale ещё не авторизован или Mullvad add-on не включён)'
- fi
- echo ''
- # Выбор exit node в whiptail-меню (список выше остаётся в терминале для справки)
- local ts_menu=() ts_ip ts_host
- while read -r ts_ip ts_host _;do
-  [[ $ts_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || $ts_ip =~ ^[0-9a-fA-F:]+$ ]] || continue
-  [[ -z $ts_host ]] && ts_host="$ts_ip"
-  ts_menu+=("$ts_ip" "$ts_host")
- done <<<"$ts_list"
- if (( ${#ts_menu[@]} >= 2 ));then
-  NODE=$(whiptail --title 'BOBAREV SHELL — Выбор exit node' --menu 'Выберите exit node (список выше — в терминале):' 20 70 10 "${ts_menu[@]}" 3>&1 1>&2 2>&3) || die 'Отменено.'
- else
-  NODE=$(ui_input 'Введите IP/имя exit node (список выше — в терминале):' '') || die 'Отменено.'
- fi
- [[ -z $NODE ]] && die 'Не выбран exit node.'
- [[ $NODE =~ ^[A-Za-z0-9_.:-]+$ ]] || die 'Неверный узел.'
-
- DIRECT_IP=$(probe_ip) || die 'Не определён прямой WAN IPv4; исходный интернет не подтверждён.'
- log "Прямой WAN IPv4: $DIRECT_IP"
- [[ -f "$PENDING" && $(cat "$PENDING") == "$TX" && ! -f "$TX/restored" ]] || die 'Транзакция была прервана во время подготовки.'
- renew_watchdog
- configure_route
- configure_dns
- test_dot
- local dns_ok=0
- for n in 1 2 3;do
-  if timeout 15 resolvectl query www.google.com >/dev/null 2>&1;then dns_ok=1;break;fi
-  sleep 2
- done
- if [[ $dns_ok != 1 ]];then
-  journalctl -u systemd-resolved --since "5 minutes ago" --no-pager > "$TX/resolved-query-failure.log" 2>&1 || true
-  echo 'systemd-resolved не ответил на тестовый запрос www.google.com.' >&2
-  echo 'Последние строки журнала:' >&2
-  tail -n 60 "$TX/resolved-query-failure.log" >&2
-  echo "Полный лог: $TX/resolved-query-failure.log" >&2
-  die 'DNS не заработал после настройки; установка остановлена до exit node.'
- fi
- tailscale set --advertise-exit-node=false --accept-dns=false --exit-node="$NODE" --exit-node-allow-lan-access=true
- check_exit
- printf 'DIRECT_IP=%q\nOUT_IP=%q\n' "$DIRECT_IP" "$OUT_IP" >> "$CFG"
- commit
-}
-diag(){
- log 'Диагностика без изменения сети:'
- ip -4 rule show;ip -4 route show table main;ip -4 route show table 52 || true
- command -v tailscale >/dev/null && tailscale debug prefs | grep -E 'ExitNode|CorpDNS|RouteAll' || true
- command -v resolvectl >/dev/null && resolvectl status || true
- for s in bobarev-shell-return bobarev-shell-dns bobarev-shell-rollback.timer bobarev-xray;do systemctl status "$s" --no-pager -l || true;done
- if [[ -f "$CFG" ]];then source "$CFG";log "WAN=$WAN NODE=$NODE DNS=$DNS";fi
- if command -v resolvectl >/dev/null;then timeout 15 resolvectl query www.google.com || true;fi
- if value=$(probe_ip);then log "Текущий IPv4: $value";else log 'Проверка внешнего IP не прошла.';fi
-}
-mss_change(){
- root;[[ -f "$CFG" ]] || die 'Сначала настройте exit node.'
- [[ ${1:-} == auto || ${1:-} == diagnostic1140 ]] || die 'Профиль auto или diagnostic1140.'
- local profile=$1 confirm
- preflight
- read -r -p 'Диагностический MSS-профиль. APPLY для применения с откатом: ' confirm
- [[ $confirm == APPLY ]] || return 0
- source "$CFG"
- transaction
- export BOBAREV_APPLY=1
- sed -i '/^MSS_PROFILE=/d' "$CFG"
- printf 'MSS_PROFILE=%q\n' "$profile" >> "$CFG"
- source "$CFG"
- renew_watchdog
- route_start
- smoke
- commit
-}
-case ${1:-help} in
- --library) :;;
- full|exit) root;mkdir -p "$BASE";exec 9>"$BASE/wizard.lock";flock -n 9 || die 'Мастер уже работает.';apply "$1";;
- recover) trap - ERR;set +e;recover "${2:-pending}";;
- route-start) route_start;;
- route-stop) route_stop;;
- dns-guard) root;dns_guard;;
- diag) diag;;
- direct) root;tailscale set --exit-node= --exit-node-allow-lan-access=false;log 'Exit node отключён; DNS и обратный путь сохранены.';;
- mss) root;mkdir -p "$BASE";exec 9>"$BASE/wizard.lock";flock -n 9 || die 'Мастер уже работает.';mss_change "${2:-auto}";;
- links) root;[[ -f "$BASE/client-links.txt" ]] && cat "$BASE/client-links.txt";;
- *) echo 'Команды: full | exit | diag | direct | recover pending | recover latest | links';;
-esac
-BOBAREV_ENGINE_3146
- bash -n "$lib/mullvad.sh.new" || return 1
- chmod 700 "$lib/mullvad.sh.new" || return 1
- mv -f "$lib/mullvad.sh.new" "$lib/mullvad.sh" || return 1
+    write_bobarev_cascade_ru_script
 }
 
 setup_vless_reality_mullvad_inbound() {
-    echo -e "${C_CYAN} === НАСТРОЙКА ШЛЮЗА: VLESS-XHTTP (SplitHTTP + REALITY, Dual-Stack) -> MULLVAD / TAILSCALE EXIT NODE ===${C_RESET}"
-    local saved_exit="" cur_ts_trans="dualstack"
-    if [ -f /etc/default/bobarev-cascade ]; then
-        # shellcheck disable=SC1091
-        source /etc/default/bobarev-cascade
-        saved_exit="${EXIT_TS_IP:-}"
-        cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
-    fi
-
-    ensure_or_init_global_vless_inbound_interactive "Пункт 5 — Шлюз: VLESS-XHTTP + Tailscale / Mullvad" || return 0
-    local x_port="$XRAY_PORT"
-    local x_sni="$XRAY_SNI"
-    local x_dest="$XRAY_REALITY_DEST"
-
-    ensure_tailscale_installed || true
-    enable_routing_optimizations || true
-
-    local exit_ts_ip=""
-    if ! select_tailscale_exit_node_dropdown "${saved_exit:-}"; then
-        return 0
-    fi
-    exit_ts_ip="$SELECT_EXIT_NODE_RESULT"
-    if [ -z "$exit_ts_ip" ]; then
-        echo -e "${C_RED} Ошибка: Выходной сервер Mullvad / Tailscale Exit Node не выбран!${C_RESET}"
-        return 1
-    fi
-    silent_run systemctl stop hysteria-client.service 2>/dev/null || true
-    load_global_vless_credentials || true
-
-    local wan_dev pub_ip pub_ip6
-    wan_dev=$(get_wan_if)
-    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '[:space:]' || echo "")
-    pub_ip6=$(get_wan_global_ipv6)
-
-    # Используем чистый профиль tailscale_exit (UseIPv4v6, tcpNoDelay, без двойного finalmask внутри tailscale0)
-    render_xray_server_config "$x_port" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_SHORT_ID" "$x_sni" "tailscale_exit" "$GEN_X_PATH" "$x_dest"
-    if [ -s /etc/xray/vless_users.list ]; then
-        rebuild_xray_inbound_clients
-    fi
-    write_xray_service
-    safe_restart_systemd_service bobarev-xray.service
-    sleep 1
-    if ! systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_RED} Служба bobarev-xray НЕ запустилась! Журнал:${C_RESET}"
-        journalctl -u bobarev-xray.service -n 20 --no-pager || true
-        return 1
-    fi
-
-    cat << EOF > /etc/default/bobarev-cascade
-CASCADE_ROLE="ru_entry"
-VLESS_OUT_MODE="mullvad_ts"
-EXIT_TS_IP="${exit_ts_ip}"
-TS_TRANSPORT_MODE="${cur_ts_trans}"
-MULLVAD_VLESS_PORT="${x_port}"
-XRAY_PORT="${x_port}"
-XRAY_UUID="${GEN_X_UUID}"
-XRAY_PRIV="${GEN_X_PRIV}"
-XRAY_PUB="${GEN_X_PUB}"
-XRAY_SHORT_ID="${GEN_X_SHORT_ID}"
-XRAY_SNI="${x_sni}"
-XRAY_REALITY_DEST="${x_dest}"
-XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
-SERVER_PUB_IP="${pub_ip}"
-SERVER_PUB_IPV6="${pub_ip6}"
-TCP_TUNE_PROFILE="balanced"
-EOF
-    chmod 600 /etc/default/bobarev-cascade
-
-    apply_naive_tcp_tuning_profile "balanced"
-    install_universal_dns_boot_guard >/dev/null 2>&1 || true
-    write_bobarev_cascade_ru_script
-    /usr/local/bin/bobarev-cascade-ru.sh
-
-    if command -v ufw &>/dev/null; then
-        silent_run ufw allow "${x_port}/tcp" comment 'Xray VLESS XHTTP Mullvad'
-    fi
-
-    echo -e "${C_BLUE} Проверка сквозного выхода через Mullvad / Tailscale Exit Node (${exit_ts_ip})...${C_RESET}"
-    local ts_out_ip=""
-    ts_out_ip=$(curl -4 -s --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-    [ -z "$ts_out_ip" ] && ts_out_ip=$(curl -s --max-time 6 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-    if [ -n "$ts_out_ip" ] && [ "$ts_out_ip" != "$pub_ip" ]; then
-        echo -e "${C_GREEN} ✔ Выходной IP шлюза (Mullvad / Tailscale): ${C_BOLD}${ts_out_ip}${C_RESET}"
-    elif [ -n "$ts_out_ip" ]; then
-        echo -e "${C_YELLOW} ⚠ Текущий выходной IP (${ts_out_ip}) совпадает с IP сервера. Убедитесь, что для этого сервера разрешен доступ к Mullvad Exit Nodes в админке Tailscale.${C_RESET}"
-    fi
-
-    echo -e "\n${C_GREEN} Шлюз VLESS-XHTTP -> Mullvad / Tailscale Exit Node (Dual-Stack IPv4+IPv6, MTU 1280, MSS 1220) успешно запущен!${C_RESET}"
-    print_vless_shadowrocket_links
+    setup_cascade_server1_ru "$@"
 }
 
 manage_naive_mullvad_menu() {
-    while true; do
-        MODULE_CANCELED=false
-        local c_state="Не активен"
-        if is_vless_active && [ -f /etc/default/bobarev-cascade ]; then
-            # shellcheck disable=SC1091
-            source /etc/default/bobarev-cascade
-            if [ -n "${EXIT_TS_IP:-}" ]; then
-                c_state="Активен (VLESS-XHTTP :${XRAY_PORT:-443} -> Exit Node ${EXIT_TS_IP} [${TS_TRANSPORT_MODE:-dualstack}])"
-            elif [ "${VLESS_OUT_MODE:-}" = "mullvad_ts" ]; then
-                c_state="Активен (VLESS-XHTTP :${XRAY_PORT:-443} -> Tailscale / Mullvad)"
-            fi
-        fi
-
-        local c_choice=""
-        if ! smart_menu "Шлюз: VLESS-XHTTP + Tailscale / Mullvad Exit Node (Dual-Stack)" "
-Статус шлюза: $c_state
-
-Сервер работает как прослойка между вашими устройствами (iPhone / Shadowrocket по VLESS-XHTTP) и выходными серверами Mullvad / Tailscale (MTU 1280, MSS 1220, BBR, буферы 16 МБ).
-Выберите действие:" 21 "$WT_WIDTH" 7 "c_choice" \
-            "1" " Настроить шлюз «под ключ»: VLESS-XHTTP -> Mullvad / Tailscale Exit Node" \
-            "2" " Выбрать выходной сервер (Exit Node)" \
-            "3" " Транспорт между серверами (IPv4+IPv6 / Только IPv4 / Только IPv6)" \
-            "4" " Управление глобальными ключами VLESS-XHTTP, Path и SNI" \
-            "5" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
-            "6" " Отключить Exit Node / Остановить компоненты шлюза" \
-            "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
-            break
-        fi
-
-        clear
-        case "$c_choice" in
-            1)
-                setup_vless_reality_mullvad_inbound || true
-                pause_enter
-                ;;
-            2)
-                change_cascade_tailscale_exit_node_interactive || true
-                pause_enter
-                ;;
-            3)
-                toggle_tailscale_ipv6_transport_menu || true
-                pause_enter
-                ;;
-            4)
-                manage_vless_users_menu
-                ;;
-            5)
-                print_vless_shadowrocket_links
-                pause_enter
-                ;;
-            6)
-                if prompt_yn "Отключить выход через Mullvad / Tailscale Exit Node и остановить службу VLESS-XHTTP на этом сервере?" "false"; then
-                    silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service
-                    apply_tailscale_p2p_transport_rules "dualstack"
-                    silent_run tailscale set --exit-node=
-                    rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
-                    silent_run systemctl daemon-reload
-                    echo -e "${C_GREEN} Шлюз остановлен, Exit Node отключен.${C_RESET}"
-                fi
-                pause_enter
-                ;;
-        esac
-    done
+    manage_cascade_naive_ts_warp "$@"
 }
 
 mod_network_reset() {
@@ -12018,9 +11078,7 @@ bobarev_cli_router_status() {
 if [ "${1:-}" != "" ]; then
     case "${1:-}" in
         --bobarev-mullvad)
-            install_bobarev_mullvad_runtime
-            shift
-            bash /usr/local/lib/bobarev-shell/mullvad.sh "$@"
+            manage_cascade_naive_ts_warp
             exit $?
             ;;
         --audit|-a)
@@ -12120,7 +11178,13 @@ menu_connections_proxies() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-REALITY & HYSTERIA 2)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 19 "$WT_WIDTH" 7 sub_choice             "1" "Автономный VLESS-XHTTP (Один сервер + WG Dual-Gateway)"             "2" "Автономный VLESS-XHTTP (Один сервер + Cloudflare MASQUE)"             "3" "Каскад: VLESS-XHTTP (SplitHTTP + Finalmask + MASQUE)"             "4" "Каскад / Сервер: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)"             "5" "Шлюз: VLESS-XHTTP + Tailscale / Mullvad Exit Node"             "6" "Каскад: VLESS-XHTTP + Tailscale (2 сервера + MASQUE)"             "0" "⬅ Назад"; then
+        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-XHTTP)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 18 "$WT_WIDTH" 6 sub_choice \
+            "1" "Автономный VLESS-XHTTP (Один сервер + WireGuard wg0)" \
+            "2" "Автономный VLESS-XHTTP (Один сервер + Cloudflare MASQUE)" \
+            "3" "Каскад: VLESS-XHTTP + Finalmask (+ MASQUE)" \
+            "4" "Каскад: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)" \
+            "5" "Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad" \
+            "0" "⬅ Назад"; then
             return 0
         fi
         if [ -z "$sub_choice" ] || [ "$sub_choice" = "0" ]; then return 0; fi
@@ -12130,8 +11194,7 @@ menu_connections_proxies() {
             2) setup_standalone_vless_masque || true ;;
             3) manage_cascade_xray_menu || true ;;
             4) manage_cascade_hysteria_menu || true ;;
-            5) manage_naive_mullvad_menu || true ;;
-            6) manage_cascade_naive_ts_warp || true ;;
+            5) manage_cascade_naive_ts_warp || true ;;
         esac
     done
 }

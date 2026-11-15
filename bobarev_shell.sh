@@ -1,10 +1,10 @@
 #!/bin/bash
-# Bobarev Shell v3.20.23 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
-# Добавляет сценарий 2 -> 5 для зарубежных VPS с заблокированным IP (VLESS-XHTTP + Nginx Self-Steal TLS за оранжевым облачком Cloudflare CDN с выбором чистого Anycast IP и выхода через Direct / MASQUE / WireGuard wg0) и скоростные оптимизации Tailscale / Mullvad.
+# Bobarev Shell v3.20.24 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
+# Включает защиту от потери интернета и DNS при выборе неактивного Exit Node в 2 -> 4 (автопроверка связи с мгновенным откатом и очисткой таблицы 52), меню 2 -> 5 (VLESS-XHTTP за Cloudflare CDN) и скоростной профиль Tailscale / Mullvad.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.23"
+SCRIPT_VERSION="3.20.24"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1279,11 +1279,13 @@ NFT_IP6_EOF
         ip6tables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
         ip6tables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
     fi
+    # Удаляем возможные статические/зависшие маршруты proto boot в таблице 52 перед передачей управления tailscaled
+    while ip route del default dev tailscale0 table 52 proto boot 2>/dev/null; do :; done
+    while ip -6 route del default dev tailscale0 table 52 proto boot 2>/dev/null; do :; done
+    while ip -6 route del default dev tailscale0 table 52 metric 1024 2>/dev/null; do :; done
     if [ -n "${EXIT_TS_IP:-}" ] && command -v tailscale &>/dev/null; then
         tailscale set --exit-node="$EXIT_TS_IP" --exit-node-allow-lan-access=true --accept-routes=true --accept-dns=false 2>/dev/null || true
     fi
-    ip route replace default dev tailscale0 table 52 advmss 1220 2>/dev/null || true
-    ip -6 route replace default dev tailscale0 table 52 metric 1024 advmss 1220 2>/dev/null || true
     ip tcp_metrics flush all 2>/dev/null || true
 elif [ "${CASCADE_ROLE:-}" = "foreign_warp_exit" ]; then
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
@@ -1745,7 +1747,19 @@ ensure_ipv4_precedence_and_host_dns() {
         fi
     fi
 
-    # 2. Если осталась старая служба bobarev-shell-dns.service от Mullvad, но сам маршрут exit-node в таблице 52 не активен,
+    # 2. Самоисцеление таблицы 52: если в таблице 52 висит default dev tailscale0 (IPv4 или IPv6),
+    #    но трафик через него не проходит (выбран неактивный/свой ненастроенный Exit Node или остались статические маршруты),
+    #    автоматически сбрасываем зависший exit-node и очищаем таблицу 52, возвращая серверу интернет и DNS!
+    if ip -4 route show table 52 default 2>/dev/null | grep -qE 'dev[[:space:]]+tailscale0' || ip -6 route show table 52 default 2>/dev/null | grep -qE 'dev[[:space:]]+tailscale0'; then
+        if ! ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+            command -v tailscale >/dev/null 2>&1 && tailscale set --exit-node= 2>/dev/null || true
+            while ip route del default dev tailscale0 table 52 2>/dev/null; do :; done
+            while ip -6 route del default dev tailscale0 table 52 2>/dev/null; do :; done
+            while ip -6 route del default dev tailscale0 table 52 metric 1024 2>/dev/null; do :; done
+        fi
+    fi
+
+    # 2b. Если осталась старая служба bobarev-shell-dns.service от Mullvad, но сам маршрут exit-node в таблице 52 не активен,
     #    отключаем блокировщик WAN DNS, чтобы после перезагрузки не пропадал DNS (search DOMAINS6 -> search .).
     local mullvad_route_active=false
     if ip -4 route show table 52 default 2>/dev/null | grep -qE '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)'; then
@@ -3684,17 +3698,7 @@ EOF
         echo -e "${C_GREEN} Порт ${x_port}/tcp открыт в UFW.${C_RESET}"
     fi
 
-    echo -e "${C_BLUE} Проверка сквозного выхода через Tailscale / Mullvad Exit Node (${exit_ts_ip})...${C_RESET}"
-    local ts_out_ip=""
-    ts_out_ip=$(curl -4 -s --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-    [ -z "$ts_out_ip" ] && ts_out_ip=$(curl -s --max-time 6 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-    if [ -n "$ts_out_ip" ] && [ "$ts_out_ip" != "$pub_ip" ]; then
-        echo -e "${C_GREEN} ✔ Выходной IP каскада / шлюза (Tailscale / Mullvad): ${C_BOLD}${ts_out_ip}${C_RESET}"
-    elif [ -n "$ts_out_ip" ]; then
-        echo -e "${C_YELLOW} ⚠ Текущий выходной IP (${ts_out_ip}) совпадает с IP сервера. Проверьте в админке Tailscale разрешение Exit Node (или доступ к Mullvad).${C_RESET}"
-    else
-        echo -e "${C_YELLOW} ⚠ Не удалось проверить внешний IP через Exit Node ${exit_ts_ip}. Проверьте 'tailscale status' и разрешение Exit Node в админке Tailscale.${C_RESET}"
-    fi
+    verify_tailscale_exit_node_or_rollback "$exit_ts_ip" "$saved_exit" "$pub_ip" || true
 
     echo -e "
 ${C_GREEN} Сервер 1 (Шлюз / Вход VLESS-XHTTP -> Tailscale / Mullvad Exit Node, Dual-Stack IPv4+IPv6, MTU 1280, MSS 1220) успешно запущен!${C_RESET}"
@@ -3850,6 +3854,61 @@ select_tailscale_exit_node_dropdown() {
     return 0
 }
 
+cleanup_tailscale_table52_routes() {
+    command -v tailscale &>/dev/null && tailscale set --exit-node= 2>/dev/null || true
+    while ip route del default dev tailscale0 table 52 2>/dev/null; do :; done
+    while ip -6 route del default dev tailscale0 table 52 2>/dev/null; do :; done
+    while ip -6 route del default dev tailscale0 table 52 metric 1024 2>/dev/null; do :; done
+    ip tcp_metrics flush all 2>/dev/null || true
+}
+
+verify_tailscale_exit_node_or_rollback() {
+    local target_exit="$1"
+    local prev_exit="${2:-}"
+    local pub_ip="${3:-}"
+    echo -e "${C_BLUE} Проверка прохождения интернет-трафика через Exit Node (${target_exit})...${C_RESET}"
+
+    local ts_out_ip="" attempt
+    for attempt in 1 2 3; do
+        if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+            ts_out_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
+            [ -z "$ts_out_ip" ] && ts_out_ip=$(curl -4 -s --max-time 4 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+            [ -n "$ts_out_ip" ] && break
+        fi
+        sleep 1
+    done
+
+    if [ -n "$ts_out_ip" ]; then
+        echo -e "${C_GREEN} ✔ Связь через Exit Node (${target_exit}) проверена! Выходной IP: ${C_BOLD}${ts_out_ip}${C_RESET}"
+        return 0
+    fi
+
+    echo -e "\n${C_RED} ✖ ВНИМАНИЕ: Выбранный узел (${target_exit}) НЕ пропускает интернет-трафик!${C_RESET}"
+    echo -e "${C_YELLOW}   Возможные причины для личного сервера:${C_RESET}"
+    echo -e "   1) На втором сервере (${target_exit}) еще не запущен режим ${C_BOLD}2 -> 4 -> 2 (Сервер 2: Tailscale -> Выход)${C_RESET} (не включены NAT MASQUERADE и форвардинг в UFW)."
+    echo -e "   2) Узел сейчас offline или не одобрен как Exit Node в админ-панели Tailscale."
+    echo -e "${C_BLUE} Выполняю автоматический откат, чтобы сохранить интернет, DNS и работу VLESS на этом сервере...${C_RESET}"
+
+    cleanup_tailscale_table52_routes
+
+    if [ -n "$prev_exit" ] && [ "$prev_exit" != "$target_exit" ]; then
+        echo -e "${C_BLUE} Пробую вернуть предыдущий рабочий узел (${prev_exit})...${C_RESET}"
+        tailscale set --exit-node="$prev_exit" --exit-node-allow-lan-access=true --accept-routes=true --accept-dns=false 2>/dev/null || true
+        sleep 2
+        if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+            sed -i "s|^EXIT_TS_IP=.*|EXIT_TS_IP=\"${prev_exit}\"|" /etc/default/bobarev-cascade 2>/dev/null || true
+            echo -e "${C_GREEN} ✔ Возвращен предыдущий рабочий Exit Node: ${C_BOLD}${prev_exit}${C_RESET}"
+            return 1
+        fi
+        cleanup_tailscale_table52_routes
+    fi
+
+    sed -i '/^EXIT_TS_IP=/d' /etc/default/bobarev-cascade 2>/dev/null || true
+    ensure_ipv4_precedence_and_host_dns 2>/dev/null || true
+    echo -e "${C_GREEN} ✔ Неработающий Exit Node отключен, таблица 52 очищена. Прямой интернет и DNS на сервере полностью работают!${C_RESET}"
+    return 1
+}
+
 change_cascade_tailscale_exit_node_interactive() {
     echo -e "${C_CYAN} === СМЕНА ВЫХОДНОГО СЕРВЕРА (MULLVAD / TAILSCALE EXIT NODE) БЕЗ СМЕНЫ КЛЮЧЕЙ VLESS ===${C_RESET}"
     local cur_exit=""
@@ -3885,7 +3944,7 @@ change_cascade_tailscale_exit_node_interactive() {
     write_xray_service
     safe_restart_systemd_service bobarev-xray.service
 
-    tailscale set --exit-node="$new_exit" --exit-node-allow-lan-access=true --accept-routes=true --accept-dns=false 2>/dev/null || true
+    cleanup_tailscale_table52_routes
 
     local wan_dev pub_ip pub_ip6
     wan_dev=$(get_wan_if)
@@ -3907,13 +3966,10 @@ change_cascade_tailscale_exit_node_interactive() {
     write_bobarev_cascade_ru_script
     /usr/local/bin/bobarev-cascade-ru.sh
 
-    local ts_out_ip=""
-    ts_out_ip=$(curl -4 -s --max-time 6 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-    [ -z "$ts_out_ip" ] && ts_out_ip=$(curl -s --max-time 6 https://[2606:4700:4700::1111]/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2; exit}' | tr -d '[:space:]' || true)
-
-    echo -e "${C_GREEN} ✔ Выходной сервер Tailscale успешно переключен на ${C_BOLD}${new_exit}${C_RESET}${C_GREEN}!${C_RESET}"
-    [ -n "$ts_out_ip" ] && echo -e "   Текущий внешний IP каскада: ${C_BOLD}${C_GREEN}${ts_out_ip}${C_RESET}"
-    echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними."
+    if verify_tailscale_exit_node_or_rollback "$new_exit" "$cur_exit" "$pub_ip"; then
+        echo -e "${C_GREEN} ✔ Выходной сервер Tailscale успешно переключен на ${C_BOLD}${new_exit}${C_RESET}${C_GREEN}!${C_RESET}"
+        echo -e "   Все клиентские ссылки VLESS-XHTTP в Shadowrocket остались прежними."
+    fi
 }
 
 apply_tailscale_p2p_transport_rules() {
@@ -4044,7 +4100,7 @@ manage_cascade_naive_ts_warp() {
                     while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
                     command -v nft &>/dev/null && nft delete table ip6 bobarev_ip6_opt 2>/dev/null || true
                     apply_tailscale_p2p_transport_rules "dualstack"
-                    silent_run tailscale set --exit-node=
+                    cleanup_tailscale_table52_routes
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
                     silent_run systemctl daemon-reload
                     echo -e "${C_GREEN} Службы каскада / шлюза остановлены, Exit Node отключен.${C_RESET}"

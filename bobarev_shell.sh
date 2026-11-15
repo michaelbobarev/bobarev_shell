@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.28 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.29 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN
 # и сетевого аудита. Включает небуферизованный ввод PEM-сертификатов,
 # разделение портов Nginx (443/2053) и Xray REALITY (8443) и фильтр P2P IPv4.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.28"
+SCRIPT_VERSION="3.20.29"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -2853,12 +2853,11 @@ try:
         chunk = os.read(fd, 4096).decode("utf-8", errors="ignore")
         if not chunk:
             break
-        if "" in chunk or "" in chunk:
+        if "\x03" in chunk or "\x1b" in chunk:
             sys.exit(2)
         buf.append(chunk)
         joined = "".join(buf)
         if end_re.search(joined):
-            # Дочитываем остаток буфера вставки (например, перевод строки)
             while True:
                 r, _, _ = select.select([fd], [], [], 0.12)
                 if not r:
@@ -2873,21 +2872,15 @@ finally:
     os.close(fd)
 
 print()
-raw = "".join(buf).replace("
-", "
-")
+raw = "".join(buf).replace("\r", "\n")
 m = extract_re.search(raw)
 if not m:
     sys.exit(1)
 
 header, body, footer = m.group(1).strip(), m.group(2), m.group(3).strip()
 b64_clean = re.sub(r"\s+", "", body)
-wrapped = "
-".join(textwrap.wrap(b64_clean, 64))
-pem_text = f"{header}
-{wrapped}
-{footer}
-"
+wrapped = "\n".join(textwrap.wrap(b64_clean, 64))
+pem_text = f"{header}\n{wrapped}\n{footer}\n"
 
 with open(out_file, "w", encoding="utf-8") as fh:
     fh.write(pem_text)
@@ -7423,8 +7416,8 @@ mod_user_setup() {
     for sfile in /etc/sudoers.d/*; do
         [ ! -f "$sfile" ] && continue
         [[ "$(basename "$sfile")" == "README" || "$sfile" == *.bak ]] && continue
-        if grep -qE "^[[:space:]]*$[[:space:]]+" "$sfile" 2>/dev/null; then
-            sed -i -E "/^[[:space:]]*$[[:space:]]+/d" "$sfile" 2>/dev/null || true
+        if grep -qE "^[[:space:]]*${username}[[:space:]]+" "$sfile" 2>/dev/null; then
+            sed -i -E "/^[[:space:]]*${username}[[:space:]]+/d" "$sfile" 2>/dev/null || true
             if ! grep -qE "^[[:space:]]*[^#[:space:]]" "$sfile" 2>/dev/null; then
                 rm -f "$sfile" 2>/dev/null || true
             fi

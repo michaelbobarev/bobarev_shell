@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.29 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.30 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN
 # и сетевого аудита. Включает небуферизованный ввод PEM-сертификатов,
 # разделение портов Nginx (443/2053) и Xray REALITY (8443) и фильтр P2P IPv4.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.29"
+SCRIPT_VERSION="3.20.30"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -2830,18 +2830,23 @@ if block_kind == "cert":
         r"(-----BEGIN\s+CERTIFICATE-----)(.*?)(-----END\s+CERTIFICATE-----)",
         re.DOTALL,
     )
+    default_hdr = "-----BEGIN CERTIFICATE-----"
+    default_ftr = "-----END CERTIFICATE-----"
 else:
     end_re = re.compile(r"-----END\s+[A-Z0-9\s]*PRIVATE\s+KEY-----")
     extract_re = re.compile(
         r"(-----BEGIN\s+[A-Z0-9\s]*PRIVATE\s+KEY-----)(.*?)(-----END\s+[A-Z0-9\s]*PRIVATE\s+KEY-----)",
         re.DOTALL,
     )
+    default_hdr = "-----BEGIN PRIVATE KEY-----"
+    default_ftr = "-----END PRIVATE KEY-----"
 
 fd = os.open("/dev/tty", os.O_RDWR)
 old_attr = termios.tcgetattr(fd)
 new_attr = termios.tcgetattr(fd)
-# Отключаем канонический буфер 1024 байт (ICANON), чтобы вставка в одну строку
-# или многострочный PEM любой длины срабатывала мгновенно без зависания Enter
+# Отключаем ICANON, но сохраняем ECHO, чтобы вставка любого объема не упиралась
+# в буфер 1024 байт и завершалась либо по END, либо по пустой строке Enter,
+# либо по Ctrl+D
 new_attr[3] = new_attr[3] & ~termios.ICANON
 new_attr[6][termios.VMIN] = 1
 new_attr[6][termios.VTIME] = 0
@@ -2855,11 +2860,14 @@ try:
             break
         if "\x03" in chunk or "\x1b" in chunk:
             sys.exit(2)
+        if "\x04" in chunk:
+            buf.append(chunk.replace("\x04", ""))
+            break
         buf.append(chunk)
-        joined = "".join(buf)
+        joined = "".join(buf).replace("\r\n", "\n").replace("\r", "\n")
         if end_re.search(joined):
             while True:
-                r, _, _ = select.select([fd], [], [], 0.12)
+                r, _, _ = select.select([fd], [], [], 0.15)
                 if not r:
                     break
                 extra = os.read(fd, 4096).decode("utf-8", errors="ignore")
@@ -2867,17 +2875,27 @@ try:
                     break
                 buf.append(extra)
             break
+        # Завершаем также по двойному Enter (пустой строке), если данные уже вставлены
+        if len(joined.strip()) >= 120 and (joined.endswith("\n\n") or (len(chunk) <= 2 and chunk in ("\n", "\r") and joined.rstrip(" \t") != joined and False)):
+            break
+        if len(joined.strip()) >= 120 and (joined.endswith("\n\n") or (chunk in ("\n", "\r") and "\n\n" in joined[-4:])):
+            break
 finally:
     termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
     os.close(fd)
 
 print()
-raw = "".join(buf).replace("\r", "\n")
+raw = "".join(buf).replace("\r\n", "\n").replace("\r", "\n")
 m = extract_re.search(raw)
-if not m:
-    sys.exit(1)
+if m:
+    header, body, footer = m.group(1).strip(), m.group(2), m.group(3).strip()
+else:
+    # Если пользователь вставил только Base64 без строк BEGIN/END — оборачиваем автоматически
+    b64_only = re.sub(r"[^A-Za-z0-9+/=]", "", raw)
+    if len(b64_only) < 120:
+        sys.exit(1)
+    header, body, footer = default_hdr, b64_only, default_ftr
 
-header, body, footer = m.group(1).strip(), m.group(2), m.group(3).strip()
 b64_clean = re.sub(r"\s+", "", body)
 wrapped = "\n".join(textwrap.wrap(b64_clean, 64))
 pem_text = f"{header}\n{wrapped}\n{footer}\n"
@@ -2893,30 +2911,59 @@ prompt_paste_cloudflare_origin_cert() {
     local crt_file="/etc/ssl/bobarev-cf-origin/${domain}.crt"
     local key_file="/etc/ssl/bobarev-cf-origin/${domain}.key"
 
+    local paste_mode=""
+    if ! smart_menu "Вставка сертификата Cloudflare Origin CA (${domain})" "
+Выберите удобный способ передачи сертификата и ключа на сервер:
+(В редакторе nano вставка больших текстов из буфера работает без ограничений терминала)" 17 "$WT_WIDTH" 2 "paste_mode" \
+        "1" " Вставить через редактор nano (Самый надежный способ — Ctrl+O, Enter, Ctrl+X)" \
+        "2" " Вставить прямо в консоль (Автозавершение по END или двойному Enter / Ctrl+D)"; then
+        return 1
+    fi
+
     echo -e "\n${C_CYAN} === ВСТАВКА СЕРТИФИКАТА CLOUDFLARE ORIGIN CA (ДЛЯ РЕЖИМА FULL STRICT) ===${C_RESET}"
     echo -e " Как выпустить бесплатный 15-летний сертификат в панели Cloudflare за 30 секунд:"
     echo -e "   1) Откройте панель домена в Cloudflare -> ${C_BOLD}SSL/TLS -> Origin Server${C_RESET}"
     echo -e "   2) Нажмите ${C_BOLD}Create Certificate${C_RESET} (оставьте PEM и 15 years) -> нажмите ${C_BOLD}Create${C_RESET}"
     echo -e "   3) Скопируйте верхнее окно (${C_GREEN}Origin Certificate${C_RESET}) и нижнее окно (${C_YELLOW}Private Key${C_RESET}).\n"
 
-    echo -e "${C_BOLD}Шаг 1/2. Вставьте содержимое Origin Certificate (от -----BEGIN CERTIFICATE----- до -----END CERTIFICATE-----):${C_RESET}"
-    echo -e "${C_BLUE}(Поддерживается многострочная и однострочная вставка; переход к Шагу 2 произойдет автоматически!):${C_RESET}"
-    if ! read_pem_block_noncanonical "$crt_file" "cert"; then
-        echo -e "${C_RED} Ошибка: сертификат не содержит корректный блок PEM (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----).${C_RESET}"
-        return 1
-    fi
+    if [ "$paste_mode" = "1" ]; then
+        : > "$crt_file"
+        echo -e "${C_BOLD}Шаг 1/2. Сейчас откроется nano для Origin Certificate (${crt_file}).${C_RESET}"
+        echo -e "${C_BLUE}Вставьте сертификат, затем нажмите Ctrl+O -> Enter -> Ctrl+X.${C_RESET}"
+        pause_enter
+        nano -w "$crt_file" </dev/tty >/dev/tty 2>&1 || return 1
 
-    if ! openssl x509 -in "$crt_file" -noout >/dev/null 2>&1; then
-        echo -e "${C_RED} Ошибка проверки сертификата через openssl x509! Проверьте скопированный текст.${C_RESET}"
-        return 1
-    fi
-    echo -e "${C_GREEN} ✔ Шаг 1/2 выполнен: Origin Certificate принят и проверен!${C_RESET}"
+        if ! openssl x509 -in "$crt_file" -noout >/dev/null 2>&1; then
+            echo -e "${C_RED} Ошибка проверки сертификата через openssl x509! Проверьте содержимое ${crt_file}.${C_RESET}"
+            return 1
+        fi
+        echo -e "${C_GREEN} ✔ Шаг 1/2 выполнен: Origin Certificate принят и проверен!${C_RESET}"
 
-    echo -e "\n${C_BOLD}Шаг 2/2. Вставьте содержимое Private Key (от -----BEGIN ... PRIVATE KEY----- до -----END ... PRIVATE KEY-----):${C_RESET}"
-    echo -e "${C_BLUE}(Вставьте приватный ключ — сохранение произойдет автоматически!):${C_RESET}"
-    if ! read_pem_block_noncanonical "$key_file" "key"; then
-        echo -e "${C_RED} Ошибка: приватный ключ не содержит корректный блок PEM (-----BEGIN ... PRIVATE KEY-----).${C_RESET}"
-        return 1
+        : > "$key_file"
+        echo -e "\n${C_BOLD}Шаг 2/2. Сейчас откроется nano для Private Key (${key_file}).${C_RESET}"
+        echo -e "${C_BLUE}Вставьте приватный ключ, затем нажмите Ctrl+O -> Enter -> Ctrl+X.${C_RESET}"
+        pause_enter
+        nano -w "$key_file" </dev/tty >/dev/tty 2>&1 || return 1
+    else
+        echo -e "${C_BOLD}Шаг 1/2. Вставьте Origin Certificate:${C_RESET}"
+        echo -e "${C_BLUE}(После вставки нажмите Enter два раза или Ctrl+D — заголовки BEGIN/END подхватятся автоматически):${C_RESET}"
+        if ! read_pem_block_noncanonical "$crt_file" "cert"; then
+            echo -e "${C_RED} Ошибка: сертификат не содержит корректный блок PEM (-----BEGIN CERTIFICATE-----).${C_RESET}"
+            return 1
+        fi
+
+        if ! openssl x509 -in "$crt_file" -noout >/dev/null 2>&1; then
+            echo -e "${C_RED} Ошибка проверки сертификата через openssl x509! Проверьте скопированный текст.${C_RESET}"
+            return 1
+        fi
+        echo -e "${C_GREEN} ✔ Шаг 1/2 выполнен: Origin Certificate принят и проверен!${C_RESET}"
+
+        echo -e "\n${C_BOLD}Шаг 2/2. Вставьте Private Key:${C_RESET}"
+        echo -e "${C_BLUE}(После вставки нажмите Enter два раза или Ctrl+D):${C_RESET}"
+        if ! read_pem_block_noncanonical "$key_file" "key"; then
+            echo -e "${C_RED} Ошибка: приватный ключ не содержит корректный блок PEM (-----BEGIN ... PRIVATE KEY-----).${C_RESET}"
+            return 1
+        fi
     fi
 
     chown root:root "$crt_file" "$key_file"

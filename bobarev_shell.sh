@@ -1,11 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.25 — модульная система настройки безопасности, Tailscale,
-# каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN и сетевого аудита.
-# Включает автопроверку Exit Node с защитой таблицы 52 и защиту от переноса строк.
+# Bobarev Shell v3.20.27 — универсальная система настройки безопасности,
+# Tailscale, каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN
+# и сетевого аудита. Включает фильтр nftables IPv4-Only P2P (41641/51820),
+# стартовое окно TCP 1 МБ, автозащиту таблицы 52 и защиту от переноса строк.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.25"
+SCRIPT_VERSION="3.20.27"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -713,12 +714,13 @@ apply_global_vless_to_active_xray() {
         local cf_dom="${CF_CDN_DOMAIN:-${XRAY_SNI:-}}"
         local cf_fmode="${CF_FRONT_MODE:-hybrid}"
         local cf_lport="${CF_LOCAL_XRAY_PORT:-10085}"
+        local cf_dport="${CF_DIRECT_REALITY_PORT:-8443}"
         local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
         [ "$out_m" = "mullvad_ts" ] && out_m="tailscale_exit"
         if [ -n "$cf_dom" ]; then
-            setup_nginx_cloudflare_xhttp_frontend "$cf_dom" "$XRAY_XHTTP_PATH" "$cf_lport" "$cf_fmode" "${XRAY_PORT:-443}" || true
+            setup_nginx_cloudflare_xhttp_frontend "$cf_dom" "$XRAY_XHTTP_PATH" "$cf_lport" "$cf_fmode" "443" "false" || true
         fi
-        render_xray_cloudflare_cdn_config "$XRAY_PORT" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$out_m" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_lport"
+        render_xray_cloudflare_cdn_config "$cf_dport" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$out_m" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_lport"
     else
         local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
         [ "$out_m" = "mullvad_ts" ] && out_m="tailscale_exit"
@@ -902,7 +904,7 @@ net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 1
 net.ipv4.tcp_early_retrans = 3
-net.ipv4.tcp_reordering = 30
+net.ipv4.tcp_reordering = 60
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
@@ -920,8 +922,8 @@ net.ipv4.tcp_mem = 131072 262144 524288
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 262144 16777216
-net.ipv4.tcp_wmem = 4096 262144 16777216
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_max_tw_buckets = 2000000
@@ -950,7 +952,7 @@ net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_autocorking = 0
 net.ipv4.tcp_thin_linear_timeouts = 0
 net.ipv4.tcp_early_retrans = 3
-net.ipv4.tcp_reordering = 30
+net.ipv4.tcp_reordering = 60
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_window_scaling = 1
@@ -968,8 +970,8 @@ net.ipv4.tcp_mem = 131072 262144 524288
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 131072
 net.ipv4.udp_wmem_min = 131072
-net.ipv4.tcp_rmem = 4096 262144 16777216
-net.ipv4.tcp_wmem = 4096 262144 16777216
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_max_tw_buckets = 2000000
@@ -1155,8 +1157,9 @@ else
     sysctl -w net.core.rmem_default=8388608 >/dev/null 2>&1 || true
     sysctl -w net.core.wmem_default=8388608 >/dev/null 2>&1 || true
     sysctl -w net.core.netdev_max_backlog=30000 >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_rmem="4096 262144 16777216" >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_wmem="4096 262144 16777216" >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_rmem="4096 1048576 16777216" >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_wmem="4096 1048576 16777216" >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_reordering=60 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_adv_win_scale=2 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1 || true
@@ -1218,22 +1221,52 @@ for m_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
     fi
 done
 
-# Управление транспортом P2P Tailscale (41641/udp): Dual-Stack
-# (IPv4+IPv6), Только IPv4 или Только IPv6
-while iptables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
-while iptables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
-if command -v ip6tables &>/dev/null; then
-    while ip6tables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
-    while ip6tables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
-fi
-if [ "${TS_TRANSPORT_MODE:-dualstack}" = "ipv4_only" ]; then
+# Управление транспортом P2P Tailscale / Mullvad (41641/udp и 51820/udp):
+# Dual-Stack (IPv4+IPv6), Только IPv4 или Только IPv6
+for p_udp in 41641 51820; do
+    while iptables -D OUTPUT -p udp --dport "$p_udp" -j REJECT 2>/dev/null; do :; done
+    while iptables -D OUTPUT -p udp --sport "$p_udp" -j REJECT 2>/dev/null; do :; done
+    while iptables -D INPUT -p udp --dport "$p_udp" -j DROP 2>/dev/null; do :; done
+    while iptables -D INPUT -p udp --sport "$p_udp" -j DROP 2>/dev/null; do :; done
     if command -v ip6tables &>/dev/null; then
-        ip6tables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
-        ip6tables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
+        while ip6tables -D OUTPUT -p udp --dport "$p_udp" -j REJECT 2>/dev/null; do :; done
+        while ip6tables -D OUTPUT -p udp --sport "$p_udp" -j REJECT 2>/dev/null; do :; done
+        while ip6tables -D INPUT -p udp --dport "$p_udp" -j DROP 2>/dev/null; do :; done
+        while ip6tables -D INPUT -p udp --sport "$p_udp" -j DROP 2>/dev/null; do :; done
     fi
-elif [ "${TS_TRANSPORT_MODE:-dualstack}" = "ipv6_only" ]; then
-    iptables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
-    iptables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
+done
+command -v nft &>/dev/null && nft delete table ip6 bobarev_p2p_v4only 2>/dev/null || true
+if [ "${TS_TRANSPORT_MODE:-ipv4_only}" = "ipv4_only" ]; then
+    if command -v nft &>/dev/null; then
+        nft -f - 2>/dev/null << 'NFT_P2P_V4_EOF' || true
+table ip6 bobarev_p2p_v4only {
+    chain ts_v4_force_in {
+        type filter hook input priority filter - 5; policy accept;
+        udp sport { 41641, 51820 } drop
+        udp dport { 41641, 51820 } drop
+    }
+    chain ts_v4_force_out {
+        type filter hook output priority filter - 5; policy accept;
+        udp sport { 41641, 51820 } reject
+        udp dport { 41641, 51820 } reject
+    }
+}
+NFT_P2P_V4_EOF
+    elif command -v ip6tables &>/dev/null; then
+        for p_udp in 41641 51820; do
+            ip6tables -I OUTPUT 1 -p udp --dport "$p_udp" -j REJECT 2>/dev/null || true
+            ip6tables -I OUTPUT 1 -p udp --sport "$p_udp" -j REJECT 2>/dev/null || true
+            ip6tables -I INPUT 1 -p udp --dport "$p_udp" -j DROP 2>/dev/null || true
+            ip6tables -I INPUT 1 -p udp --sport "$p_udp" -j DROP 2>/dev/null || true
+        done
+    fi
+elif [ "${TS_TRANSPORT_MODE:-ipv4_only}" = "ipv6_only" ]; then
+    for p_udp in 41641 51820; do
+        iptables -I OUTPUT 1 -p udp --dport "$p_udp" -j REJECT 2>/dev/null || true
+        iptables -I OUTPUT 1 -p udp --sport "$p_udp" -j REJECT 2>/dev/null || true
+        iptables -I INPUT 1 -p udp --dport "$p_udp" -j DROP 2>/dev/null || true
+        iptables -I INPUT 1 -p udp --sport "$p_udp" -j DROP 2>/dev/null || true
+    done
 fi
 
 if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
@@ -1252,6 +1285,11 @@ if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+    # Очищаем дублирующиеся правила ip6tables nat POSTROUTING при работе
+    # нативной таблицы nftables bobarev_ip6_opt
+    if command -v ip6tables &>/dev/null && command -v nft &>/dev/null; then
+        ip6tables -t nat -F POSTROUTING 2>/dev/null || true
+    fi
     # Симметричный двусторонний TCPMSS 1220 (PREROUTING + FORWARD +
     # POSTROUTING для MTU 1280)
     iptables -t mangle -I PREROUTING 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
@@ -2749,18 +2787,97 @@ setup_standalone_naive_masque() {
 
 # ==============================================================================
 # СЦЕНАРИЙ 2 -> 5: ЗАРУБЕЖНЫЙ VPS ЗА CLOUDFLARE CDN (ОРАНЖЕВОЕ ОБЛАКО)
-# VLESS-XHTTP + NGINX SELF-STEAL (TLS 1.3 / H2) -> ЧИСТЫЙ IP / MASQUE / WG0
+# VLESS-XHTTP + NGINX SELF-STEAL (TLS 1.3 / H2 / grpc_pass) -> DIRECT /
+# MASQUE / WG0
 # ==============================================================================
 CF_ACTIVE_SSL_CERT=""
 CF_ACTIVE_SSL_KEY=""
-CF_ACTIVE_CERT_MODE="letsencrypt"
+CF_ACTIVE_CERT_MODE="origin_ca"
+
+open_cloudflare_cdn_ufw_ports() {
+    local extra_port="${1:-8443}"
+    if command -v ufw >/dev/null 2>&1; then
+        echo -e "${C_BLUE} Открытие портов Cloudflare CDN (80/tcp, 443/tcp, 2053/tcp, ${extra_port}/tcp) в UFW...${C_RESET}"
+        ufw allow 80/tcp comment 'Cloudflare ACME HTTP-01' >/dev/null 2>&1 || true
+        ufw allow 443/tcp comment 'Cloudflare HTTPS VLESS-XHTTP' >/dev/null 2>&1 || true
+        ufw allow 2053/tcp comment 'Cloudflare Alt HTTPS' >/dev/null 2>&1 || true
+        if [ -n "$extra_port" ] && [ "$extra_port" != "443" ] && [ "$extra_port" != "2053" ]; then
+            ufw allow "${extra_port}/tcp" comment 'VLESS Direct REALITY' >/dev/null 2>&1 || true
+        fi
+        ufw reload >/dev/null 2>&1 || true
+        echo -e "${C_GREEN} ✔ Порты 80/tcp, 443/tcp, 2053/tcp и ${extra_port}/tcp открыты в UFW.${C_RESET}"
+    fi
+}
+
+prompt_paste_cloudflare_origin_cert() {
+    local domain="$1"
+    mkdir -p /etc/ssl/bobarev-cf-origin
+    local crt_file="/etc/ssl/bobarev-cf-origin/${domain}.crt"
+    local key_file="/etc/ssl/bobarev-cf-origin/${domain}.key"
+
+    echo -e "\n${C_CYAN} === ВСТАВКА СЕРТИФИКАТА CLOUDFLARE ORIGIN CA (ДЛЯ РЕЖИМА FULL STRICT) ===${C_RESET}"
+    echo -e " Как выпустить бесплатный 15-летний сертификат в панели Cloudflare за 30 секунд:"
+    echo -e "   1) Откройте панель домена в Cloudflare -> ${C_BOLD}SSL/TLS -> Origin Server${C_RESET}"
+    echo -e "   2) Нажмите ${C_BOLD}Create Certificate${C_RESET} (оставьте PEM и 15 years) -> нажмите ${C_BOLD}Create${C_RESET}"
+    echo -e "   3) Скопируйте верхнее окно (${C_GREEN}Origin Certificate${C_RESET}) и нижнее окно (${C_YELLOW}Private Key${C_RESET}).\n"
+
+    echo -e "${C_BOLD}Шаг 1/2. Вставьте содержимое Origin Certificate (от -----BEGIN CERTIFICATE----- до -----END CERTIFICATE-----):${C_RESET}"
+    echo -e "${C_BLUE}(После вставки последней строки -----END CERTIFICATE----- нажмите Enter):${C_RESET}"
+    local line cert_buf=""
+    while IFS= read -r line; do
+        cert_buf="${cert_buf}${line}"$'\n'
+        if [[ "$line" == *"-----END CERTIFICATE-----"* ]]; then
+            break
+        fi
+    done
+
+    if [[ "$cert_buf" != *"-----BEGIN CERTIFICATE-----"* ]] || [[ "$cert_buf" != *"-----END CERTIFICATE-----"* ]]; then
+        echo -e "${C_RED} Ошибка: сертификат не содержит корректный блок PEM (-----BEGIN CERTIFICATE-----).${C_RESET}"
+        return 1
+    fi
+
+    echo -e "\n${C_BOLD}Шаг 2/2. Вставьте содержимое Private Key (от -----BEGIN ... PRIVATE KEY----- до -----END ... PRIVATE KEY-----):${C_RESET}"
+    echo -e "${C_BLUE}(После вставки последней строки -----END ... PRIVATE KEY----- нажмите Enter):${C_RESET}"
+    local key_buf=""
+    while IFS= read -r line; do
+        key_buf="${key_buf}${line}"$'\n'
+        if [[ "$line" == *"-----END"*"PRIVATE KEY-----"* ]]; then
+            break
+        fi
+    done
+
+    if [[ "$key_buf" != *"-----BEGIN"*"PRIVATE KEY-----"* ]] || [[ "$key_buf" != *"-----END"*"PRIVATE KEY-----"* ]]; then
+        echo -e "${C_RED} Ошибка: приватный ключ не содержит корректный блок PEM (-----BEGIN ... PRIVATE KEY-----).${C_RESET}"
+        return 1
+    fi
+
+    printf '%s' "$cert_buf" > "$crt_file"
+    printf '%s' "$key_buf" > "$key_file"
+    chown root:root "$crt_file" "$key_file"
+    chmod 644 "$crt_file"
+    chmod 600 "$key_file"
+
+    if ! openssl x509 -in "$crt_file" -noout >/dev/null 2>&1; then
+        echo -e "${C_RED} Ошибка проверки сертификата через openssl x509! Проверьте скопированный текст.${C_RESET}"
+        return 1
+    fi
+    if ! openssl pkey -in "$key_file" -noout >/dev/null 2>&1; then
+        echo -e "${C_RED} Ошибка проверки приватного ключа через openssl pkey! Проверьте скопированный текст.${C_RESET}"
+        return 1
+    fi
+
+    local cert_info=""
+    cert_info=$(openssl x509 -in "$crt_file" -noout -issuer -dates 2>/dev/null | tr '\n' ' ' || true)
+    echo -e "${C_GREEN} ✔ Сертификат и приватный ключ сохранены и проверены! (${cert_info})${C_RESET}"
+    return 0
+}
 
 ensure_cloudflare_tls_cert() {
     local domain="$1"
-    local force_renew="${2:-false}"
+    local interactive_prompt="${2:-true}"
     CF_ACTIVE_SSL_CERT=""
     CF_ACTIVE_SSL_KEY=""
-    CF_ACTIVE_CERT_MODE="letsencrypt"
+    CF_ACTIVE_CERT_MODE="origin_ca"
 
     if ! command -v nginx >/dev/null 2>&1 || ! command -v certbot >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
         echo -e "${C_BLUE} Установка nginx, certbot и openssl...${C_RESET}"
@@ -2770,59 +2887,138 @@ ensure_cloudflare_tls_cert() {
         }
     fi
 
-    if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -qw "active"; then
-        silent_run ufw allow 80/tcp comment 'Cloudflare ACME HTTP-01'
-        silent_run ufw allow 443/tcp comment 'Cloudflare HTTPS VLESS-XHTTP'
-        silent_run ufw allow 2053/tcp comment 'Cloudflare Alt HTTPS 2053'
-    fi
+    open_cloudflare_cdn_ufw_ports "8443"
 
-    mkdir -p /var/www/selfsteal/.well-known/acme-challenge
+    mkdir -p /var/www/selfsteal/.well-known/acme-challenge /etc/ssl/bobarev-cf-origin
     local le_dir="/etc/letsencrypt/live/${domain}"
+    local orig_crt="/etc/ssl/bobarev-cf-origin/${domain}.crt"
+    local orig_key="/etc/ssl/bobarev-cf-origin/${domain}.key"
 
-    if [ "$force_renew" = "true" ] || [ ! -f "${le_dir}/fullchain.pem" ] || [ ! -f "${le_dir}/privkey.pem" ]; then
-        echo -e "${C_BLUE} Попытка выпуска/обновления сертификата Let's Encrypt для домена ${C_BOLD}${domain}${C_RESET}${C_BLUE}...${C_RESET}"
-        local cert_ok=false
-        if ss -tulpn 2>/dev/null | grep -qE ':80\b'; then
-            if certbot certonly --webroot -w /var/www/selfsteal -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email $([ "$force_renew" = "true" ] && echo "--force-renewal") >/dev/null 2>&1; then
-                cert_ok=true
-            fi
+    local existing_desc="" existing_type=""
+    if [ -s "$orig_crt" ] && [ -s "$orig_key" ] && openssl x509 -in "$orig_crt" -noout >/dev/null 2>&1; then
+        local iss=""
+        iss=$(openssl x509 -in "$orig_crt" -noout -issuer 2>/dev/null || true)
+        if [[ "$iss" == *"CloudFlare"* ]] || [[ "$iss" == *"Cloudflare"* ]]; then
+            existing_desc="Cloudflare Origin CA (${orig_crt} — подходит для Full Strict!)"
+            existing_type="origin_ca"
         else
-            if certbot certonly --standalone -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email $([ "$force_renew" = "true" ] && echo "--force-renewal") >/dev/null 2>&1; then
-                cert_ok=true
+            existing_desc="Локальный сертификат (${orig_crt} — для режима Full)"
+            existing_type="origin_selfsigned"
+        fi
+    elif [ -s "${le_dir}/fullchain.pem" ] && [ -s "${le_dir}/privkey.pem" ]; then
+        existing_desc="Let's Encrypt (${le_dir}/fullchain.pem — подходит для Full Strict!)"
+        existing_type="letsencrypt"
+    fi
+
+    if [ "$interactive_prompt" = "false" ] && [ -n "$existing_type" ]; then
+        if [ "$existing_type" = "letsencrypt" ]; then
+            CF_ACTIVE_SSL_CERT="${le_dir}/fullchain.pem"
+            CF_ACTIVE_SSL_KEY="${le_dir}/privkey.pem"
+        else
+            CF_ACTIVE_SSL_CERT="$orig_crt"
+            CF_ACTIVE_SSL_KEY="$orig_key"
+        fi
+        CF_ACTIVE_CERT_MODE="$existing_type"
+        return 0
+    fi
+
+    local cert_choice=""
+    if [ -n "$existing_desc" ]; then
+        if ! smart_menu "TLS-сертификат для Cloudflare CDN (${domain})" "
+Обнаружен существующий сертификат:
+${existing_desc}
+
+Выберите способ настройки TLS-сертификата (для режима Full Strict в Cloudflare используйте пункт 1, 2 или 3):" 20 "$WT_WIDTH" 4 "cert_choice" \
+            "1" " Использовать уже установленный сертификат (${existing_type})" \
+            "2" " Вставить сертификат и приватный ключ Cloudflare Origin CA (для Full Strict)" \
+            "3" " Выпустить бесплатный Let's Encrypt через certbot (оранжевое облачко выкл)" \
+            "4" " Сгенерировать самоподписанный сертификат ECDSA P-256 (для режима Full)"; then
+            return 1
+        fi
+    else
+        if ! smart_menu "TLS-сертификат для Cloudflare CDN (${domain})" "
+Для работы с режимом шифрования Full (Strict) в Cloudflare при включенном оранжевом облачке рекомендуется вставить бесплатный 15-летний сертификат Cloudflare Origin CA:
+
+Выберите способ настройки TLS-сертификата:" 19 "$WT_WIDTH" 3 "cert_choice" \
+            "2" " Вставить сертификат и приватный ключ Cloudflare Origin CA (Рекомендуется для Full Strict)" \
+            "3" " Выпустить бесплатный Let's Encrypt через certbot (если оранжевое облачко пока серое)" \
+            "4" " Сгенерировать самоподписанный сертификат ECDSA P-256 (для режима SSL/TLS = Full)"; then
+            return 1
+        fi
+    fi
+
+    case "$cert_choice" in
+        1)
+            if [ "$existing_type" = "letsencrypt" ]; then
+                CF_ACTIVE_SSL_CERT="${le_dir}/fullchain.pem"
+                CF_ACTIVE_SSL_KEY="${le_dir}/privkey.pem"
+            else
+                CF_ACTIVE_SSL_CERT="$orig_crt"
+                CF_ACTIVE_SSL_KEY="$orig_key"
             fi
-        fi
-        if [ "$cert_ok" = false ] && [ ! -f "${le_dir}/fullchain.pem" ]; then
-            echo -e "${C_YELLOW} ⚠ Let's Encrypt HTTP-01 не прошел (возможно, в Cloudflare уже включено 'Оранжевое облачко' с редиректом на HTTPS).${C_RESET}"
-            echo -e "${C_BLUE} Генерация 10-летнего Origin TLS-сертификата ECDSA P-256 для работы с Cloudflare (режим SSL/TLS: Full)...${C_RESET}"
-            mkdir -p /etc/ssl/bobarev-cf-origin
-            openssl ecparam -name prime256v1 -genkey -noout -out "/etc/ssl/bobarev-cf-origin/${domain}.key" 2>/dev/null
-            openssl req -new -x509 -days 3650 -key "/etc/ssl/bobarev-cf-origin/${domain}.key" \
-                -out "/etc/ssl/bobarev-cf-origin/${domain}.crt" \
-                -subj "/CN=${domain}" \
-                -addext "subjectAltName=DNS:${domain},DNS:*.${domain}" 2>/dev/null || \
-            openssl req -new -x509 -days 3650 -key "/etc/ssl/bobarev-cf-origin/${domain}.key" \
-                -out "/etc/ssl/bobarev-cf-origin/${domain}.crt" \
-                -subj "/CN=${domain}" 2>/dev/null
-            chmod 600 "/etc/ssl/bobarev-cf-origin/${domain}.key"
-        fi
-    fi
+            CF_ACTIVE_CERT_MODE="$existing_type"
+            echo -e "${C_GREEN} ✔ Используется установленный сертификат: ${existing_desc}${C_RESET}"
+            return 0
+            ;;
+        2)
+            if prompt_paste_cloudflare_origin_cert "$domain"; then
+                CF_ACTIVE_SSL_CERT="$orig_crt"
+                CF_ACTIVE_SSL_KEY="$orig_key"
+                CF_ACTIVE_CERT_MODE="origin_ca"
+                return 0
+            else
+                return 1
+            fi
+            ;;
+        3)
+            echo -e "${C_BLUE} Выпуск сертификата Let's Encrypt для домена ${C_BOLD}${domain}${C_RESET}${C_BLUE}...${C_RESET}"
+            silent_run systemctl stop caddy.service 2>/dev/null || true
+            local cert_ok=false
+            if ss -tulpn 2>/dev/null | grep -qE ':80\b'; then
+                if certbot certonly --webroot -w /var/www/selfsteal -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email >/dev/null 2>&1; then
+                    cert_ok=true
+                fi
+            else
+                if certbot certonly --standalone -d "${domain}" --non-interactive --agree-tos --register-unsafely-without-email >/dev/null 2>&1; then
+                    cert_ok=true
+                fi
+            fi
+            if [ "$cert_ok" = true ] && [ -s "${le_dir}/fullchain.pem" ] && [ -s "${le_dir}/privkey.pem" ]; then
+                CF_ACTIVE_SSL_CERT="${le_dir}/fullchain.pem"
+                CF_ACTIVE_SSL_KEY="${le_dir}/privkey.pem"
+                CF_ACTIVE_CERT_MODE="letsencrypt"
+                echo -e "${C_GREEN} ✔ Сертификат Let's Encrypt успешно выпущен (подходит для Cloudflare Full Strict).${C_RESET}"
+                return 0
+            fi
+            echo -e "${C_YELLOW} ⚠ Let's Encrypt HTTP-01 не прошел (скорее всего, в Cloudflare уже включено Оранжевое облачко).${C_RESET}"
+            if prompt_yn "Желаете вставить сертификат Cloudflare Origin CA для режима Full Strict (Да) или сгенерировать самоподписанный сертификат для режима Full (Нет)?" "true"; then
+                if prompt_paste_cloudflare_origin_cert "$domain"; then
+                    CF_ACTIVE_SSL_CERT="$orig_crt"
+                    CF_ACTIVE_SSL_KEY="$orig_key"
+                    CF_ACTIVE_CERT_MODE="origin_ca"
+                    return 0
+                fi
+            fi
+            ;;
+    esac
 
-    if [ -f "${le_dir}/fullchain.pem" ] && [ -f "${le_dir}/privkey.pem" ]; then
-        CF_ACTIVE_SSL_CERT="${le_dir}/fullchain.pem"
-        CF_ACTIVE_SSL_KEY="${le_dir}/privkey.pem"
-        CF_ACTIVE_CERT_MODE="letsencrypt"
-        echo -e "${C_GREEN} ✔ Активен официальный сертификат Let's Encrypt для ${domain} (подходит для Cloudflare SSL/TLS = Full Strict).${C_RESET}"
-        return 0
-    elif [ -f "/etc/ssl/bobarev-cf-origin/${domain}.crt" ] && [ -f "/etc/ssl/bobarev-cf-origin/${domain}.key" ]; then
-        CF_ACTIVE_SSL_CERT="/etc/ssl/bobarev-cf-origin/${domain}.crt"
-        CF_ACTIVE_SSL_KEY="/etc/ssl/bobarev-cf-origin/${domain}.key"
-        CF_ACTIVE_CERT_MODE="origin_selfsigned"
-        echo -e "${C_GREEN} ✔ Активен Origin-сертификат ECDSA P-256 для ${domain} (в панели Cloudflare выставьте SSL/TLS = Full).${C_RESET}"
-        return 0
-    fi
-
-    echo -e "${C_RED} Ошибка: не удалось подготовить TLS-сертификат для ${domain}.${C_RESET}"
-    return 1
+    echo -e "${C_BLUE} Генерация 10-летнего самоподписанного TLS-сертификата ECDSA P-256 (для режима Cloudflare SSL/TLS = Full)...${C_RESET}"
+    openssl ecparam -name prime256v1 -genkey -noout -out "$orig_key" 2>/dev/null
+    openssl req -new -x509 -days 3650 -key "$orig_key" \
+        -out "$orig_crt" \
+        -subj "/CN=${domain}" \
+        -addext "subjectAltName=DNS:${domain},DNS:*.${domain}" 2>/dev/null || \
+    openssl req -new -x509 -days 3650 -key "$orig_key" \
+        -out "$orig_crt" \
+        -subj "/CN=${domain}" 2>/dev/null
+    chown root:root "$orig_crt" "$orig_key"
+    chmod 644 "$orig_crt"
+    chmod 600 "$orig_key"
+    CF_ACTIVE_SSL_CERT="$orig_crt"
+    CF_ACTIVE_SSL_KEY="$orig_key"
+    CF_ACTIVE_CERT_MODE="origin_selfsigned"
+    echo -e "${C_GREEN} ✔ Самоподписанный сертификат создан (в панели Cloudflare выберите SSL/TLS = Full, иначе с Full Strict будет ошибка 526).${C_RESET}"
+    return 0
 }
 
 setup_nginx_cloudflare_xhttp_frontend() {
@@ -2831,16 +3027,26 @@ setup_nginx_cloudflare_xhttp_frontend() {
     local local_xray_port="${3:-10085}"
     local front_mode="${4:-hybrid}"
     local https_port="${5:-443}"
+    local prompt_cert="${6:-false}"
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
+    x_path="${x_path%/}"
 
-    ensure_cloudflare_tls_cert "$domain" "false" || return 1
+    ensure_cloudflare_tls_cert "$domain" "$prompt_cert" || return 1
+
+    # Освобождаем порты 80 и 443 от старого caddy (если он остался от прежних
+    # сборок)
+    if systemctl is-active --quiet caddy.service 2>/dev/null || ss -tulpn 2>/dev/null | grep -qE ':(80|443)\b.*"caddy"'; then
+        echo -e "${C_BLUE} Остановка фонового сервиса caddy для освобождения порта 443 под Nginx...${C_RESET}"
+        silent_run systemctl stop caddy.service 2>/dev/null || true
+        silent_run systemctl disable caddy.service 2>/dev/null || true
+    fi
 
     mkdir -p /var/www/selfsteal/.well-known/acme-challenge
     cat > /var/www/selfsteal/index.html <<HTML
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${domain}</title>
-<style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:#e2e8f0}.card{padding:2rem 2.5rem;border-radius:12px;background:#1e23b;box-shadow:0 10px 25px rgba(0,0,0,.4);text-align:center}h1{margin:0 0 .5rem;font-size:1.4rem}p{margin:0;color:#94a3b8;font-size:.95rem}</style>
+<style>body{font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:#e2e8f0}.card{padding:2rem 2.5rem;border-radius:12px;background:#1e293b;box-shadow:0 10px 25px rgba(0,0,0,.4);text-align:center}h1{margin:0 0 .5rem;font-size:1.4rem}p{margin:0;color:#94a3b8;font-size:.95rem}</style>
 </head>
 <body><div class="card"><h1>${domain}</h1><p>Cloudflare Edge Static Content Node — Active (TLS 1.3 / HTTP/2)</p></div></body>
 </html>
@@ -2849,19 +3055,10 @@ HTML
     sed -i -E 's/^[[:space:]]*listen[[:space:]]+(\[::\]:)?443/# listen 443/g' /etc/nginx/sites-enabled/* 2>/dev/null || true
     sed -i -E 's/^[[:space:]]*listen[[:space:]]+(\[::\]:)?80/# listen 80/g' /etc/nginx/sites-enabled/* 2>/dev/null || true
 
-    local listen_directives=""
-    if [ "$front_mode" = "cdn_only" ]; then
-        listen_directives="    listen 0.0.0.0:${https_port} ssl http2;
-    listen [::]:${https_port} ssl http2;
-    listen 0.0.0.0:2053 ssl http2;
-    listen [::]:2053 ssl http2;
-    listen 127.0.0.1:8443 ssl http2;"
-    else
-        listen_directives="    listen 127.0.0.1:8443 ssl http2;
-    listen 0.0.0.0:2053 ssl http2;
-    listen [::]:2053 ssl http2;"
-    fi
-
+    # Nginx всегда слушает напрямую 443 и 2053 (чтобы Cloudflare работал и на
+    # стандартном 443 без Origin Rules, и с Origin Rule 2053!),
+    # а проксирование в Xray XHTTP выполняется через grpc_pass (HTTP/2 h2c)
+    # согласно официальной документации Xray-core (#4113, #7180).
     cat > /etc/nginx/conf.d/xray-selfsteal.conf <<NGINX
 server {
     listen 0.0.0.0:80;
@@ -2882,7 +3079,11 @@ server {
 }
 
 server {
-${listen_directives}
+    listen 0.0.0.0:${https_port} ssl http2;
+    listen [::]:${https_port} ssl http2;
+    listen 0.0.0.0:2053 ssl http2;
+    listen [::]:2053 ssl http2;
+    listen 127.0.0.1:8443 ssl http2;
     server_name ${domain};
 
     ssl_certificate ${CF_ACTIVE_SSL_CERT};
@@ -2896,20 +3097,16 @@ ${listen_directives}
     index index.html;
 
     location ^~ ${x_path} {
-        proxy_pass http://127.0.0.1:${local_xray_port};
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$http_cf_connecting_ip;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-        proxy_request_buffering off;
+        grpc_pass grpc://127.0.0.1:${local_xray_port};
+        grpc_set_header Host \$host;
+        grpc_set_header X-Real-IP \$remote_addr;
+        grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        grpc_read_timeout 3600s;
+        grpc_send_timeout 3600s;
+        grpc_buffer_size 16k;
+        grpc_socket_keepalive on;
         client_max_body_size 0;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-        keepalive_timeout 3600s;
-        tcp_nodelay on;
+        client_body_timeout 3600s;
     }
 
     location ^~ /.well-known/acme-challenge/ {
@@ -2930,19 +3127,21 @@ LimitNOFILE=512000
 NGINX_LIM
     systemctl daemon-reload >/dev/null 2>&1 || true
     if nginx -t >/dev/null 2>&1; then
-        systemctl enable --now nginx >/dev/null 2>&1
-        systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1
-        echo -e "${C_GREEN} ✔ Nginx Self-Steal + XHTTP Reverse Proxy запущен для домена ${C_BOLD}${domain}${C_RESET}${C_GREEN} (Path: ${x_path} -> 127.0.0.1:${local_xray_port}).${C_RESET}"
-        return 0
-    else
-        echo -e "${C_RED} Ошибка проверки конфигурации nginx (/etc/nginx/conf.d/xray-selfsteal.conf):${C_RESET}"
-        nginx -t || true
-        return 1
+        systemctl enable --now nginx >/dev/null 2>&1 || true
+        systemctl restart nginx >/dev/null 2>&1 || systemctl reload nginx >/dev/null 2>&1 || true
+        if systemctl is-active --quiet nginx.service; then
+            echo -e "${C_GREEN} ✔ Nginx Self-Steal + XHTTP (grpc_pass h2c) запущен на портах 443 и 2053 для ${C_BOLD}${domain}${C_RESET}${C_GREEN} (Path: ${x_path} -> 127.0.0.1:${local_xray_port}).${C_RESET}"
+            return 0
+        fi
     fi
+    echo -e "${C_RED} Ошибка запуска или проверки конфигурации nginx (/etc/nginx/conf.d/xray-selfsteal.conf):${C_RESET}"
+    nginx -t || true
+    systemctl status nginx --no-pager -n 10 || true
+    return 1
 }
 
 render_xray_cloudflare_cdn_config() {
-    local x_port="${1:-443}"
+    local x_port="${1:-8443}"
     local x_uuid="$2"
     local x_priv="$3"
     local x_short_id="$4"
@@ -2952,243 +3151,183 @@ render_xray_cloudflare_cdn_config() {
     local front_mode="${8:-hybrid}"
     local local_xray_port="${9:-10085}"
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
+    x_path="${x_path%/}"
 
-    mkdir -p /etc/xray
-
-    local hybrid_reality_inbound=""
-    if [ "$front_mode" = "hybrid" ]; then
-        hybrid_reality_inbound="{
-      "tag": "vless-xhttp-in",
-      "port": ${x_port},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${x_uuid}"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "reality",
-        "xhttpSettings": {
-          "path": "${x_path}",
-          "mode": "auto"
-        },
-        "realitySettings": {
-          "show": false,
-          "dest": "127.0.0.1:8443",
-          "xver": 0,
-          "serverNames": [
-            "${cf_domain}"
-          ],
-          "privateKey": "${x_priv}",
-          "shortIds": [
-            "${x_short_id}",
-            ""
-          ]
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    },"
+    # В гибридном режиме порты 443 и 2053 заняты Nginx TLS для Cloudflare CDN,
+    # поэтому прямой вход VLESS-XHTTP + REALITY (по IP сервера мимо
+    # Cloudflare) работает на порту 8443
+    local direct_reality_port="$x_port"
+    if [ "$direct_reality_port" = "443" ] || [ "$direct_reality_port" = "2053" ] || [ -z "$direct_reality_port" ]; then
+        direct_reality_port="8443"
     fi
 
-    if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
-        cat << EOF > /etc/xray/config.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    ${hybrid_reality_inbound}
-    {
-      "tag": "vless-xhttp-cf-in",
-      "listen": "127.0.0.1",
-      "port": ${local_xray_port},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${x_uuid}"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "none",
-        "xhttpSettings": {
-          "path": "${x_path}",
-          "mode": "auto"
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    },
-    {
-      "tag": "local-test-in",
-      "listen": "127.0.0.1",
-      "port": 10808,
-      "protocol": "socks",
-      "settings": {
-        "auth": "noauth",
-        "udp": true
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "masque-out",
-      "protocol": "freedom",
-      "streamSettings": {
-        "sockopt": {
-          "dialerProxy": "usque-raw",
-          "domainStrategy": "UseIPv4",
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "usque-raw",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "127.0.0.1",
-            "port": 1080
-          }
-        ]
-      },
-      "streamSettings": {
-        "sockopt": {
-          "tcpNoDelay": true
-        }
-      }
-    },
-    {
-      "tag": "direct-udp",
-      "protocol": "freedom",
-      "streamSettings": {
-        "sockopt": {
-          "domainStrategy": "UseIPv4v6"
-        }
-      }
-    }
-  ],
-  "routing": {
-    "domainStrategy": "AsIs",
-    "rules": [
-      {
-        "type": "field",
-        "network": "udp",
-        "outboundTag": "direct-udp"
-      },
-      {
-        "type": "field",
-        "network": "tcp",
-        "outboundTag": "masque-out"
-      }
-    ]
-  }
-}
-EOF
-        chmod 600 /etc/xray/config.json
-        return 0
-    fi
-
-    local iface_field=""
+    local wan_dev=""
     if [ "$exit_mode" = "direct" ]; then
-        local wan_dev
         wan_dev=$(get_wan_if)
-        if [ -n "$wan_dev" ] && [ -d "/sys/class/net/$wan_dev" ]; then
-            iface_field=""interface": "${wan_dev}","
+        if [ -n "$wan_dev" ] && [ ! -d "/sys/class/net/$wan_dev" ]; then
+            wan_dev=""
         fi
     fi
 
-    cat << EOF > /etc/xray/config.json
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    ${hybrid_reality_inbound}
-    {
-      "tag": "vless-xhttp-cf-in",
-      "listen": "127.0.0.1",
-      "port": ${local_xray_port},
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${x_uuid}"
-          }
-        ],
+    mkdir -p /etc/xray
+    python3 - "$direct_reality_port" "$x_uuid" "$x_priv" "$x_short_id" "$cf_domain" "$exit_mode" "$x_path" "$front_mode" "$local_xray_port" "$wan_dev" << 'PY_XRAY_CF_EOF'
+import json
+import sys
+from pathlib import Path
+
+direct_port = int(sys.argv[1] or 8443)
+x_uuid = sys.argv[2]
+x_priv = sys.argv[3]
+x_short_id = sys.argv[4]
+cf_domain = sys.argv[5]
+exit_mode = sys.argv[6]
+x_path = sys.argv[7]
+front_mode = sys.argv[8]
+local_port = int(sys.argv[9] or 10085)
+wan_dev = sys.argv[10]
+
+inbounds = []
+
+if front_mode == "hybrid" and x_priv:
+    inbounds.append({
+        "tag": "vless-xhttp-in",
+        "port": direct_port,
+        "protocol": "vless",
+        "settings": {
+            "clients": [{"id": x_uuid}],
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": "xhttp",
+            "security": "reality",
+            "xhttpSettings": {
+                "path": x_path,
+                "mode": "auto"
+            },
+            "realitySettings": {
+                "show": False,
+                "dest": "127.0.0.1:443",
+                "xver": 0,
+                "serverNames": [cf_domain],
+                "privateKey": x_priv,
+                "shortIds": [x_short_id, ""]
+            }
+        },
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True
+        }
+    })
+
+inbounds.append({
+    "tag": "vless-xhttp-cf-in",
+    "listen": "127.0.0.1",
+    "port": local_port,
+    "protocol": "vless",
+    "settings": {
+        "clients": [{"id": x_uuid}],
         "decryption": "none"
-      },
-      "streamSettings": {
+    },
+    "streamSettings": {
         "network": "xhttp",
         "security": "none",
         "xhttpSettings": {
-          "path": "${x_path}",
-          "mode": "auto"
+            "path": x_path,
+            "mode": "auto"
         }
-      },
-      "sniffing": {
-        "enabled": true,
+    },
+    "sniffing": {
+        "enabled": True,
         "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
+        "routeOnly": True
     }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "streamSettings": {
-        "finalmask": {
-          "tcp": [
-            {
-              "type": "fragment",
-              "settings": {
-                "packets": "tlshello",
-                "length": "40-60",
-                "delay": "30-50"
-              }
-            }
-          ]
+})
+
+if exit_mode in ("warp", "masque"):
+    inbounds.append({
+        "tag": "local-test-in",
+        "listen": "127.0.0.1",
+        "port": 10808,
+        "protocol": "socks",
+        "settings": {
+            "auth": "noauth",
+            "udp": True
         },
-        "sockopt": {
-          ${iface_field}
-          "domainStrategy": "UseIPv4v6",
-          "tcpNoDelay": true
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True
         }
-      }
-    }
-  ],
-  "routing": {
-    "domainStrategy": "AsIs",
-    "rules": [
-      {
-        "type": "field",
-        "outboundTag": "direct"
-      }
+    })
+    outbounds = [
+        {
+            "tag": "masque-out",
+            "protocol": "freedom",
+            "streamSettings": {
+                "sockopt": {
+                    "dialerProxy": "usque-raw",
+                    "domainStrategy": "UseIPv4",
+                    "tcpNoDelay": True
+                }
+            }
+        },
+        {
+            "tag": "usque-raw",
+            "protocol": "socks",
+            "settings": {
+                "servers": [{"address": "127.0.0.1", "port": 1080}]
+            },
+            "streamSettings": {
+                "sockopt": {"tcpNoDelay": True}
+            }
+        },
+        {
+            "tag": "direct-udp",
+            "protocol": "freedom",
+            "streamSettings": {
+                "sockopt": {"domainStrategy": "UseIPv4v6"}
+            }
+        }
     ]
-  }
+    routing = {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {"type": "field", "network": "udp", "outboundTag": "direct-udp"},
+            {"type": "field", "network": "tcp", "outboundTag": "masque-out"}
+        ]
+    }
+else:
+    sockopt = {
+        "domainStrategy": "UseIPv4v6",
+        "tcpNoDelay": True
+    }
+    if wan_dev:
+        sockopt["interface"] = wan_dev
+    outbounds = [
+        {
+            "tag": "direct",
+            "protocol": "freedom",
+            "streamSettings": {
+                "sockopt": sockopt
+            }
+        }
+    ]
+    routing = {
+        "domainStrategy": "AsIs",
+        "rules": []
+    }
+
+cfg = {
+    "log": {"loglevel": "warning"},
+    "inbounds": inbounds,
+    "outbounds": outbounds,
+    "routing": routing
 }
-EOF
+
+out_path = Path("/etc/xray/config.json")
+out_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+PY_XRAY_CF_EOF
     chmod 600 /etc/xray/config.json
     return 0
 }
@@ -3204,13 +3343,14 @@ print_cloudflare_cdn_vless_links() {
     local cf_domain="${CF_CDN_DOMAIN:-${XRAY_SNI:-}}"
     local cf_clean_ip="${CF_CLEAN_IP:-104.16.132.229}"
     local cf_front_mode="${CF_FRONT_MODE:-hybrid}"
-    local cf_cert_mode="${CF_CERT_MODE:-letsencrypt}"
-    local x_port="${XRAY_PORT:-443}"
+    local cf_cert_mode="${CF_CERT_MODE:-origin_ca}"
+    local direct_port="${CF_DIRECT_REALITY_PORT:-8443}"
     local x_uuid="${XRAY_UUID:-}"
     local x_pub="${XRAY_PUB:-}"
     local x_sid="${XRAY_SHORT_ID:-}"
     local x_path="${XRAY_XHTTP_PATH:-/xhttp-stream}"
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
+    x_path="${x_path%/}"
     local encoded_path="%2F${x_path#/}"
     local hname
     hname=$(hostname -s 2>/dev/null || echo "VPS")
@@ -3228,62 +3368,76 @@ print_cloudflare_cdn_vless_links() {
     local frag_params="fragment=40-60,30-50,tlshello&fragmentPackets=tlshello&fragmentLength=40-60&fragmentInterval=30-50"
     local fm_encoded="%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%22tlshello%22%2C%22length%22%3A%2240-60%22%2C%22delay%22%3A%2230-50%22%7D%7D%5D%7D"
 
-    local cf_link_packet="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-CF-CDN-PacketUp"
-    local cf_link_stream="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=stream-one&${frag_params}&fm=${fm_encoded}#${hname}-CF-CDN-StreamOne"
-    local cf_link_clean_ip="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-CF-CleanIP-${cf_clean_ip}"
-    local cf_link_2053="vless://${x_uuid}@${cf_domain}:2053?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-CF-Port2053"
+    # Ссылка №1: Чистая потоковая через Cloudflare CDN (mode=auto / grpc_pass
+    # h2c, БЕЗ искусственных пауз Fragment)
+    local cf_link_auto="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=auto#${hname}-CF-CDN-Auto"
+    # Ссылка №2: Раздельная packet-up через Cloudflare CDN (максимальная
+    # совместимость с бесплатным Cloudflare)
+    local cf_link_packet="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-CF-CDN-PacketUp"
+    # Ссылка №3: Потоковая stream-one (при включенном gRPC в панели
+    # Cloudflare)
+    local cf_link_stream="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=stream-one#${hname}-CF-CDN-StreamOne"
+    # Ссылка №4: Через чистый Anycast IP Cloudflare + TLS Fragment (если
+    # провайдер замедляет дефолтный IP домена)
+    local cf_link_clean_ip="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=auto&${frag_params}&fm=${fm_encoded}#${hname}-CF-CleanIP-${cf_clean_ip}"
+    # Ссылка №5: На порт 2053
+    local cf_link_2053="vless://${x_uuid}@${cf_domain}:2053?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=auto#${hname}-CF-Port2053"
 
     echo -e "\n${C_CYAN} === ССЫЛКИ И QR-КОДЫ VLESS-XHTTP ЗА CLOUDFLARE CDN (ОРАНЖЕВОЕ ОБЛАЧКО) ===${C_RESET}"
-    echo -e " Домен Cloudflare:     ${C_BOLD}${C_GREEN}${cf_domain}${C_RESET} (Чистый Anycast IP: ${C_CYAN}${cf_clean_ip}${C_RESET})"
+    echo -e " Домен Cloudflare:     ${C_BOLD}${C_GREEN}${cf_domain}${C_RESET} (Порты Nginx TLS: ${C_GREEN}443/tcp${C_RESET} и ${C_GREEN}2053/tcp${C_RESET})"
     echo -e " Сервер (Origin WAN):  IPv4: ${C_GREEN}${pub_ip4:-нет}${C_RESET} | IPv6: ${C_CYAN}${pub_ip6:-не назначен}${C_RESET}"
-    echo -e " Архитектура входа:    ${C_GREEN}${cf_front_mode}${C_RESET} | Выход с VPS: ${C_GREEN}${VLESS_OUT_MODE:-direct}${C_RESET}"
+    echo -e " Архитектура входа:    ${C_GREEN}${cf_front_mode} (Nginx grpc_pass h2c -> 127.0.0.1:10085)${C_RESET} | Выход: ${C_GREEN}${VLESS_OUT_MODE:-direct}${C_RESET}"
 
-    echo -e "\n ${C_BOLD}Параметры VLESS-XHTTP + TLS (Cloudflare CDN) для ручного ввода:${C_RESET}"
+    echo -e "\n ${C_BOLD}Параметры VLESS-XHTTP + TLS (Cloudflare CDN) для ручного ввода в Shadowrocket:${C_RESET}"
     echo -e "   • Тип (Type):         ${C_GREEN}VLESS${C_RESET}"
     echo -e "   • Адрес (Address):    ${C_GREEN}${cf_domain}${C_RESET} (или чистый IP Cloudflare: ${C_CYAN}${cf_clean_ip}${C_RESET})"
-    echo -e "   • Порт (Port):        ${C_GREEN}443${C_RESET} (резервный HTTPS-порт Cloudflare: ${C_CYAN}2053${C_RESET})"
+    echo -e "   • Порт (Port):        ${C_GREEN}443${C_RESET} (или ${C_CYAN}2053${C_RESET})"
     echo -e "   • UUID:               ${C_GREEN}${x_uuid}${C_RESET}"
     echo -e "   • Транспорт (Network): ${C_GREEN}xhttp (SplitHTTP)${C_RESET}"
     echo -e "   • Путь (Path):        ${C_GREEN}${x_path}${C_RESET}"
     echo -e "   • Host / SNI (Peer):  ${C_GREEN}${cf_domain}${C_RESET}"
-    echo -e "   • Режим (XHTTP Mode): ${C_GREEN}packet-up${C_RESET} (рекомендуется для бесплатного тарифа Cloudflare) или ${C_CYAN}stream-one${C_RESET}"
-    echo -e "   • TLS:                ${C_GREEN}Вкл (Стандартный TLS, НЕ REALITY — так как сертификат отдает Cloudflare Edge)${C_RESET}"
-    echo -e "   • ALPN:               ${C_GREEN}h2, http/1.1${C_RESET} | Fingerprint: ${C_GREEN}chrome${C_RESET}"
-    echo -e "   • Fragment (Клиент):  ${C_GREEN}Enable = Вкл | Length: 40-60 | Interval: 30-50 | Packets: tlshello${C_RESET}"
+    echo -e "   • Режим (XHTTP Mode): ${C_GREEN}auto${C_RESET} (или ${C_GREEN}packet-up${C_RESET} / ${C_CYAN}stream-one${C_RESET})"
+    echo -e "   • TLS:                ${C_GREEN}Вкл (Обычный TLS, тумблер REALITY должен быть ВЫКЛЮЧЕН!)${C_RESET}"
+    echo -e "   • ALPN:               ${C_GREEN}h2${C_RESET} | Fingerprint: ${C_GREEN}chrome${C_RESET}"
 
-    echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (mode=packet-up + TLS Fragment — 100% совместимость с бесплатным Cloudflare):${C_RESET}"
+    echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (mode=auto, порт 443 — рекомендуется в первую очередь!):${C_RESET}"
+    echo -e " ${C_BOLD}${C_GREEN}${cf_link_auto}${C_RESET}"
+
+    echo -e "\n ${C_GREEN}2) Совместимая ссылка через Cloudflare CDN (mode=packet-up, порт 443):${C_RESET}"
     echo -e " ${C_BOLD}${C_GREEN}${cf_link_packet}${C_RESET}"
 
-    echo -e "\n ${C_CYAN}2) Потоковая ссылка через Cloudflare CDN (mode=stream-one + HTTP/2 — при включенном HTTP/2 и gRPC в Cloudflare):${C_RESET}"
+    echo -e "\n ${C_CYAN}3) Потоковая ссылка через Cloudflare CDN (mode=stream-one, порт 443 — при включенном gRPC в Cloudflare):${C_RESET}"
     echo -e " ${C_BOLD}${C_CYAN}${cf_link_stream}${C_RESET}"
 
-    echo -e "\n ${C_YELLOW}3) Пробивная ссылка через чистый Anycast IP Cloudflare (${cf_clean_ip}:443, SNI/Host=${cf_domain} — если дефолтный IP домена замедлен):${C_RESET}"
+    echo -e "\n ${C_YELLOW}4) Пробивная ссылка через чистый Anycast IP Cloudflare (${cf_clean_ip}:443 + TLS Fragment):${C_RESET}"
     echo -e " ${C_BOLD}${C_YELLOW}${cf_link_clean_ip}${C_RESET}"
 
-    echo -e "\n ${C_CYAN}4) Резервная ссылка через дополнительный HTTPS-порт Cloudflare (${cf_domain}:2053, mode=packet-up):${C_RESET}"
+    echo -e "\n ${C_CYAN}5) Ссылка на альтернативный HTTPS-порт Cloudflare (${cf_domain}:2053):${C_RESET}"
     echo -e " ${C_CYAN}${cf_link_2053}${C_RESET}"
 
     if [ "$cf_front_mode" = "hybrid" ] && [ -n "$pub_ip4" ] && [ -n "$x_pub" ]; then
-        local direct_reality="vless://${x_uuid}@${pub_ip4}:${x_port}?encryption=none&security=reality&sni=${cf_domain}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one&${frag_params}&fm=${fm_encoded}#${hname}-Direct-REALITY"
-        echo -e "\n ${C_GREEN}5) Прямая ссылка VLESS-XHTTP + REALITY по IP сервера (мимо Cloudflare — для сетей, где IP сервера НЕ заблокирован):${C_RESET}"
+        local direct_reality="vless://${x_uuid}@${pub_ip4}:${direct_port}?encryption=none&security=reality&sni=${cf_domain}&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one#${hname}-Direct-REALITY-${direct_port}"
+        echo -e "\n ${C_GREEN}6) Прямая ссылка VLESS-XHTTP + REALITY по IP сервера (${pub_ip4}:${direct_port} — мимо Cloudflare):${C_RESET}"
         echo -e " ${C_GREEN}${direct_reality}${C_RESET}"
     fi
 
     if command -v qrencode >/dev/null 2>&1; then
-        echo -e "\n ${C_GREEN}QR-код №1 — Cloudflare CDN (mode=packet-up, основная):${C_RESET}"
+        echo -e "\n ${C_GREEN}QR-код №1 — Cloudflare CDN (mode=auto, основная):${C_RESET}"
+        qrencode -t ansiutf8 "${cf_link_auto}" 2>/dev/null || true
+        echo -e "\n ${C_GREEN}QR-код №2 — Cloudflare CDN (mode=packet-up):${C_RESET}"
         qrencode -t ansiutf8 "${cf_link_packet}" 2>/dev/null || true
-        echo -e "\n ${C_YELLOW}QR-код №2 — Cloudflare CDN через чистый Anycast IP (${cf_clean_ip}:443):${C_RESET}"
+        echo -e "\n ${C_YELLOW}QR-код №3 — Cloudflare CDN через чистый Anycast IP (${cf_clean_ip}:443):${C_RESET}"
         qrencode -t ansiutf8 "${cf_link_clean_ip}" 2>/dev/null || true
     fi
 
-    local ssl_mode_hint="Full (Strict) — так как активен официальный сертификат Let's Encrypt"
-    [ "$cf_cert_mode" = "origin_selfsigned" ] && ssl_mode_hint="Full (НЕ Full Strict) — так как используется самоподписанный Origin-сертификат"
+    local ssl_mode_hint="Full (Strict) — так как активен сертификат Cloudflare Origin CA / Let's Encrypt"
+    [ "$cf_cert_mode" = "origin_selfsigned" ] && ssl_mode_hint="Full (НЕ Full Strict, иначе будет ошибка 526) — либо вставьте сертификат Origin CA в пункте 2 -> 5 -> 4"
 
     echo -e "\n${C_CYAN} === ШПАРГАЛКА НАСТРОЕК В ПАНЕЛИ CLOUDFLARE (БЕСПЛАТНЫЙ ТАРИФ) ===${C_RESET}"
-    echo -e "   1) ${C_BOLD}DNS -> Records:${C_RESET} добавьте запись ${C_GREEN}A${C_RESET} (${cf_domain} -> ${pub_ip4:-IP_сервера}) и при наличии IPv6 запись ${C_GREEN}AAAA${C_RESET} (${cf_domain} -> ${pub_ip6:-IPv6_сервера}), включите ${C_YELLOW}Оранжевое облачко (Proxied = ON)${C_RESET}."
-    echo -e "   2) ${C_BOLD}SSL/TLS -> Overview:${C_RESET} выберите режим шифрования ${C_GREEN}${ssl_mode_hint}${C_RESET}."
-    echo -e "   3) ${C_BOLD}Network:${C_RESET} включите тумблеры ${C_GREEN}HTTP/2 = ON${C_RESET}, ${C_GREEN}HTTP/3 (with QUIC) = ON${C_RESET}, ${C_GREEN}0-RTT Connection Resumption = ON${C_RESET}, ${C_GREEN}WebSockets = ON${C_RESET} и ${C_GREEN}gRPC = ON${C_RESET}."
-    echo -e "   4) ${C_BOLD}Speed -> Optimization -> Protocol Optimization:${C_RESET} убедитесь, что ${C_GREEN}HTTP/2 to Origin = ON${C_RESET} (позволяет XHTTP работать без даунгрейда до HTTP/1.1)."
+    echo -e "   1) ${C_BOLD}DNS -> Records:${C_RESET} запись ${C_GREEN}A${C_RESET} (${cf_domain} -> ${pub_ip4:-IP_сервера}), тумблер ${C_YELLOW}Proxied = ON (Оранжевое облачко)${C_RESET}."
+    echo -e "   2) ${C_BOLD}SSL/TLS -> Overview:${C_RESET} режим шифрования ${C_GREEN}${ssl_mode_hint}${C_RESET}."
+    echo -e "   3) ${C_BOLD}Network:${C_RESET} обязательно включите ${C_GREEN}HTTP/2 = ON${C_RESET}, ${C_GREEN}HTTP/3 (with QUIC) = ON${C_RESET}, ${C_GREEN}gRPC = ON${C_RESET} и ${C_GREEN}WebSockets = ON${C_RESET}."
+    echo -e "   4) ${C_BOLD}Origin Rules:${C_RESET} создавать Origin Rule на порт 2053 больше НЕ обязательно (Nginx слушает и 443, и 2053 одновременно!)."
 }
 
 select_cloudflare_clean_ip_interactive() {
@@ -3296,10 +3450,10 @@ select_cloudflare_clean_ip_interactive() {
 
     local ip_choice=""
     if ! smart_menu "Выбор чистого Anycast IP Cloudflare для клиентских ссылок" "
-Текущий Anycast IP в ссылке №3: ${cur_clean_ip}
+Текущий Anycast IP в ссылке №4: ${cur_clean_ip}
 
 Если провайдер ограничивает дефолтный IP вашего домена в Cloudflare, клиент Shadowrocket может подключаться к любому официальному Anycast IP сети Cloudflare, передавая ваш домен в полях SNI и Host:" 20 "$WT_WIDTH" 6 "ip_choice" \
-        "1" " 104.16.132.229 (Cloudflare Anycast — пул 104.16.0.0/12, отличная проходимость)" \
+        "1" " 104.16.132.229 (Cloudflare Anycast — пул 104.16.0.0/12)" \
         "2" " 104.17.147.22  (Cloudflare Anycast — пул 104.17.0.0/16)" \
         "3" " 172.64.155.209 (Cloudflare Anycast — пул 172.64.0.0/13)" \
         "4" " 162.159.135.42 (Cloudflare Anycast — пул 162.159.0.0/16)" \
@@ -3333,7 +3487,7 @@ select_cloudflare_clean_ip_interactive() {
 }
 
 switch_cloudflare_cdn_exit_mode_interactive() {
-    local cur_out="direct" cur_usque_mode="l4-socks" cf_dom="" cf_fmode="hybrid" cf_lport="10085"
+    local cur_out="direct" cur_usque_mode="l4-socks" cf_dom="" cf_fmode="hybrid" cf_lport="10085" direct_port="8443"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
@@ -3342,6 +3496,7 @@ switch_cloudflare_cdn_exit_mode_interactive() {
         cf_dom="${CF_CDN_DOMAIN:-}"
         cf_fmode="${CF_FRONT_MODE:-hybrid}"
         cf_lport="${CF_LOCAL_XRAY_PORT:-10085}"
+        direct_port="${CF_DIRECT_REALITY_PORT:-8443}"
     fi
     if [ -z "$cf_dom" ]; then
         echo -e "${C_YELLOW} Сначала выполните первичную настройку домена Cloudflare в Пункте 1.${C_RESET}"
@@ -3357,9 +3512,9 @@ switch_cloudflare_cdn_exit_mode_interactive() {
 Текущий выход: ${cur_desc}
 
 Выберите, как зарубежному серверу выпускать трафик в интернет после приема из Cloudflare CDN (ссылки в Shadowrocket не меняются):" 18 "$WT_WIDTH" 3 "m_choice" \
-        "1" " Чистый IP самого VPS (Напрямую — максимальная скорость, Dual-Stack IPv4+IPv6)" \
-        "2" " Через Cloudflare MASQUE (Usque 127.0.0.1:1080 — защита от капч и фильтрации IP)" \
-        "3" " Через внешний туннель WireGuard (wg0 — свой или сторонний VPN-конфиг)"; then
+        "1" " Чистый IP самого VPS: Напрямую, макс. скорость" \
+        "2" " Через Cloudflare MASQUE: Usque 127.0.0.1:1080" \
+        "3" " Через внешний туннель WireGuard: wg0"; then
         return 0
     fi
 
@@ -3398,7 +3553,7 @@ switch_cloudflare_cdn_exit_mode_interactive() {
             ;;
     esac
 
-    render_xray_cloudflare_cdn_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$target_out" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_lport"
+    render_xray_cloudflare_cdn_config "$direct_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$target_out" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_lport"
     if [ -s /etc/xray/vless_users.list ]; then
         rebuild_xray_inbound_clients
     fi
@@ -3419,7 +3574,7 @@ switch_cloudflare_cdn_exit_mode_interactive() {
 setup_cloudflare_cdn_vless_wizard() {
     echo -e "${C_CYAN} === НАСТРОЙКА ЗАРУБЕЖНОГО VPS ЗА CLOUDFLARE CDN: VLESS-XHTTP + NGINX SELF-STEAL (TLS) ===${C_RESET}"
     echo -e "${C_BLUE} Идеально для ситуации, когда прямой IP зарубежного VPS заблокирован провайдером, а промежуточного российского VPS нет.${C_RESET}"
-    echo -e "${C_BLUE} Протокол XHTTP (SplitHTTP) специально создан разработчиками Xray-core для прохождения через CDN Cloudflare вместо устаревшего WebSocket!${C_RESET}\n"
+    echo -e "${C_BLUE} Nginx принимает TLS на портах 443 и 2053 и передает XHTTP по HTTP/2 (grpc_pass h2c) в Xray (127.0.0.1:10085)!${C_RESET}\n"
 
     local saved_domain="" saved_clean_ip="104.16.132.229" saved_fmode="hybrid"
     if [ -f /etc/default/bobarev-cascade ]; then
@@ -3435,7 +3590,7 @@ setup_cloudflare_cdn_vless_wizard() {
     fi
 
     local cf_domain=""
-    prompt_default "1/3. Введите ваш домен или поддомен, добавленный в Cloudflare (например, cdn.example.com):" "$saved_domain" cf_domain
+    prompt_default "1/3. Введите ваш домен или поддомен в Cloudflare (например, servhost.bbrv.io):" "$saved_domain" cf_domain
     if [ "$MODULE_CANCELED" = true ] || [ -z "$cf_domain" ]; then
         echo -e "${C_YELLOW} Настройка отменена: домен не указан.${C_RESET}"
         return 0
@@ -3447,10 +3602,11 @@ setup_cloudflare_cdn_vless_wizard() {
     fi
 
     local fmode_choice=""
-    if ! smart_menu "2/3. Архитектура приема трафика на порту 443" "
-Выберите режим работы связки Nginx Self-Steal + Xray XHTTP для домена ${cf_domain}:" 18 "$WT_WIDTH" 2 "fmode_choice" \
-        "1" " Гибридный (Рекомендуется): Cloudflare CDN (:443 и :2053) + Прямой VLESS-REALITY (:443)" \
-        "2" " Чистый Cloudflare CDN: Nginx TLS напрямую на 443/tcp и 2053/tcp -> Xray XHTTP (127.0.0.1:10085)"; then
+    if ! smart_menu "2/3. Архитектура приема трафика" "
+В обоих режимах Nginx слушает порты 443/tcp и 2053/tcp напрямую для Cloudflare CDN:
+В Гибридном режиме дополнительно открывается прямой вход VLESS-REALITY по IP на порту 8443/tcp:" 18 "$WT_WIDTH" 2 "fmode_choice" \
+        "1" " Гибридный (Рекомендуется): Cloudflare CDN (:443 и :2053) + Прямой REALITY (:8443)" \
+        "2" " Чистый Cloudflare CDN: Только Nginx TLS (:443 и :2053) -> Xray XHTTP (127.0.0.1:10085)"; then
         return 0
     fi
     local front_mode="hybrid"
@@ -3459,11 +3615,14 @@ setup_cloudflare_cdn_vless_wizard() {
     local out_choice=""
     if ! smart_menu "3/3. Выход в интернет с этого зарубежного VPS" "
 Как выпускать трафик с этого сервера в интернет после приема из Cloudflare CDN?" 18 "$WT_WIDTH" 3 "out_choice" \
-        "1" " Чистый IP самого VPS (Напрямую — максимальная скорость, Dual-Stack IPv4+IPv6)" \
-        "2" " Через Cloudflare MASQUE (Usque 127.0.0.1:1080 — защита от капч и фильтрации IP)" \
-        "3" " Через внешний туннель WireGuard (wg0 — свой или сторонний VPN-конфиг)"; then
+        "1" " Чистый IP самого VPS: Напрямую, макс. скорость" \
+        "2" " Через Cloudflare MASQUE: Usque 127.0.0.1:1080" \
+        "3" " Через внешний туннель WireGuard: wg0"; then
         return 0
     fi
+
+    # 1. Сразу открываем порты в UFW (даже на чистом сервере!)
+    open_cloudflare_cdn_ufw_ports "8443"
 
     ensure_xray_installed || return 1
     ensure_ipv4_precedence_and_host_dns
@@ -3473,9 +3632,9 @@ setup_cloudflare_cdn_vless_wizard() {
 
     if ! load_global_vless_credentials; then
         generate_xray_reality_credentials || return 1
-        save_global_vless_credentials "443" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_PUB" "$GEN_X_SHORT_ID" "$cf_domain" "127.0.0.1:8443" "$GEN_X_PATH"
+        save_global_vless_credentials "443" "$GEN_X_UUID" "$GEN_X_PRIV" "$GEN_X_PUB" "$GEN_X_SHORT_ID" "$cf_domain" "127.0.0.1:443" "$GEN_X_PATH"
     else
-        save_global_vless_credentials "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$cf_domain" "127.0.0.1:8443" "${XRAY_XHTTP_PATH:-/xhttp-stream}"
+        save_global_vless_credentials "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$cf_domain" "127.0.0.1:443" "${XRAY_XHTTP_PATH:-/xhttp-stream}"
     fi
     load_global_vless_credentials || true
 
@@ -3511,18 +3670,18 @@ setup_cloudflare_cdn_vless_wizard() {
         target_foreign_mode="direct"
     fi
 
-    # Если выбран режим cdn_only (Nginx слушает 443 напрямую), временно
-    # освобождаем 443 от Xray перед стартом Nginx
-    if [ "$front_mode" = "cdn_only" ]; then
-        silent_run systemctl stop bobarev-xray.service 2>/dev/null || true
-    fi
+    # 2. Освобождаем порт 443 перед запуском Nginx (если ранее Xray или Caddy
+    # слушал 443)
+    silent_run systemctl stop bobarev-xray.service caddy.service 2>/dev/null || true
 
     local local_xray_port="10085"
-    if ! setup_nginx_cloudflare_xhttp_frontend "$cf_domain" "$XRAY_XHTTP_PATH" "$local_xray_port" "$front_mode" "${XRAY_PORT:-443}"; then
+    local direct_reality_port="8443"
+    if ! setup_nginx_cloudflare_xhttp_frontend "$cf_domain" "$XRAY_XHTTP_PATH" "$local_xray_port" "$front_mode" "443" "true"; then
         return 1
     fi
 
-    render_xray_cloudflare_cdn_config "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_domain" "$target_out_mode" "$XRAY_XHTTP_PATH" "$front_mode" "$local_xray_port"
+    # 3. Генерируем валидный /etc/xray/config.json через Python json.dumps
+    render_xray_cloudflare_cdn_config "$direct_reality_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_domain" "$target_out_mode" "$XRAY_XHTTP_PATH" "$front_mode" "$local_xray_port"
     if [ -s /etc/xray/vless_users.list ]; then
         rebuild_xray_inbound_clients
     fi
@@ -3534,6 +3693,7 @@ setup_cloudflare_cdn_vless_wizard() {
         return 1
     fi
 
+    systemctl enable bobarev-xray.service >/dev/null 2>&1 || true
     safe_restart_systemd_service bobarev-xray.service
     sleep 1
 
@@ -3557,27 +3717,21 @@ CF_CDN_DOMAIN="${cf_domain}"
 CF_CLEAN_IP="${saved_clean_ip}"
 CF_FRONT_MODE="${front_mode}"
 CF_LOCAL_XRAY_PORT="${local_xray_port}"
-CF_CERT_MODE="${CF_ACTIVE_CERT_MODE:-letsencrypt}"
+CF_DIRECT_REALITY_PORT="${direct_reality_port}"
+CF_CERT_MODE="${CF_ACTIVE_CERT_MODE:-origin_ca}"
 XRAY_PORT="${XRAY_PORT:-443}"
 XRAY_UUID="${XRAY_UUID}"
 XRAY_PRIV="${XRAY_PRIV}"
 XRAY_PUB="${XRAY_PUB}"
 XRAY_SHORT_ID="${XRAY_SHORT_ID}"
 XRAY_SNI="${cf_domain}"
-XRAY_REALITY_DEST="127.0.0.1:8443"
+XRAY_REALITY_DEST="127.0.0.1:443"
 XRAY_XHTTP_PATH="${XRAY_XHTTP_PATH}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
 EOF
     chmod 600 /etc/default/bobarev-cascade
-    save_global_vless_credentials "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$cf_domain" "127.0.0.1:8443" "$XRAY_XHTTP_PATH"
-
-    if command -v ufw >/dev/null 2>&1; then
-        silent_run ufw allow 80/tcp comment 'Cloudflare ACME HTTP-01'
-        silent_run ufw allow "${XRAY_PORT:-443}/tcp" comment 'Cloudflare CDN VLESS-XHTTP'
-        silent_run ufw allow 2053/tcp comment 'Cloudflare CDN Alt HTTPS'
-        silent_run ufw reload
-    fi
+    save_global_vless_credentials "${XRAY_PORT:-443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$cf_domain" "127.0.0.1:443" "$XRAY_XHTTP_PATH"
 
     echo ""
     echo -e "${C_GREEN} === ЗАРУБЕЖНЫЙ СЕРВЕР VLESS-XHTTP + NGINX TLS ЗА CLOUDFLARE CDN УСПЕШНО ЗАПУЩЕН! ===${C_RESET}"
@@ -3604,11 +3758,11 @@ manage_cloudflare_cdn_vless_menu() {
         local cf_choice=""
         if ! smart_menu "Зарубежный VPS за Cloudflare CDN: VLESS-XHTTP + Nginx TLS (Меню 2 -> 5)" "
 Статус: ${cf_state}
-Для зарубежного VPS с заблокированным IP (без промежуточного VPS в РФ) — трафик идет через оранжевое облачко Cloudflare по протоколу XHTTP (современная замена WebSocket):" 22 "$WT_WIDTH" 8 "cf_choice" \
+Для зарубежного VPS с заблокированным IP (без промежуточного VPS в РФ) — трафик идет через оранжевое облачко Cloudflare по протоколу XHTTP (Nginx grpc_pass h2c):" 22 "$WT_WIDTH" 8 "cf_choice" \
             "1" " Настроить VLESS-XHTTP + Nginx Self-Steal (TLS) за Cloudflare CDN" \
-            "2" " Выбрать выход в интернет: Чистый IP VPS / Cloudflare MASQUE / WireGuard (wg0)" \
+            "2" " Выбрать выход в интернет: Чистый IP VPS / Cloudflare MASQUE / WireGuard" \
             "3" " Выбрать чистый Anycast IP Cloudflare для обхода фильтрации домена" \
-            "4" " Перевыпустить TLS-сертификат Let's Encrypt / Origin для домена" \
+            "4" " Настроить / вставить TLS-сертификат (Cloudflare Origin CA / Let's Encrypt)" \
             "5" " Управление глобальными ключами VLESS-XHTTP и Path" \
             "6" " Показать ссылки, QR-коды и шпаргалку настроек Cloudflare Dashboard" \
             "7" " Остановить и отключить режим Cloudflare CDN" \
@@ -3632,9 +3786,14 @@ manage_cloudflare_cdn_vless_menu() {
                 ;;
             4)
                 if [ -z "$cur_dom" ]; then
-                    echo -e "${C_YELLOW} Сначала настройте домен Cloudflare в Пункте 1.${C_RESET}"
-                else
-                    ensure_cloudflare_tls_cert "$cur_dom" "true" && setup_nginx_cloudflare_xhttp_frontend "$cur_dom" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "${CF_LOCAL_XRAY_PORT:-10085}" "${CF_FRONT_MODE:-hybrid}" "${XRAY_PORT:-443}" || true
+                    load_global_vless_credentials || true
+                    cur_dom="${XRAY_SNI:-}"
+                fi
+                if [ -z "$cur_dom" ] || [ "$cur_dom" = "www.microsoft.com" ]; then
+                    prompt_default "Введите ваш домен в Cloudflare (например, servhost.bbrv.io):" "" cur_dom
+                fi
+                if [ -n "$cur_dom" ]; then
+                    setup_nginx_cloudflare_xhttp_frontend "$cur_dom" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "${CF_LOCAL_XRAY_PORT:-10085}" "${CF_FRONT_MODE:-hybrid}" "443" "true" || true
                 fi
                 pause_enter
                 ;;
@@ -3664,12 +3823,12 @@ manage_cloudflare_cdn_vless_menu() {
 
 setup_cascade_server1_ru() {
     echo -e "${C_CYAN} === НАСТРОЙКА СЕРВЕРА 1 (ВХОД / ШЛЮЗ): VLESS-XHTTP (SplitHTTP + REALITY, Dual-Stack) -> TAILSCALE / MULLVAD EXIT NODE ===${C_RESET}"
-    local saved_exit="" cur_ts_trans="dualstack"
+    local saved_exit="" cur_ts_trans="ipv4_only"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
         saved_exit="${EXIT_TS_IP:-}"
-        cur_ts_trans="${TS_TRANSPORT_MODE:-dualstack}"
+        cur_ts_trans="${TS_TRANSPORT_MODE:-ipv4_only}"
     fi
 
     ensure_or_init_global_vless_inbound_interactive "Пункт 4 — Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad (Сервер 1)" || return 0
@@ -4020,43 +4179,73 @@ change_cascade_tailscale_exit_node_interactive() {
 }
 
 apply_tailscale_p2p_transport_rules() {
-    local mode="${1:-dualstack}"
-    while iptables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
-    while iptables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
-    if command -v ip6tables &>/dev/null; then
-        while ip6tables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
-        while ip6tables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
-    fi
-    if [ "$mode" = "ipv4_only" ]; then
+    local mode="${1:-ipv4_only}"
+    for p_udp in 41641 51820; do
+        while iptables -D OUTPUT -p udp --dport "$p_udp" -j REJECT 2>/dev/null; do :; done
+        while iptables -D OUTPUT -p udp --sport "$p_udp" -j REJECT 2>/dev/null; do :; done
+        while iptables -D INPUT -p udp --dport "$p_udp" -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p udp --sport "$p_udp" -j DROP 2>/dev/null; do :; done
         if command -v ip6tables &>/dev/null; then
-            ip6tables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
-            ip6tables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
+            while ip6tables -D OUTPUT -p udp --dport "$p_udp" -j REJECT 2>/dev/null; do :; done
+            while ip6tables -D OUTPUT -p udp --sport "$p_udp" -j REJECT 2>/dev/null; do :; done
+            while ip6tables -D INPUT -p udp --dport "$p_udp" -j DROP 2>/dev/null; do :; done
+            while ip6tables -D INPUT -p udp --sport "$p_udp" -j DROP 2>/dev/null; do :; done
+        fi
+    done
+    command -v nft &>/dev/null && nft delete table ip6 bobarev_p2p_v4only 2>/dev/null || true
+    if [ "$mode" = "ipv4_only" ]; then
+        if command -v nft &>/dev/null; then
+            nft -f - 2>/dev/null << 'NFT_P2P_V4_EOF' || true
+table ip6 bobarev_p2p_v4only {
+    chain ts_v4_force_in {
+        type filter hook input priority filter - 5; policy accept;
+        udp sport { 41641, 51820 } drop
+        udp dport { 41641, 51820 } drop
+    }
+    chain ts_v4_force_out {
+        type filter hook output priority filter - 5; policy accept;
+        udp sport { 41641, 51820 } reject
+        udp dport { 41641, 51820 } reject
+    }
+}
+NFT_P2P_V4_EOF
+        elif command -v ip6tables &>/dev/null; then
+            for p_udp in 41641 51820; do
+                ip6tables -I OUTPUT 1 -p udp --dport "$p_udp" -j REJECT 2>/dev/null || true
+                ip6tables -I OUTPUT 1 -p udp --sport "$p_udp" -j REJECT 2>/dev/null || true
+                ip6tables -I INPUT 1 -p udp --dport "$p_udp" -j DROP 2>/dev/null || true
+                ip6tables -I INPUT 1 -p udp --sport "$p_udp" -j DROP 2>/dev/null || true
+            done
         fi
     elif [ "$mode" = "ipv6_only" ]; then
-        iptables -I OUTPUT 1 -p udp --dport 41641 -j REJECT 2>/dev/null || true
-        iptables -I INPUT 1 -p udp --dport 41641 -j DROP 2>/dev/null || true
+        for p_udp in 41641 51820; do
+            iptables -I OUTPUT 1 -p udp --dport "$p_udp" -j REJECT 2>/dev/null || true
+            iptables -I OUTPUT 1 -p udp --sport "$p_udp" -j REJECT 2>/dev/null || true
+            iptables -I INPUT 1 -p udp --dport "$p_udp" -j DROP 2>/dev/null || true
+            iptables -I INPUT 1 -p udp --sport "$p_udp" -j DROP 2>/dev/null || true
+        done
     fi
 }
 
 toggle_tailscale_ipv6_transport_menu() {
-    local cur_trans="dualstack"
+    local cur_trans="ipv4_only"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
-        cur_trans="${TS_TRANSPORT_MODE:-dualstack}"
+        cur_trans="${TS_TRANSPORT_MODE:-ipv4_only}"
     fi
-    local cur_desc="Dual-Stack (IPv4 + IPv6 одновременно — универсальный режим)"
-    [ "$cur_trans" = "ipv4_only" ] && cur_desc="Только IPv4 для P2P 41641/udp (защита от медленного IPv6-транзита между хостерами)"
-    [ "$cur_trans" = "ipv6_only" ] && cur_desc="Только IPv6 для P2P 41641/udp (обход блокировок IPv4 UDP по IPv6)"
+    local cur_desc="Только IPv4 для P2P 41641/51820 udp (рекомендуется против перестановки пакетов)"
+    [ "$cur_trans" = "dualstack" ] && cur_desc="Dual-Stack (IPv4 + IPv6 одновременно)"
+    [ "$cur_trans" = "ipv6_only" ] && cur_desc="Только IPv6 для P2P 41641/51820 udp (обход блокировок IPv4 UDP по IPv6)"
 
     local t_choice=""
-    if ! smart_menu "Транспорт Tailscale между серверами (41641/udp)" "
+    if ! smart_menu "Транспорт Tailscale / Mullvad (41641/51820 udp)" "
 Текущий режим: ${cur_desc}
 
-Выберите, как демону tailscaled устанавливать P2P-туннель между двумя серверами (внутри самого туннеля и на входе VLESS IPv4 + IPv6 продолжают работать одновременно, ключи VLESS не меняются):" 19 "$WT_WIDTH" 3 "t_choice" \
-        "1" " Dual-Stack: IPv4 + IPv6 одновременно (По умолчанию — подходит для любых серверов)" \
-        "2" " Только IPv4 между серверами (Отключить IPv6 P2P в Tailscale при потерях на IPv6-маршруте)" \
-        "3" " Только IPv6 между серверами (Принудительно пустить P2P-туннель 41641/udp по IPv6)"; then
+Выберите, как демону tailscaled устанавливать P2P-туннель к Exit Node (внутри самого туннеля и на входе VLESS IPv4 + IPv6 продолжают работать одновременно, ключи VLESS не меняются):" 19 "$WT_WIDTH" 3 "t_choice" \
+        "1" " Dual-Stack: IPv4 + IPv6 одновременно (Универсальный режим)" \
+        "2" " Только IPv4 между серверами (Рекомендуется: приоритетный фильтр nftables против Out-of-Order)" \
+        "3" " Только IPv6 между серверами (Принудительно пустить P2P-туннель 41641/51820 по IPv6)"; then
         return 0
     fi
 
@@ -4075,7 +4264,8 @@ toggle_tailscale_ipv6_transport_menu() {
         write_bobarev_cascade_ru_script
         /usr/local/bin/bobarev-cascade-ru.sh
     fi
-    echo -e "${C_GREEN} ✔ Режим межсерверного транспорта Tailscale (41641/udp) переключен на: ${C_BOLD}${new_trans}${C_RESET}"
+    command -v tailscale &>/dev/null && tailscale netcheck >/dev/null 2>&1 || true
+    echo -e "${C_GREEN} ✔ Режим межсерверного транспорта Tailscale (41641/51820 udp) переключен на: ${C_BOLD}${new_trans}${C_RESET}"
 }
 
 manage_cascade_naive_ts_warp() {
@@ -4145,7 +4335,7 @@ manage_cascade_naive_ts_warp() {
                 if prompt_yn "Отключить Exit Node и остановить службы этого каскада / шлюза (VLESS-XHTTP / Tailscale Exit / Cloudflare MASQUE)?" "false"; then
                     silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service usque.service
                     while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done
-                    command -v nft &>/dev/null && nft delete table ip6 bobarev_ip6_opt 2>/dev/null || true
+                    command -v nft &>/dev/null && { nft delete table ip6 bobarev_ip6_opt 2>/dev/null || true; nft delete table ip6 bobarev_p2p_v4only 2>/dev/null || true; }
                     apply_tailscale_p2p_transport_rules "dualstack"
                     cleanup_tailscale_table52_routes
                     rm -f /etc/default/bobarev-cascade /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh
@@ -7167,8 +7357,8 @@ mod_user_setup() {
     for sfile in /etc/sudoers.d/*; do
         [ ! -f "$sfile" ] && continue
         [[ "$(basename "$sfile")" == "README" || "$sfile" == *.bak ]] && continue
-        if grep -qE "^[[:space:]]*${username}[[:space:]]+" "$sfile" 2>/dev/null; then
-            sed -i -E "/^[[:space:]]*${username}[[:space:]]+/d" "$sfile" 2>/dev/null || true
+        if grep -qE "^[[:space:]]*$[[:space:]]+" "$sfile" 2>/dev/null; then
+            sed -i -E "/^[[:space:]]*$[[:space:]]+/d" "$sfile" 2>/dev/null || true
             if ! grep -qE "^[[:space:]]*[^#[:space:]]" "$sfile" 2>/dev/null; then
                 rm -f "$sfile" 2>/dev/null || true
             fi
@@ -7613,8 +7803,8 @@ net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.core.rmem_default = 8388608
 net.core.wmem_default = 8388608
-net.ipv4.tcp_rmem = 4096 262144 16777216
-net.ipv4.tcp_wmem = 4096 262144 16777216
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
 net.ipv4.tcp_adv_win_scale = 2
 net.core.netdev_max_backlog = 30000
 net.core.somaxconn = 32768
@@ -12155,14 +12345,18 @@ mod_network_cascade_audit() {
     install_network_audit_tool
     while true; do
         MODULE_CANCELED=false
-        local default_peer_ip=""
+        local default_peer_ip="" default_capture_ip=""
         if [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
             if [ -n "${FOREIGN_WG_ENDPOINT:-}" ]; then
                 default_peer_ip=$(echo "$FOREIGN_WG_ENDPOINT" | cut -d: -f1)
+                default_capture_ip="$default_peer_ip"
             elif [ -n "${EXIT_TS_IP:-}" ]; then
                 default_peer_ip="$EXIT_TS_IP"
+                if [[ ! "$EXIT_TS_IP" =~ ^100\. ]]; then
+                    default_capture_ip="$EXIT_TS_IP"
+                fi
             fi
         fi
 
@@ -12187,7 +12381,7 @@ mod_network_cascade_audit() {
                 [ -z "$dur" ] && dur="15"
 
                 local flt=""
-                prompt_default "IP второго узла для фильтрации (оставьте пустым для записи ВСЕГО трафика):" "$default_peer_ip" flt
+                prompt_default "IP второго узла для фильтрации (оставьте пустым для записи ВСЕГО трафика):" "$default_capture_ip" flt
                 if [ "$MODULE_CANCELED" = true ]; then continue; fi
 
                 if [ -n "$flt" ]; then
@@ -12218,7 +12412,7 @@ mod_network_cascade_audit() {
                 ;;
             3)
                 local flt_rt=""
-                prompt_default "IP второго узла/клиента для фильтрации (пусто — весь трафик кроме SSH):" "$default_peer_ip" flt_rt
+                prompt_default "IP второго узла/клиента для фильтрации (пусто — весь трафик кроме SSH):" "$default_capture_ip" flt_rt
                 if [ "$MODULE_CANCELED" = true ]; then continue; fi
 
                 local max_rt="3600"

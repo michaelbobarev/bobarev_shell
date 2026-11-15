@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.27 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.28 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN
-# и сетевого аудита. Включает фильтр nftables IPv4-Only P2P (41641/51820),
-# стартовое окно TCP 1 МБ, автозащиту таблицы 52 и защиту от переноса строк.
+# и сетевого аудита. Включает небуферизованный ввод PEM-сертификатов,
+# разделение портов Nginx (443/2053) и Xray REALITY (8443) и фильтр P2P IPv4.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.27"
+SCRIPT_VERSION="3.20.28"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -2586,7 +2586,8 @@ setup_standalone_vless_wizard() {
     sleep 1
 
     if ! systemctl is-active --quiet bobarev-xray.service; then
-        echo -e "${C_RED} Служба bobarev-xray не запустилась! Проверьте: journalctl -u bobarev-xray -n 30${C_RESET}"
+        echo -e "${C_RED} Служба bobarev-xray не запустилась! Подробный лог ошибки:${C_RESET}"
+        journalctl -u bobarev-xray.service -n 20 --no-pager -l || true
         return 1
     fi
 
@@ -2809,6 +2810,90 @@ open_cloudflare_cdn_ufw_ports() {
     fi
 }
 
+read_pem_block_noncanonical() {
+    local out_file="$1"
+    local block_kind="$2"
+    python3 - "$out_file" "$block_kind" << 'PY_PEM_EOF'
+import os
+import re
+import select
+import sys
+import termios
+import textwrap
+
+out_file = sys.argv[1]
+block_kind = sys.argv[2]
+
+if block_kind == "cert":
+    end_re = re.compile(r"-----END\s+CERTIFICATE-----")
+    extract_re = re.compile(
+        r"(-----BEGIN\s+CERTIFICATE-----)(.*?)(-----END\s+CERTIFICATE-----)",
+        re.DOTALL,
+    )
+else:
+    end_re = re.compile(r"-----END\s+[A-Z0-9\s]*PRIVATE\s+KEY-----")
+    extract_re = re.compile(
+        r"(-----BEGIN\s+[A-Z0-9\s]*PRIVATE\s+KEY-----)(.*?)(-----END\s+[A-Z0-9\s]*PRIVATE\s+KEY-----)",
+        re.DOTALL,
+    )
+
+fd = os.open("/dev/tty", os.O_RDWR)
+old_attr = termios.tcgetattr(fd)
+new_attr = termios.tcgetattr(fd)
+# Отключаем канонический буфер 1024 байт (ICANON), чтобы вставка в одну строку
+# или многострочный PEM любой длины срабатывала мгновенно без зависания Enter
+new_attr[3] = new_attr[3] & ~termios.ICANON
+new_attr[6][termios.VMIN] = 1
+new_attr[6][termios.VTIME] = 0
+termios.tcsetattr(fd, termios.TCSANOW, new_attr)
+
+buf = []
+try:
+    while True:
+        chunk = os.read(fd, 4096).decode("utf-8", errors="ignore")
+        if not chunk:
+            break
+        if "" in chunk or "" in chunk:
+            sys.exit(2)
+        buf.append(chunk)
+        joined = "".join(buf)
+        if end_re.search(joined):
+            # Дочитываем остаток буфера вставки (например, перевод строки)
+            while True:
+                r, _, _ = select.select([fd], [], [], 0.12)
+                if not r:
+                    break
+                extra = os.read(fd, 4096).decode("utf-8", errors="ignore")
+                if not extra:
+                    break
+                buf.append(extra)
+            break
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+    os.close(fd)
+
+print()
+raw = "".join(buf).replace("
+", "
+")
+m = extract_re.search(raw)
+if not m:
+    sys.exit(1)
+
+header, body, footer = m.group(1).strip(), m.group(2), m.group(3).strip()
+b64_clean = re.sub(r"\s+", "", body)
+wrapped = "
+".join(textwrap.wrap(b64_clean, 64))
+pem_text = f"{header}
+{wrapped}
+{footer}
+"
+
+with open(out_file, "w", encoding="utf-8") as fh:
+    fh.write(pem_text)
+PY_PEM_EOF
+}
+
 prompt_paste_cloudflare_origin_cert() {
     local domain="$1"
     mkdir -p /etc/ssl/bobarev-cf-origin
@@ -2822,45 +2907,29 @@ prompt_paste_cloudflare_origin_cert() {
     echo -e "   3) Скопируйте верхнее окно (${C_GREEN}Origin Certificate${C_RESET}) и нижнее окно (${C_YELLOW}Private Key${C_RESET}).\n"
 
     echo -e "${C_BOLD}Шаг 1/2. Вставьте содержимое Origin Certificate (от -----BEGIN CERTIFICATE----- до -----END CERTIFICATE-----):${C_RESET}"
-    echo -e "${C_BLUE}(После вставки последней строки -----END CERTIFICATE----- нажмите Enter):${C_RESET}"
-    local line cert_buf=""
-    while IFS= read -r line; do
-        cert_buf="${cert_buf}${line}"$'\n'
-        if [[ "$line" == *"-----END CERTIFICATE-----"* ]]; then
-            break
-        fi
-    done
-
-    if [[ "$cert_buf" != *"-----BEGIN CERTIFICATE-----"* ]] || [[ "$cert_buf" != *"-----END CERTIFICATE-----"* ]]; then
-        echo -e "${C_RED} Ошибка: сертификат не содержит корректный блок PEM (-----BEGIN CERTIFICATE-----).${C_RESET}"
+    echo -e "${C_BLUE}(Поддерживается многострочная и однострочная вставка; переход к Шагу 2 произойдет автоматически!):${C_RESET}"
+    if ! read_pem_block_noncanonical "$crt_file" "cert"; then
+        echo -e "${C_RED} Ошибка: сертификат не содержит корректный блок PEM (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----).${C_RESET}"
         return 1
     fi
-
-    echo -e "\n${C_BOLD}Шаг 2/2. Вставьте содержимое Private Key (от -----BEGIN ... PRIVATE KEY----- до -----END ... PRIVATE KEY-----):${C_RESET}"
-    echo -e "${C_BLUE}(После вставки последней строки -----END ... PRIVATE KEY----- нажмите Enter):${C_RESET}"
-    local key_buf=""
-    while IFS= read -r line; do
-        key_buf="${key_buf}${line}"$'\n'
-        if [[ "$line" == *"-----END"*"PRIVATE KEY-----"* ]]; then
-            break
-        fi
-    done
-
-    if [[ "$key_buf" != *"-----BEGIN"*"PRIVATE KEY-----"* ]] || [[ "$key_buf" != *"-----END"*"PRIVATE KEY-----"* ]]; then
-        echo -e "${C_RED} Ошибка: приватный ключ не содержит корректный блок PEM (-----BEGIN ... PRIVATE KEY-----).${C_RESET}"
-        return 1
-    fi
-
-    printf '%s' "$cert_buf" > "$crt_file"
-    printf '%s' "$key_buf" > "$key_file"
-    chown root:root "$crt_file" "$key_file"
-    chmod 644 "$crt_file"
-    chmod 600 "$key_file"
 
     if ! openssl x509 -in "$crt_file" -noout >/dev/null 2>&1; then
         echo -e "${C_RED} Ошибка проверки сертификата через openssl x509! Проверьте скопированный текст.${C_RESET}"
         return 1
     fi
+    echo -e "${C_GREEN} ✔ Шаг 1/2 выполнен: Origin Certificate принят и проверен!${C_RESET}"
+
+    echo -e "\n${C_BOLD}Шаг 2/2. Вставьте содержимое Private Key (от -----BEGIN ... PRIVATE KEY----- до -----END ... PRIVATE KEY-----):${C_RESET}"
+    echo -e "${C_BLUE}(Вставьте приватный ключ — сохранение произойдет автоматически!):${C_RESET}"
+    if ! read_pem_block_noncanonical "$key_file" "key"; then
+        echo -e "${C_RED} Ошибка: приватный ключ не содержит корректный блок PEM (-----BEGIN ... PRIVATE KEY-----).${C_RESET}"
+        return 1
+    fi
+
+    chown root:root "$crt_file" "$key_file"
+    chmod 644 "$crt_file"
+    chmod 600 "$key_file"
+
     if ! openssl pkey -in "$key_file" -noout >/dev/null 2>&1; then
         echo -e "${C_RED} Ошибка проверки приватного ключа через openssl pkey! Проверьте скопированный текст.${C_RESET}"
         return 1
@@ -2886,8 +2955,6 @@ ensure_cloudflare_tls_cert() {
             return 1
         }
     fi
-
-    open_cloudflare_cdn_ufw_ports "8443"
 
     mkdir -p /var/www/selfsteal/.well-known/acme-challenge /etc/ssl/bobarev-cf-origin
     local le_dir="/etc/letsencrypt/live/${domain}"
@@ -3083,7 +3150,6 @@ server {
     listen [::]:${https_port} ssl http2;
     listen 0.0.0.0:2053 ssl http2;
     listen [::]:2053 ssl http2;
-    listen 127.0.0.1:8443 ssl http2;
     server_name ${domain};
 
     ssl_certificate ${CF_ACTIVE_SSL_CERT};

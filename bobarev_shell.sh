@@ -1,10 +1,11 @@
 #!/bin/bash
-# Bobarev Shell v3.20.24 — универсальная модульная система настройки безопасности, маршрутизации Tailscale, каскадных прокси (VLESS/XHTTP REALITY stream-one + Self-Steal SNI + TLS Fragment/Finalmask, Hysteria 2, MASQUE) и сетевого аудита.
-# Включает защиту от потери интернета и DNS при выборе неактивного Exit Node в 2 -> 4 (автопроверка связи с мгновенным откатом и очисткой таблицы 52), меню 2 -> 5 (VLESS-XHTTP за Cloudflare CDN) и скоростной профиль Tailscale / Mullvad.
+# Bobarev Shell v3.20.25 — модульная система настройки безопасности, Tailscale,
+# каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN и сетевого аудита.
+# Включает автопроверку Exit Node с защитой таблицы 52 и защиту от переноса строк.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.24"
+SCRIPT_VERSION="3.20.25"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -24,7 +25,8 @@ export TERM_LINES=$(tput lines 2>/dev/null || echo 27)
 export WT_WIDTH=$((TERM_COLS < 85 ? TERM_COLS : 85))
 export WT_HEIGHT=$((TERM_LINES < 27 ? TERM_LINES : 27))
 
-# Конфигурационные пути стека VLESS-REALITY (XTLS Vision + Finalmask) и Hysteria 2
+# Конфигурационные пути стека VLESS-REALITY (XTLS Vision + Finalmask) и
+# Hysteria 2
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_CFG="/etc/xray/config.json"
 XRAY_SERVICE="/etc/systemd/system/bobarev-xray.service"
@@ -456,9 +458,12 @@ TS_EOF
 # ИНТЕРАКТИВНЫЙ СКАНЕР ПОРТОВ И СТЕК VLESS-REALITY (XTLS VISION + FINALMASK)
 # ------------------------------------------------------------------------------
 scan_and_warn_occupied_ports_interactive() {
-    # Сканирует указанные порты (формат: "443/tcp" "443/udp" "1080/tcp" или просто "443")
-    # НИКОГДА не останавливает сервисы автоматически: если порт занят чужим процессом
-    # (или другим модулем), выводит подробное предупреждение и просит запустить пункт меню заново.
+    # Сканирует указанные порты (формат: "443/tcp" "443/udp" "1080/tcp" или
+    # просто "443")
+    # НИКОГДА не останавливает сервисы автоматически: если порт занят чужим
+    # процессом
+    # (или другим модулем), выводит подробное предупреждение и просит
+    # запустить пункт меню заново.
     local menu_item_title="${1:-выбранный пункт меню}"
     local allowed_proc_regex="${2:-}"
     shift 2 || true
@@ -886,7 +891,8 @@ apply_naive_tcp_tuning_profile() {
 
     if [ "$profile" = "aggressive" ]; then
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.22: Aggressive Anti-HoL Blocking & Low-Latency XHTTP Profile
+# Bobarev Shell v3.20.22: Aggressive Anti-HoL Blocking & Low-Latency XHTTP
+# Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 8192
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -933,7 +939,8 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
         cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
-# Bobarev Shell v3.20.22: Zero-Bufferbloat High-Throughput Balanced XHTTP & Tailscale/Mullvad Profile
+# Bobarev Shell v3.20.22: Zero-Bufferbloat High-Throughput Balanced XHTTP
+# & Tailscale/Mullvad Profile
 fs.file-max = 2097152
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
@@ -999,7 +1006,8 @@ TUNE_EOF
 get_wan_global_ipv6() {
     local wan_dev
     wan_dev=$(get_wan_if)
-    # Исключаем link-local (fe80::) и внутренние ULA Tailscale/WireGuard (fc00::/7, fd00::/8)
+    # Исключаем link-local (fe80::) и внутренние ULA Tailscale/WireGuard
+    # (fc00::/7, fd00::/8)
     ip -6 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null         | awk '{print $4}' | cut -d/ -f1         | grep -viE '^(fe80:|fc|fd)' | head -n 1 || true
 }
 
@@ -1210,7 +1218,8 @@ for m_val in 1360 1300 1260 1240 1220 1200 1160 1140 1120 1080; do
     fi
 done
 
-# Управление транспортом P2P Tailscale (41641/udp): Dual-Stack (IPv4+IPv6), Только IPv4 или Только IPv6
+# Управление транспортом P2P Tailscale (41641/udp): Dual-Stack
+# (IPv4+IPv6), Только IPv4 или Только IPv6
 while iptables -D OUTPUT -p udp --dport 41641 -j REJECT 2>/dev/null; do :; done
 while iptables -D INPUT -p udp --dport 41641 -j DROP 2>/dev/null; do :; done
 if command -v ip6tables &>/dev/null; then
@@ -1243,7 +1252,8 @@ if [ "${CASCADE_ROLE:-}" = "ru_entry" ]; then
     ip link set dev tailscale0 mtu 1280 txqueuelen 10000 2>/dev/null || true
     while iptables -t nat -D POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null; do :; done
     iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
-    # Симметричный двусторонний TCPMSS 1220 (PREROUTING + FORWARD + POSTROUTING для MTU 1280)
+    # Симметричный двусторонний TCPMSS 1220 (PREROUTING + FORWARD +
+    # POSTROUTING для MTU 1280)
     iptables -t mangle -I PREROUTING 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
     iptables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
     iptables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
@@ -1279,7 +1289,8 @@ NFT_IP6_EOF
         ip6tables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
         ip6tables -t mangle -I POSTROUTING 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
     fi
-    # Удаляем возможные статические/зависшие маршруты proto boot в таблице 52 перед передачей управления tailscaled
+    # Удаляем возможные статические/зависшие маршруты proto boot в таблице 52
+    # перед передачей управления tailscaled
     while ip route del default dev tailscale0 table 52 proto boot 2>/dev/null; do :; done
     while ip -6 route del default dev tailscale0 table 52 proto boot 2>/dev/null; do :; done
     while ip -6 route del default dev tailscale0 table 52 metric 1024 2>/dev/null; do :; done
@@ -1414,7 +1425,8 @@ Address = $addr
 FwMark = 51820
 Table = off
 
-# 1. Форвардинг ядра, учет fwmark (src_valid_mark=1), автоподбор MTU и отключение строгого rp_filter
+# 1. Форвардинг ядра, учет fwmark (src_valid_mark=1), автоподбор MTU и
+# отключение строгого rp_filter
 PostUp = sysctl -w net.ipv4.ip_forward=1 net.ipv4.conf.all.forwarding=1 net.ipv4.conf.all.src_valid_mark=1 net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
 PostUp = for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do [ -f "\$rp" ] && echo 0 > "\$rp"; done
 
@@ -1423,18 +1435,21 @@ PostUp = ip route replace 100.64.0.0/10 dev tailscale0 table 150 2>/dev/null || 
 PostUp = ip route replace default dev wg0 table 150
 PostUp = ip route replace 100.64.0.0/10 dev tailscale0 table main 2>/dev/null || true
 
-# 3. ЗАЩИТА СИСТЕМНОГО ДОСТУПА (ВЫСОКИЙ ПРИОРИТЕТ 95-100 -> в таблицу 52 / main):
+# 3. ЗАЩИТА СИСТЕМНОГО ДОСТУПА (ВЫСОКИЙ ПРИОРИТЕТ 95-100 -> в таблицу 52 /
+# main):
 # А) Пакеты самого WireGuard (FwMark 51820) — защита от зацикливания туннеля!
 PostUp = ip rule del fwmark 51820 lookup main priority 95 2>/dev/null || true
 PostUp = ip rule add fwmark 51820 lookup main priority 95
 
-# Б) Подсеть Tailscale (100.64.0.0/10) — трафик между узлами идет напрямую через таблицу 52 (Tailscale) и main
+# Б) Подсеть Tailscale (100.64.0.0/10) — трафик между узлами идет напрямую
+# через таблицу 52 (Tailscale) и main
 PostUp = ip rule del to 100.64.0.0/10 lookup 52 priority 96 2>/dev/null || true
 PostUp = ip rule add to 100.64.0.0/10 lookup 52 priority 96
 PostUp = ip rule del to 100.64.0.0/10 lookup main priority 96 2>/dev/null || true
 PostUp = ip rule add to 100.64.0.0/10 lookup main priority 96
 
-# В) Прямой P2P/STUN/DERP-трафик самого демона tailscaled (fwmark 0x80000/0xff0000 на любом порту + 41641/udp)
+# В) Прямой P2P/STUN/DERP-трафик самого демона tailscaled (fwmark
+# 0x80000/0xff0000 на любом порту + 41641/udp)
 PostUp = ip rule del fwmark 0x80000/0xff0000 lookup main priority 97 2>/dev/null || true
 PostUp = ip rule add fwmark 0x80000/0xff0000 lookup main priority 97
 PostUp = ip rule del sport 41641 lookup main priority 97 2>/dev/null || true
@@ -1444,7 +1459,8 @@ PostUp = ip rule add sport 41641 lookup main priority 97
 PostUp = ip rule del sport $ssh_p lookup main priority 98 2>/dev/null || true
 PostUp = ip rule add sport $ssh_p lookup main priority 98
 
-# Д) Ответы на входящие соединения с физического интерфейса (CONNMARK + порты 443/80)
+# Д) Ответы на входящие соединения с физического интерфейса (CONNMARK +
+# порты 443/80)
 PostUp = ip rule del fwmark 0x80000000/0x80000000 lookup main priority 94 2>/dev/null || true
 PostUp = ip rule add fwmark 0x80000000/0x80000000 lookup main priority 94
 PostUp = iptables -t mangle -C PREROUTING -i ${DEFAULT_WAN_IF:-ens3} -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark 0x80000000/0x80000000 2>/dev/null || iptables -t mangle -I PREROUTING 1 -i ${DEFAULT_WAN_IF:-ens3} -m addrtype --dst-type LOCAL -m conntrack --ctdir ORIGINAL -j CONNMARK --set-xmark 0x80000000/0x80000000 2>/dev/null || true
@@ -1731,7 +1747,8 @@ NGINX_LIM
 
 
 # ==============================================================================
-# АВТОНОМНЫЙ VLESS-REALITY (XTLS VISION) + CLOUDFLARE MASQUE (USQUE) + HYSTERIA 2
+# АВТОНОМНЫЙ VLESS-REALITY (XTLS VISION) + CLOUDFLARE MASQUE (USQUE) +
+# HYSTERIA 2
 
 # ==============================================================================
 is_usque_active() {
@@ -1739,17 +1756,22 @@ is_usque_active() {
 }
 
 ensure_ipv4_precedence_and_host_dns() {
-    # 1. Сохраняем нативный равноправный Dual-Stack (IPv4 + IPv6) без принудительного занижения IPv6 в /etc/gai.conf:
-    #    если ранее скрипт раскомментировал или добавлял precedence ::ffff:0:0/96 100, возвращаем стандартное состояние.
+    # 1. Сохраняем нативный равноправный Dual-Stack (IPv4 + IPv6) без
+    # принудительного занижения IPv6 в /etc/gai.conf:
+    # если ранее скрипт раскомментировал или добавлял precedence ::ffff:0:0/96
+    # 100, возвращаем стандартное состояние.
     if [ -f /etc/gai.conf ]; then
         if [ "$(grep -vE '^[[:space:]]*(#|$)' /etc/gai.conf 2>/dev/null | wc -l)" -eq 1 ] && grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
             sed -i -E 's/^[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)/#\1/' /etc/gai.conf 2>/dev/null || true
         fi
     fi
 
-    # 2. Самоисцеление таблицы 52: если в таблице 52 висит default dev tailscale0 (IPv4 или IPv6),
-    #    но трафик через него не проходит (выбран неактивный/свой ненастроенный Exit Node или остались статические маршруты),
-    #    автоматически сбрасываем зависший exit-node и очищаем таблицу 52, возвращая серверу интернет и DNS!
+    # 2. Самоисцеление таблицы 52: если в таблице 52 висит default dev
+    # tailscale0 (IPv4 или IPv6),
+    # но трафик через него не проходит (выбран неактивный/свой ненастроенный
+    # Exit Node или остались статические маршруты),
+    # автоматически сбрасываем зависший exit-node и очищаем таблицу 52,
+    # возвращая серверу интернет и DNS!
     if ip -4 route show table 52 default 2>/dev/null | grep -qE 'dev[[:space:]]+tailscale0' || ip -6 route show table 52 default 2>/dev/null | grep -qE 'dev[[:space:]]+tailscale0'; then
         if ! ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
             command -v tailscale >/dev/null 2>&1 && tailscale set --exit-node= 2>/dev/null || true
@@ -1759,8 +1781,10 @@ ensure_ipv4_precedence_and_host_dns() {
         fi
     fi
 
-    # 2b. Если осталась старая служба bobarev-shell-dns.service от Mullvad, но сам маршрут exit-node в таблице 52 не активен,
-    #    отключаем блокировщик WAN DNS, чтобы после перезагрузки не пропадал DNS (search DOMAINS6 -> search .).
+    # 2b. Если осталась старая служба bobarev-shell-dns.service от Mullvad, но
+    # сам маршрут exit-node в таблице 52 не активен,
+    # отключаем блокировщик WAN DNS, чтобы после перезагрузки не пропадал DNS
+    # (search DOMAINS6 -> search .).
     local mullvad_route_active=false
     if ip -4 route show table 52 default 2>/dev/null | grep -qE '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)'; then
         mullvad_route_active=true
@@ -1772,7 +1796,8 @@ ensure_ipv4_precedence_and_host_dns() {
         fi
     fi
 
-    # 3. Универсальная страховка systemd-resolved (127.0.0.53) от потери апстрим-DNS после reboot (Debian 12/13, Ubuntu, 4vps и др.)
+    # 3. Универсальная страховка systemd-resolved (127.0.0.53) от потери
+    # апстрим-DNS после reboot (Debian 12/13, Ubuntu, 4vps и др.)
     local wan_if
     wan_if=$(get_wan_if)
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
@@ -1788,7 +1813,8 @@ Cache=yes
 RESOLVED_UNIV_EOF
             chmod 644 /etc/systemd/resolved.conf.d/99-bobarev-universal-dns.conf 2>/dev/null || true
         fi
-        # Если DNS сейчас не резолвит (например, сразу после reboot с пустым search .), мгновенно перезапускаем и привязываем DNS к WAN
+        # Если DNS сейчас не резолвит (например, сразу после reboot с пустым
+        # search .), мгновенно перезапускаем и привязываем DNS к WAN
         if ! getent hosts cloudflare.com >/dev/null 2>&1 && ! getent hosts raw.githubusercontent.com >/dev/null 2>&1 && ! getent hosts ya.ru >/dev/null 2>&1; then
             systemctl restart systemd-resolved 2>/dev/null || true
             if [ -n "$wan_if" ] && command -v resolvectl >/dev/null 2>&1 && [ "$mullvad_route_active" = false ]; then
@@ -1799,7 +1825,8 @@ RESOLVED_UNIV_EOF
         fi
     fi
 
-    # 4. Страховка классического /etc/resolv.conf (включая серверы с Tailscale MagicDNS 100.100.100.100 без systemd-resolved)
+    # 4. Страховка классического /etc/resolv.conf (включая серверы с Tailscale
+    # MagicDNS 100.100.100.100 без systemd-resolved)
     if [ -f /etc/resolv.conf ] && ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
         if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|77\.88\.8\.8)' /etc/resolv.conf 2>/dev/null; then
             {
@@ -1811,8 +1838,10 @@ RESOLVED_UNIV_EOF
         fi
     fi
 
-    # 5. Финальная самодиагностика: если в /etc/resolv.conf стоит 127.0.0.53, но локальный стаб мёртв при живом пинге до DNS,
-    #    переключаем /etc/resolv.conf на прямые публичные DNS-резолверы (РФ + мир).
+    # 5. Финальная самодиагностика: если в /etc/resolv.conf стоит 127.0.0.53,
+    # но локальный стаб мёртв при живом пинге до DNS,
+    # переключаем /etc/resolv.conf на прямые публичные DNS-резолверы (РФ +
+    # мир).
     if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
         if ! getent hosts cloudflare.com >/dev/null 2>&1 && ! getent hosts ya.ru >/dev/null 2>&1; then
             if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || ping -c 1 -W 2 77.88.8.8 >/dev/null 2>&1; then
@@ -1835,7 +1864,8 @@ install_universal_dns_boot_guard() {
     mkdir -p /usr/local/sbin
     cat << 'BOOT_GUARD_EOF' > /usr/local/sbin/bobarev-universal-dns-guard
 #!/bin/bash
-# Bobarev Shell v3.20.8 — Универсальный сторож DNS, IPv4-приоритета и защиты от зависшего Exit-Node при загрузке
+# Bobarev Shell v3.20.8 — Универсальный сторож DNS, IPv4-приоритета и
+# защиты от зависшего Exit-Node при загрузке
 set -u
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -1843,16 +1873,20 @@ get_wan_dev() {
     ip -4 route show table main default 2>/dev/null | grep -vE "tailscale0|wg[0-9]*|wgcf|wg-cascade|warp|tun[0-9]*|tap[0-9]*|utun[0-9]*|awg[0-9]*" | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1 || echo ""
 }
 
-# 1. Нативный Dual-Stack (IPv4 + IPv6): не перезаписываем приоритет протоколов в /etc/gai.conf
+# 1. Нативный Dual-Stack (IPv4 + IPv6): не перезаписываем приоритет
+# протоколов в /etc/gai.conf
 if [ -f /etc/gai.conf ]; then
     if [ "$(grep -vE '^[[:space:]]*(#|$)' /etc/gai.conf 2>/dev/null | wc -l)" -eq 1 ] && grep -qE '^[[:space:]]*precedence[[:space:]]+::ffff:0:0/96[[:space:]]+100' /etc/gai.conf 2>/dev/null; then
         sed -i -E 's/^[[:space:]]*(precedence[[:space:]]+::ffff:0:0\/96[[:space:]]+100)/#\1/' /etc/gai.conf 2>/dev/null || true
     fi
 fi
 
-# 2. Защита от «зависшего» или недоступного Tailscale Exit-Node после перезагрузки:
-#    если маршрут уходит в tailscale0, но пинг до 1.1.1.1 / 8.8.8.8 / 77.88.8.8 не проходит,
-#    и при этом на сервере НЕ включён строгий зафиксированный транзакционный режим Mullvad,
+# 2. Защита от «зависшего» или недоступного Tailscale Exit-Node после
+# перезагрузки:
+# если маршрут уходит в tailscale0, но пинг до 1.1.1.1 / 8.8.8.8 /
+# 77.88.8.8 не проходит,
+# и при этом на сервере НЕ включён строгий зафиксированный транзакционный
+# режим Mullvad,
 #    возвращаем прямой выход через WAN, чтобы сервер не терял связность.
 if command -v tailscale >/dev/null 2>&1 && ip -4 route show table 52 default 2>/dev/null | grep -qE '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)'; then
     if [ ! -f /var/lib/bobarev-shell-mullvad/config ] && [ ! -f /etc/bobarev-tailscale/exit-node ]; then
@@ -1862,7 +1896,8 @@ if command -v tailscale >/dev/null 2>&1 && ip -4 route show table 52 default 2>/
     fi
 fi
 
-# 3. Очистка осиротевшего блокировщика DNS от Mullvad, если сам туннель Mullvad не активен
+# 3. Очистка осиротевшего блокировщика DNS от Mullvad, если сам туннель
+# Mullvad не активен
 MULLVAD_ACTIVE=false
 if [ -f /var/lib/bobarev-shell-mullvad/config ] && ip -4 route show table 52 default 2>/dev/null | grep -qE '^default[[:space:]]+dev[[:space:]]+tailscale0([[:space:]]|$)'; then
     MULLVAD_ACTIVE=true
@@ -1874,7 +1909,8 @@ if [ "$MULLVAD_ACTIVE" = false ]; then
     fi
 fi
 
-# 4. Конфигурация systemd-resolved с постоянным пулом DNS и FallbackDNS (Cloudflare + Google + Quad9 + Yandex для серверов в РФ и за рубежом)
+# 4. Конфигурация systemd-resolved с постоянным пулом DNS и FallbackDNS
+# (Cloudflare + Google + Quad9 + Yandex для серверов в РФ и за рубежом)
 WAN_IF=$(get_wan_dev)
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
     mkdir -p /etc/systemd/resolved.conf.d
@@ -1897,7 +1933,8 @@ EOF_RES
     fi
 fi
 
-# 5. Защита /etc/resolv.conf без systemd-resolved (в т.ч. при перезаписи Tailscale MagicDNS 100.100.100.100)
+# 5. Защита /etc/resolv.conf без systemd-resolved (в т.ч. при перезаписи
+# Tailscale MagicDNS 100.100.100.100)
 if [ -f /etc/resolv.conf ] && ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
     if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+(1\.1\.1\.1|8\.8\.8\.8|1\.0\.0\.1|77\.88\.8\.8)' /etc/resolv.conf 2>/dev/null; then
         {
@@ -1909,7 +1946,8 @@ if [ -f /etc/resolv.conf ] && ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127
     fi
 fi
 
-# 6. Аварийное переключение со стаба 127.0.0.53 на прямой /etc/resolv.conf, если после старта стаб не резолвит имена
+# 6. Аварийное переключение со стаба 127.0.0.53 на прямой
+# /etc/resolv.conf, если после старта стаб не резолвит имена
 sleep 1
 if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
     if ! getent hosts cloudflare.com >/dev/null 2>&1 && ! getent hosts raw.githubusercontent.com >/dev/null 2>&1 && ! getent hosts ya.ru >/dev/null 2>&1; then
@@ -1999,7 +2037,8 @@ wait_for_usque_port() {
     local wait_i=0
     while [ "$wait_i" -lt 10 ]; do
         if ss -Hltn 2>/dev/null | awk '$4 ~ /:1080$/ {found=1} END{exit !found}'; then
-            # Даем 1 секунду на завершение QUIC/MASQUE рукопожатия с Cloudflare после открытия сокета
+            # Даем 1 секунду на завершение QUIC/MASQUE рукопожатия с Cloudflare после
+            # открытия сокета
             sleep 1
             return 0
         fi
@@ -2010,7 +2049,8 @@ wait_for_usque_port() {
 }
 
 test_usque_large_payload() {
-    # Проверяет готовность туннеля Usque на 127.0.0.1:1080 (с повтором при старте QUIC-сессии)
+    # Проверяет готовность туннеля Usque на 127.0.0.1:1080 (с повтором при
+    # старте QUIC-сессии)
     local try_i=0
     while [ "$try_i" -lt 2 ]; do
         if curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1 ||            curl -4 -fsS --max-time 8 --socks5-hostname 127.0.0.1:1080 https://ifconfig.me >/dev/null 2>&1; then
@@ -2023,8 +2063,10 @@ test_usque_large_payload() {
 }
 
 install_and_setup_usque() {
-    # По умолчанию для NaiveProxy используем l4-socks (быстрый потоковый L4 TCP-прокси для IPv4 и IPv6,
-    # рекомендованный автором Diniboy1123/usque для TCP-прокси без накладных расходов и лимитов MTU gVisor)
+    # По умолчанию для NaiveProxy используем l4-socks (быстрый потоковый L4
+    # TCP-прокси для IPv4 и IPv6,
+    # рекомендованный автором Diniboy1123/usque для TCP-прокси без накладных
+    # расходов и лимитов MTU gVisor)
     local proxy_mode="${1:-l4-socks}"
     local force_re_reg="${2:-false}"
 
@@ -3469,7 +3511,8 @@ setup_cloudflare_cdn_vless_wizard() {
         target_foreign_mode="direct"
     fi
 
-    # Если выбран режим cdn_only (Nginx слушает 443 напрямую), временно освобождаем 443 от Xray перед стартом Nginx
+    # Если выбран режим cdn_only (Nginx слушает 443 напрямую), временно
+    # освобождаем 443 от Xray перед стартом Nginx
     if [ "$front_mode" = "cdn_only" ]; then
         silent_run systemctl stop bobarev-xray.service 2>/dev/null || true
     fi
@@ -3713,7 +3756,9 @@ setup_cascade_server2_warp() {
     local exit_choice=""
     if ! smart_menu "Выход в интернет на Зарубежном Сервере 2 (Tailscale)" "
 Как выпускать трафик из Tailscale в интернет с этого зарубежного сервера?
-(Вы сможете переключать этот режим за 2 секунды в Пункте 7 меню):" 16 "$WT_WIDTH" 2 "exit_choice"     "1" " Чистый зарубежный IP (Напрямую с этого сервера — БЕЗ MASQUE, макс. скорость!)"     "2" " Через Cloudflare MASQUE (Usque — чистая репутация IP Cloudflare без капч и блокировок)"; then
+(Вы сможете переключать этот режим за 2 секунды в Пункте 7 меню):" 16 "$WT_WIDTH" 2 "exit_choice" \
+        "1" " Чистый зарубежный IP: Напрямую с этого сервера" \
+        "2" " Через Cloudflare MASQUE: Usque 127.0.0.1:1080"; then
         return 0
     fi
 
@@ -3755,7 +3800,8 @@ select_tailscale_exit_node_dropdown() {
     menu_items+=("SUGGEST" "⚡ Автовыбор самого быстрого узла по пингу (tailscale exit-node suggest)")
 
     if command -v tailscale &>/dev/null; then
-        # 1. Считываем личные узлы из 'tailscale status' (чтобы свои серверы всегда шли первыми)
+        # 1. Считываем личные узлы из 'tailscale status' (чтобы свои серверы
+        # всегда шли первыми)
         while IFS= read -r line; do
             [[ "$line" =~ ^[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(.*)$ ]] || continue
             ip="${BASH_REMATCH[1]}"
@@ -3776,7 +3822,8 @@ select_tailscale_exit_node_dropdown() {
             fi
         done < <(tailscale status 2>/dev/null || true)
 
-        # 2. Считываем список выходных узлов из 'tailscale exit-node list' с приоритетом близких стран Европы
+        # 2. Считываем список выходных узлов из 'tailscale exit-node list' с
+        # приоритетом близких стран Европы
         while IFS= read -r line; do
             [[ "$line" =~ ^[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)[[:space:]]+([^[:space:]]+)[[:space:]]+(.*)$ ]] || continue
             ip="${BASH_REMATCH[1]}"
@@ -5204,11 +5251,16 @@ render_xray_server_config() {
     mkdir -p /etc/xray
 
     if [ "$exit_mode" = "warp" ] || [ "$exit_mode" = "masque" ]; then
-        # Умная маршрутизация для VLESS-XHTTP -> Cloudflare MASQUE (usque на 127.0.0.1:1080):
-        # 1) Вход vless-xhttp-in работает по современному протоколу XHTTP ("mode": "auto", принимает auto, packet-up, stream-up, stream-one).
-        # 2) Выход masque-out использует freedom с dialerProxy: "usque-raw" и sockopt.domainStrategy: "UseIPv4",
-        #    чтобы Xray сам мгновенно резолвил домены в IPv4 на сервере и передавал в usque готовый IPv4-адрес
-        #    (полностью исключает ошибку 'DNS resolution failed: i/o timeout' внутри usque после простоя!).
+        # Умная маршрутизация для VLESS-XHTTP -> Cloudflare MASQUE (usque на
+        # 127.0.0.1:1080):
+        # 1) Вход vless-xhttp-in работает по современному протоколу XHTTP ("mode":
+        # "auto", принимает auto, packet-up, stream-up, stream-one).
+        # 2) Выход masque-out использует freedom с dialerProxy: "usque-raw" и
+        # sockopt.domainStrategy: "UseIPv4",
+        # чтобы Xray сам мгновенно резолвил домены в IPv4 на сервере и передавал в
+        # usque готовый IPv4-адрес
+        # (полностью исключает ошибку 'DNS resolution failed: i/o timeout' внутри
+        # usque после простоя!).
         cat << EOF > /etc/xray/config.json
 {
   "log": {
@@ -6751,7 +6803,8 @@ TS_EOF
 # ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
 # ПАМЯТЬ ОТВЕТОВ: вопрос по Tailscale задаётся ОДИН РАЗ за запуск мастера.
-# Ответ сохраняется в /etc/default/bobarev-answers и используется при след. запуске.
+# Ответ сохраняется в /etc/default/bobarev-answers и используется при
+# след. запуске.
 # ------------------------------------------------------------------------------
 BOBAREV_ANSWERS_FILE="/etc/default/bobarev-answers"
 BOBAREV_TS_DECLINED="${BOBAREV_TS_DECLINED:-}"
@@ -6777,7 +6830,8 @@ bobarev_ts_decline() {
     bobarev_answer_save TS_INSTALL declined
 }
 
-# Пользователь согласился — запомнить, чтобы в следующий раз не пугать вопросом.
+# Пользователь согласился — запомнить, чтобы в следующий раз не пугать
+# вопросом.
 bobarev_ts_accept() {
     bobarev_answer_save TS_INSTALL accepted
 }
@@ -6845,7 +6899,8 @@ smart_menu() {
     if ! [[ "$height" =~ ^[0-9]+$ ]]; then
         height=20
     fi
-    # Ensure box height is sufficient for message lines + menu_h + borders, yet fits terminal
+    # Ensure box height is sufficient for message lines + menu_h + borders,
+    # yet fits terminal
     if (( height < menu_h + 9 )); then
         height=$((menu_h + 9))
     fi
@@ -6886,7 +6941,8 @@ check_system_resources() {
         return 1
     fi
 
-    # Если уже активен Swap (например, >= 512MB) или свободной ОЗУ >= 512МБ, то все в норме и не нужно спрашивать повторно
+    # Если уже активен Swap (например, >= 512MB) или свободной ОЗУ >= 512МБ,
+    # то все в норме и не нужно спрашивать повторно
     if [ "$free_mem" -lt 512 ] && [ "${total_swap:-0}" -lt 512 ] && ! swapon --show 2>/dev/null | grep -qE "swapfile|swap"; then
         echo -e "${C_YELLOW} Внимание: Малый объем свободной ОЗУ ($free_mem МБ) и отсутствует Swap.${C_RESET}"
         echo -e "${C_BLUE} Для стабильной сборки Caddy рекомендуется создать Swap-файл (2 ГБ).${C_RESET}"
@@ -7055,7 +7111,8 @@ ZRAM_EOF
     echo -e "${C_GREEN} Система успешно обновлена, базовые утилиты установлены.${C_RESET}"
 }
 
-# 4. Пользователь и Sudo (с гарантированным приоритетом 99-zzz- в /etc/sudoers.d)
+# 4. Пользователь и Sudo (с гарантированным приоритетом 99-zzz- в
+# /etc/sudoers.d)
 mod_user_setup() {
     echo -e "${C_CYAN} === 4/27. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
     local active_user=$(get_active_user)
@@ -7281,7 +7338,8 @@ mod_ssh_config() {
         bobarev_ts_accept
     else
         ts_restrict_comment="# SSH Public Access"
-        # Ответ «нет» запоминается: в этом запуске про Tailscale больше не спросим.
+        # Ответ «нет» запоминается: в этом запуске про Tailscale больше не
+        # спросим.
         bobarev_ts_decline
     fi
 
@@ -7462,7 +7520,12 @@ mod_ssh_bruteforce_guard() {
 Текущая защита: ${cur_guard}
 Порт SSH: ${ssh_port} | Отражено попыток входа с момента загрузки: ${failed_cnt:-0}
 
-Выберите действие:" 18 "$WT_WIDTH" 6 "bf_choice"             "1" "Установить и включить SSHGuard (легковесная защита в реальном времени)"             "2" "Установить и включить Fail2Ban (классическая защита с jail sshd)"             "3" "Показать статистику атак и заблокированные IP-адреса"             "4" "Отключить и остановить защиту от перебора (SSHGuard / Fail2Ban)"             "0" "⬅ Назад" || [ "$bf_choice" = "0" ]; then
+Выберите действие:" 18 "$WT_WIDTH" 6 "bf_choice" \
+            "1" "Установить и включить SSHGuard" \
+            "2" "Установить и включить Fail2Ban" \
+            "3" "Показать статистику атак и заблокированные IP" \
+            "4" "Отключить защиту от перебора SSHGuard / Fail2Ban" \
+            "0" "⬅ Назад" || [ "$bf_choice" = "0" ]; then
             return 0
         fi
 
@@ -7507,7 +7570,8 @@ mod_ssh_bruteforce_guard() {
     done
 }
 
-# 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6 форвардингом)
+# 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6
+# форвардингом)
 mod_hardening() {
     echo -e "${C_CYAN} === 7/27. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
@@ -7608,7 +7672,8 @@ HARDENING_EOF
     echo -e "${C_GREEN} Защита ядра, буферы 16 МБ, лимиты дескрипторов (512000), TCP BBR и защита DNS после перезагрузки применены.${C_RESET}"
 }
 
-# 8. Firewall UFW (сохраняет правила личного DERP, Каскада NaiveProxy/WARP/WG-Cascade и открывает 41641/udp при наличии Tailscale)
+# 8. Firewall UFW (сохраняет правила личного DERP, Каскада
+# NaiveProxy/WARP/WG-Cascade и открывает 41641/udp при наличии Tailscale)
 mod_ufw() {
     echo -e "${C_CYAN} === 8/27. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
@@ -7845,7 +7910,8 @@ mod_lock_root() {
 }
 mod_lock_root_auto() { mod_lock_root "auto"; }
 
-# 10. Tailscale (включая пункт 9 DERP и пункт 10 Каскад NaiveProxy + Tailscale + WARP)
+# 10. Tailscale (включая пункт 9 DERP и пункт 10 Каскад NaiveProxy +
+# Tailscale + WARP)
 ts42_wait_running() {
  local i state
  for i in {1..60}; do
@@ -8139,7 +8205,16 @@ br48_dnsmasq_range() {
 ts42_tools() {
  local c target='' port='' endpoints='' val='' sub_c=''
  while true; do
-  smart_menu 'Tailscale: диагностика и управление выходом'    'Все основные инструменты диагностики, переключения VPN-шлюза и обхода блокировок на одном экране:'    18 "${WT_WIDTH:-85}" 7 c    1 'Полная диагностика (Статус, внешний IP, Netcheck и NAT)'    2 'Пинг узла: проверка прямого соединения (Direct / DERP)'    3 'Подключить VPN-выход (Exit Node + автозапуск при старте)'    4 'Отключить VPN-выход (Прямой интернет через WAN)'    5 'Обход блокировок: принудительный TCP 443 (Вкл / Выкл)'    6 'Дополнительно: Peer Relay и Автообновления'    0 '⬅ Назад' || return 0
+  smart_menu 'Tailscale: диагностика и управление выходом' \
+    'Все основные инструменты диагностики, переключения VPN-шлюза и обхода блокировок:' \
+    18 "${WT_WIDTH:-85}" 7 c \
+    1 'Полная диагностика: Статус, внешний IP, Netcheck и NAT' \
+    2 'Пинг узла: проверка прямого соединения Direct / DERP' \
+    3 'Подключить VPN-выход: Exit Node + автозапуск' \
+    4 'Отключить VPN-выход: Прямой интернет через WAN' \
+    5 'Обход блокировок: принудительный TCP 443 Вкл / Выкл' \
+    6 'Дополнительно: Peer Relay и Автообновления' \
+    0 '⬅ Назад' || return 0
   case "$c" in
    0) return 0 ;;
    1) clear; ts_full_diagnostic ;;
@@ -8153,7 +8228,10 @@ ts42_tools() {
    4) clear; ts_smart_disconnect_exit_node || true ;;
    5) clear; ts42_control || true ;;
    6)
-      if ! smart_menu 'Дополнительные параметры Tailscale' 'Выберите настройку:' 14 "${WT_WIDTH:-85}" 3 sub_c        1 'Настроить UDP Peer Relay (прямой ретранслятор между узлами)'        2 'Автообновления клиента Tailscale (Включить / Выключить)'        0 '⬅ Назад'; then
+      if ! smart_menu 'Дополнительные параметры Tailscale' 'Выберите настройку:' 14 "${WT_WIDTH:-85}" 3 sub_c \
+        1 'Настроить UDP Peer Relay: прямой ретранслятор' \
+        2 'Автообновления клиента Tailscale: Вкл / Выкл' \
+        0 '⬅ Назад'; then
        continue
       fi
       case "$sub_c" in
@@ -8197,7 +8275,8 @@ mod_tailscale() {
             enable_routing_optimizations || true
         else
             # Вопрос про Tailscale задаётся ТОЛЬКО ОДИН РАЗ за запуск мастера.
-            # Если пользователь уже ответил «нет» (в модуле SSH или UFW) — не спрашиваем снова.
+            # Если пользователь уже ответил «нет» (в модуле SSH или UFW) — не
+            # спрашиваем снова.
             local ts_saved_answer=""
             ts_saved_answer=$(bobarev_answer_get TS_INSTALL 2>/dev/null || echo "")
             if [ -n "$BOBAREV_TS_DECLINED" ]; then
@@ -8911,7 +8990,8 @@ mod_boot_diag() {
     echo " SVG-график сохранен:      $svg_file"
 }
 
-# 17. Полный аудит сервера (с проверкой ретранслятора DERP и обоих типов каскада)
+# 17. Полный аудит сервера (с проверкой ретранслятора DERP и обоих типов
+# каскада)
 
 # Audit-only: inspect direct POSTROUTING rules; never alter firewall.
 audit_nat_output() {
@@ -9402,7 +9482,8 @@ mod_server_audit() {
     esac
     audit_human_row 'Учётная запись root:' "$root_pw_human"
 
-    # Проверки политики безопасности по стандарту vps-audit (Журналирование sudo, парольная политика, SUID)
+    # Проверки политики безопасности по стандарту vps-audit (Журналирование
+    # sudo, парольная политика, SUID)
     if grep -qrE "^[[:space:]]*Defaults.*logfile" /etc/sudoers /etc/sudoers.d 2>/dev/null; then
         audit_human_row 'Журнал команд Sudo:' "${C_GREEN}✔ Ведется отдельный аудит-лог команд sudo${C_RESET}"
     else
@@ -9486,7 +9567,8 @@ mod_server_audit() {
     elif [ -n "$journal_ssh" ] && [ "$journal_ssh" != '-- No entries --' ]; then protection="${C_GREEN}✔ Активна (${guards}, журнал SSH контролируется)${C_RESET}"
     else protection="${C_GREEN}✔ Активна (${guards})${C_RESET}"; fi
         audit_human_row 'Защита от перебора:' "$protection"
-    # Проверка совпадения порта SSH и правил Fail2ban (по методике nuver-labs/vps-audit)
+    # Проверка совпадения порта SSH и правил Fail2ban (по методике
+    # nuver-labs/vps-audit)
     if systemctl is-active --quiet fail2ban.service 2>/dev/null && [ -d /etc/fail2ban ] && [[ "$ssh_port" =~ ^[0-9]+$ ]]; then
         local f2b_port="" f2b_banaction="" f2b_file=""
         for f2b_file in /etc/fail2ban/jail.conf /etc/fail2ban/jail.d/*.conf /etc/fail2ban/jail.local /etc/fail2ban/jail.d/*.local; do
@@ -10087,7 +10169,8 @@ mod_server_audit() {
     echo -e "${C_CYAN}=================================================================${C_RESET}"
 }
 
-# 18. Универсальный режим локального маршрутизатора (с поддержкой SBC-клиента WireGuard/WARP)
+# 18. Универсальный режим локального маршрутизатора (с поддержкой
+# SBC-клиента WireGuard/WARP)
 br26_input() {
  local _v
  _v=$(whiptail --inputbox "$1" 12 "${WT_WIDTH:-85}" "$2" 3>&1 1>&2 2>&3) || return 1
@@ -10388,7 +10471,8 @@ def suggest(links,routes,selected,preferred=None):
   try:n=ipaddress.ip_network(dst,strict=False)
   except ValueError:continue
   if n.version!=4:continue
-  # Host/local entries for selected LAN are allowed when reusing its connected network.
+  # Host/local entries for selected LAN are allowed when reusing its
+  # connected network.
   if r.get('dev') in selected:continue
   blocked.append(n)
  for l in links:
@@ -10518,7 +10602,8 @@ BR29_LANS
  for dev in "${lans[@]}"; do
   [[ "$dev" =~ ^[A-Za-z0-9_.-]{1,15}$ && "$dev" != lo && "$dev" != "$out" ]] || { echo 'LAN и выход должны быть разными'; return 1; }
  done
- # Warn for manual reassignment of known WAN/VPN rather than silently treating it as LAN.
+ # Warn for manual reassignment of known WAN/VPN rather than silently
+ # treating it as LAN.
  wanted=$(python3 - "$scan" "${lans[@]}" <<'BR29_WARN'
 import json,sys
 names=set(sys.argv[2:]);d=json.loads(sys.argv[1])
@@ -10896,7 +10981,8 @@ clean() {
  done
 }
 if [[ ${1:-} == stop ]]; then clean; exit 0; fi
-# Fail-closed guard for forwarded LAN traffic during startup; INPUT remains available.
+# Fail-closed guard for forwarded LAN traffic during startup; INPUT
+# remains available.
 guard_clean() {
  for bin in iptables ip6tables; do
   while "$bin" -w 5 -D FORWARD -j BR42_WAIT 2>/dev/null; do :; done
@@ -11126,7 +11212,25 @@ mod_backup_manager() {
     if [ "$b_choice" = "1" ]; then
         local archive_path="${target_home}/bobarev_backup_$(hostname)_$(date +%Y%m%d_%H%M%S).tar.gz"
         local files_to_pack=()
-        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config /var/lib/bobarev-shell-mullvad/client-links.txt /var/lib/bobarev-shell-mullvad/vless-links.txt /usr/local/lib/bobarev-shell /etc/systemd/system/bobarev-shell-return.service /etc/systemd/system/bobarev-shell-dns.service /etc/default/bobarev-netfilter /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard /etc/caddy /etc/naiveproxy /etc/usque /etc/hysteria /etc/xray /etc/systemd/system/usque.service /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf /etc/udev/rules.d/60-ioscheduler.rules; do
+        for item in /etc/sudoers /etc/sudoers.d /etc/ssh/sshd_config /etc/ssh/sshd_config.d \
+            /etc/sysctl.d /etc/ufw /etc/default/ufw /etc/default/bobarev-router \
+            /etc/bobarev-router-v2 /etc/bobarev-tailscale /var/lib/bobarev-shell-mullvad/config \
+            /var/lib/bobarev-shell-mullvad/client-links.txt /var/lib/bobarev-shell-mullvad/vless-links.txt \
+            /usr/local/lib/bobarev-shell /etc/systemd/system/bobarev-shell-return.service \
+            /etc/systemd/system/bobarev-shell-dns.service /etc/default/bobarev-netfilter \
+            /etc/default/bobarev-derp /etc/default/bobarev-cascade /etc/derp /etc/wireguard \
+            /etc/caddy /etc/naiveproxy /etc/usque /etc/hysteria /etc/xray \
+            /etc/systemd/system/usque.service /etc/systemd/system/hysteria-server.service \
+            /etc/systemd/system/hysteria-client.service /etc/systemd/system/bobarev-xray.service \
+            /etc/systemd/system/bobarev-router-v2.service /etc/systemd/system/bobarev-router-dhcp.service \
+            /etc/systemd/system/bobarev-tailscale-exit-restore.service /etc/systemd/system/derper.service \
+            /etc/systemd/system/caddy.service /etc/systemd/system/bobarev-cascade-ru.service \
+            /usr/local/bin/bobarev-cascade-ru.sh /usr/local/sbin/bobarev-router-v2 \
+            /usr/local/sbin/bobarev-router-performance /usr/local/sbin/bobarev-router-networkd.py \
+            /usr/local/sbin/bobarev-router-routes.py /usr/local/sbin/bobarev-tailscale-exit-restore \
+            /usr/local/bin/bobarev-router-up.sh /etc/systemd/system/bobarev-router.service \
+            /etc/dnsmasq.conf /etc/default/zramswap /etc/systemd/journald.conf \
+            /etc/udev/rules.d/60-ioscheduler.rules; do
             [ -e "$item" ] && files_to_pack+=("$item")
         done
 
@@ -11165,7 +11269,8 @@ mod_backup_manager() {
     fi
 }
 
-# 21. Универсальный аудит сети, протоколов обхода ТСПУ и каскадных пар (network-audit v3.1)
+# 21. Универсальный аудит сети, протоколов обхода ТСПУ и каскадных пар
+# (network-audit v3.1)
 install_network_audit_tool() {
     if ! command -v tcpdump &>/dev/null || ! command -v mtr &>/dev/null || ! command -v conntrack &>/dev/null; then
         echo -e "${C_BLUE} Доустановка диагностических утилит (tcpdump, mtr-tiny, conntrack) для глубокого перехвата пакетов...${C_RESET}"
@@ -11176,15 +11281,19 @@ install_network_audit_tool() {
     cat << 'NET_AUDIT_EOF' > /usr/local/bin/bobarev-network-audit.sh
 #!/bin/bash
 # ==============================================================================
-# УНИВЕРСАЛЬНЫЙ СКРИПТ АУДИТА СЕТИ, ПРОТОКОЛОВ ОБХОДА ТСПУ И КАСКАДНЫХ ПАР (v3.1)
+# УНИВЕРСАЛЬНЫЙ СКРИПТ АУДИТА СЕТИ, ПРОТОКОЛОВ ОБХОДА ТСПУ И КАСКАДНЫХ ПАР
+# (v3.1)
 # ------------------------------------------------------------------------------
 # Поддерживает 4 режима работы (через интерактивное меню или флаги CLI):
-#   Режим 1: Автономный срез сервера и "жизни" уже работающего каскада (постфактум).
-#   Режим 2: Активное тестирование ПАРЫ серверов (PMTU, TCP MSS, MTR, порты, iperf3).
-#   Режим 3: МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ ("Черный ящик" / Fail-Safe Live Recorder)
+# Режим 1: Автономный срез сервера и "жизни" уже работающего каскада
+# (постфактум).
+# Режим 2: Активное тестирование ПАРЫ серверов (PMTU, TCP MSS, MTR, порты,
+# iperf3).
+# Режим 3: МОНИТОРИНГ В РЕАЛЬНОМ ВРЕМЕНИ ("Черный ящик" / Fail-Safe Live
+# Recorder)
 #            Записывает в реальном времени все новые/активные сессии, пакеты,
-#            дельту ретрансмитов и ошибок. Безотказно финализирует отчет как при
-#            нажатии Ctrl+C / Enter / 'q', так и при внезапном обрыве SSH-канала!
+# дельту ретрансмитов и ошибок. Безотказно финализирует отчет как при
+# нажатии Ctrl+C / Enter / 'q', так и при внезапном обрыве SSH-канала!
 #   Режим 4: Полный комбо-режим (Режим 1 + Режим 2).
 # ==============================================================================
 
@@ -11193,14 +11302,16 @@ export LC_ALL=C
 HOST_NAME=$(hostname)
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
-# Определение домашней директории реально залогиненного пользователя (даже при запуске через sudo)
+# Определение домашней директории реально залогиненного пользователя (даже
+# при запуске через sudo)
 if [ -n "$SUDO_USER" ]; then
     USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 else
     USER_HOME="$HOME"
 fi
 
-# Если домашняя папка найдена и доступна на запись — сохраняем туда, иначе в текущую директорию
+# Если домашняя папка найдена и доступна на запись — сохраняем туда, иначе
+# в текущую директорию
 if [ -d "$USER_HOME" ] && [ -w "$USER_HOME" ]; then
     OUT_DIR="$USER_HOME"
 else
@@ -12172,7 +12283,8 @@ nm_yes() {
     prompt_yn "$1" "${2:-false}"
 }
 
-# Автоматическое самовосстановление DNS и приоритета IPv4 при каждом запуске скрипта
+# Автоматическое самовосстановление DNS и приоритета IPv4 при каждом
+# запуске скрипта
 if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
     ensure_ipv4_precedence_and_host_dns 2>/dev/null || true
 fi
@@ -12314,7 +12426,23 @@ menu_server_security() {
     while true; do
         MODULE_CANCELED=false
         local choice=""
-        if ! smart_menu "🛠 БАЗОВАЯ НАСТРОЙКА И БЕЗОПАСНОСТЬ" "Выберите этап настройки сервера:" 23 "$WT_WIDTH" 16 choice             "1" "Часовой пояс"             "2" "Имя сервера (Hostname)"             "3" "Обновление пакетов, приоритет IPv4 и zRAM"             "4" "Создание и настройка пользователя"             "5" "Привязка SSH-ключа безопасности"             "6" "Конфигурация SSH (порт, ключи, доступ)"             "7" "Защита от перебора паролей SSH (SSHGuard / Fail2Ban)"             "8" "Защита ядра и сетевой стек TCP BBR (Sysctl)"             "9" "Управление брандмауэром (UFW)"             "10" "Блокировка пароля суперпользователя (root)"             "11" "Оптимизация RAM и Flash-памяти"             "12" "Управление файлом подкачки (Swap)"             "13" "Утилиты ПК и режим процессора (CPU)"             "14" "Сброс видеовыхода HDMI"             "A" "Выполнить первичную настройку целиком (Шаги 1-12)"             "0" "⬅ Назад"; then
+        if ! smart_menu "🛠 БАЗОВАЯ НАСТРОЙКА И БЕЗОПАСНОСТЬ" "Выберите этап настройки сервера:" 23 "$WT_WIDTH" 16 choice \
+            "1" "Часовой пояс" \
+            "2" "Имя сервера - Hostname" \
+            "3" "Обновление пакетов, приоритет IPv4 и zRAM" \
+            "4" "Создание и настройка пользователя" \
+            "5" "Привязка SSH-ключа безопасности" \
+            "6" "Конфигурация SSH - порт, ключи, доступ" \
+            "7" "Защита от перебора паролей SSH - SSHGuard / Fail2Ban" \
+            "8" "Защита ядра и сетевой стек TCP BBR - Sysctl" \
+            "9" "Управление брандмауэром - UFW" \
+            "10" "Блокировка пароля суперпользователя - root" \
+            "11" "Оптимизация RAM и Flash-памяти" \
+            "12" "Управление файлом подкачки - Swap" \
+            "13" "Утилиты ПК и режим процессора - CPU" \
+            "14" "Сброс видеовыхода HDMI" \
+            "A" "Выполнить первичную настройку целиком: Шаги 1-12" \
+            "0" "⬅ Назад"; then
             return 0
         fi
         if [ -z "$choice" ] || [ "$choice" = "0" ]; then return 0; fi
@@ -12368,7 +12496,14 @@ menu_diagnostics_maintenance() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "⚙️ ДИАГНОСТИКА, АУДИТ И ОБСЛУЖИВАНИЕ" "Выберите инструмент:" 18 "$WT_WIDTH" 7 sub_choice             "1" "Состояние сервера (Аудит ресурсов и безопасности)"             "2" "Проверка сети, ТСПУ и каскадных пар"             "3" "Управление системными журналами (Логи)"             "4" "Анализ времени загрузки системы"             "5" "Экспорт / Импорт настроек (Бэкап)"             "6" "Выборочный сброс сетевых надстроек"             "0" "⬅ Назад"; then
+        if ! smart_menu "⚙️ ДИАГНОСТИКА, АУДИТ И ОБСЛУЖИВАНИЕ" "Выберите инструмент:" 18 "$WT_WIDTH" 7 sub_choice \
+            "1" "Состояние сервера: Аудит ресурсов и безопасности" \
+            "2" "Проверка сети, ТСПУ и каскадных пар" \
+            "3" "Управление системными журналами: Логи" \
+            "4" "Анализ времени загрузки системы" \
+            "5" "Экспорт / Импорт настроек: Бэкап" \
+            "6" "Выборочный сброс сетевых надстроек" \
+            "0" "⬅ Назад"; then
             return 0
         fi
         if [ -z "$sub_choice" ] || [ "$sub_choice" = "0" ]; then return 0; fi
@@ -12414,7 +12549,18 @@ while true; do
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "UTC")
     tz="${tz#Etc/}"
 
-    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v${SCRIPT_VERSION}" --menu "\nХост: $(hostname) ($(get_system_type_short)) | Часовой пояс: $tz\nUFW: $ufw_status | Tailscale: $ts_main_status\n\nВыберите раздел:" 20 "$WT_WIDTH" 6         "1" "🛠 Базовая настройка и безопасность"         "2" "🌍 Прокси, VPN и Каскады (VLESS-XHTTP)"         "3" "🔒 Приватная сеть Tailscale и DERP"         "4" "🖧 Локальный маршрутизатор (LAN / SBC)"         "5" "⚙️ Диагностика, Аудит и Бэкап"         "0" "❌ Выход" 3>&1 1>&2 2>&3); then
+    host_label="" sys_short="" main_msg=""
+    host_label=$(hostname 2>/dev/null || echo "server")
+    sys_short=$(get_system_type_short)
+    main_msg="\nХост: ${host_label} [${sys_short}] | Часовой пояс: ${tz}\nUFW: ${ufw_status} | Tailscale: ${ts_main_status}\n\nВыберите раздел:"
+    if ! MAIN_CHOICE=$(whiptail --title "BOBAREV SHELL v${SCRIPT_VERSION}" \
+        --menu "$main_msg" 20 "$WT_WIDTH" 6 \
+        "1" "🛠 Базовая настройка и безопасность" \
+        "2" "🌍 Прокси, VPN и Каскады: VLESS-XHTTP" \
+        "3" "🔒 Приватная сеть Tailscale и DERP" \
+        "4" "🖧 Локальный маршрутизатор: LAN / SBC" \
+        "5" "⚙️ Диагностика, Аудит и Бэкап" \
+        "0" "❌ Выход" 3>&1 1>&2 2>&3); then
         clear
         echo "Работа скрипта завершена."
         exit 0

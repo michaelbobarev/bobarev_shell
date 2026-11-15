@@ -1,4 +1,4 @@
-🛠️ Bobarev Shell (v3.20.21 — Linux Server Optimization, Mesh Networking & Audit Suite)
+🛠️ Bobarev Shell (Linux Server Optimization, Mesh Networking & Audit Suite)
 
 Интерактивная модульная система на Bash для быстрой настройки, защиты и сетевой оптимизации Linux-серверов (Debian 12/13, Ubuntu), домашних ПК и одноплатных микрокомпьютеров (Armbian, NanoPi R5C, Raspberry Pi, Orange Pi) «с нуля» до готовой инфраструктуры.
 

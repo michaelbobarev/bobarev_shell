@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.32 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.33 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN
 # и сетевого аудита. Включает небуферизованный ввод PEM-сертификатов,
 # разделение портов Nginx (443/2053) и Xray REALITY (8443) и фильтр P2P IPv4.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.32"
+SCRIPT_VERSION="3.20.33"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -715,12 +715,13 @@ apply_global_vless_to_active_xray() {
         local cf_fmode="${CF_FRONT_MODE:-hybrid}"
         local cf_port="${CF_LISTEN_PORT:-443}"
         local cf_dport="${CF_DIRECT_REALITY_PORT:-8443}"
+        local cf_trans="${CF_TRANSPORT:-ws}"
         local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
         [ "$out_m" = "mullvad_ts" ] && out_m="tailscale_exit"
         if [ -n "$cf_dom" ]; then
             ensure_cloudflare_tls_cert "$cf_dom" "false" || true
         fi
-        render_xray_cloudflare_cdn_config "$cf_dport" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$out_m" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_port" "${CF_ACTIVE_SSL_CERT:-}" "${CF_ACTIVE_SSL_KEY:-}"
+        render_xray_cloudflare_cdn_config "$cf_dport" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$out_m" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_port" "${CF_ACTIVE_SSL_CERT:-}" "${CF_ACTIVE_SSL_KEY:-}" "$cf_trans"
     else
         local out_m="${FOREIGN_EXIT_MODE:-${VLESS_OUT_MODE:-direct}}"
         [ "$out_m" = "mullvad_ts" ] && out_m="tailscale_exit"
@@ -3258,6 +3259,7 @@ render_xray_cloudflare_cdn_config() {
     local cf_listen_port="${9:-443}"
     local ssl_cert="${10:-${CF_ACTIVE_SSL_CERT:-/etc/ssl/bobarev-cf-origin/${cf_domain}.crt}}"
     local ssl_key="${11:-${CF_ACTIVE_SSL_KEY:-/etc/ssl/bobarev-cf-origin/${cf_domain}.key}}"
+    local cf_transport="${12:-${CF_TRANSPORT:-ws}}"
 
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
     x_path="${x_path%/}"
@@ -3274,7 +3276,7 @@ render_xray_cloudflare_cdn_config() {
     fi
 
     mkdir -p /etc/xray
-    python3 - "$direct_port" "$x_uuid" "$x_priv" "$x_short_id" "$cf_domain" "$exit_mode" "$x_path" "$front_mode" "$cf_listen_port" "$ssl_cert" "$ssl_key" "$wan_dev" << 'PY_XRAY_CF_EOF'
+    python3 - "$direct_port" "$x_uuid" "$x_priv" "$x_short_id" "$cf_domain" "$exit_mode" "$x_path" "$front_mode" "$cf_listen_port" "$ssl_cert" "$ssl_key" "$wan_dev" "$cf_transport" << 'PY_XRAY_CF_EOF'
 import json
 import sys
 from pathlib import Path
@@ -3291,46 +3293,79 @@ cf_listen_port = int(sys.argv[9] or 443)
 ssl_cert = sys.argv[10]
 ssl_key = sys.argv[11]
 wan_dev = sys.argv[12]
+cf_transport = sys.argv[13] if len(sys.argv) > 13 else "ws"
 
 inbounds = []
 
-# Основной вход для Cloudflare CDN: прямой Xray VLESS + XHTTP + TLS
-# (без прокладки Nginx grpc_pass, что гарантирует работу packet-up, auto,
-# stream-up и stream-one, а также HTTP/2 и HTTP/3)
-inbounds.append({
-    "tag": "vless-xhttp-cf-tls-in",
-    "port": cf_listen_port,
-    "protocol": "vless",
-    "settings": {
-        "clients": [{"id": x_uuid}],
-        "decryption": "none"
-    },
-    "streamSettings": {
-        "network": "xhttp",
-        "security": "tls",
-        "xhttpSettings": {
-            "path": x_path,
-            "mode": "auto"
+if cf_transport == "ws":
+    # VLESS + WebSocket + TLS: 101 Switching Protocols отключает буферизацию
+    # Cloudflare и работает в Shadowrocket из коробки
+    inbounds.append({
+        "tag": "vless-ws-cf-tls-in",
+        "port": cf_listen_port,
+        "protocol": "vless",
+        "settings": {
+            "clients": [{"id": x_uuid}],
+            "decryption": "none"
         },
-        "tlsSettings": {
-            "serverName": cf_domain,
-            "alpn": ["h2", "http/1.1"],
-            "certificates": [
-                {
-                    "certificateFile": ssl_cert,
-                    "keyFile": ssl_key
-                }
-            ]
+        "streamSettings": {
+            "network": "ws",
+            "security": "tls",
+            "wsSettings": {
+                "path": x_path
+            },
+            "tlsSettings": {
+                "serverName": cf_domain,
+                "alpn": ["http/1.1"],
+                "certificates": [
+                    {
+                        "certificateFile": ssl_cert,
+                        "keyFile": ssl_key
+                    }
+                ]
+            }
+        },
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True
         }
-    },
-    "sniffing": {
-        "enabled": True,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": True
-    }
-})
+    })
+else:
+    # VLESS + XHTTP + TLS напрямую в Xray
+    inbounds.append({
+        "tag": "vless-xhttp-cf-tls-in",
+        "port": cf_listen_port,
+        "protocol": "vless",
+        "settings": {
+            "clients": [{"id": x_uuid}],
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": "xhttp",
+            "security": "tls",
+            "xhttpSettings": {
+                "path": x_path,
+                "mode": "auto"
+            },
+            "tlsSettings": {
+                "serverName": cf_domain,
+                "alpn": ["h2", "http/1.1"],
+                "certificates": [
+                    {
+                        "certificateFile": ssl_cert,
+                        "keyFile": ssl_key
+                    }
+                ]
+            }
+        },
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True
+        }
+    })
 
-# Гибридный прямой вход VLESS + XHTTP + REALITY мимо Cloudflare на отдельном порту
 if front_mode == "hybrid" and x_priv:
     inbounds.append({
         "tag": "vless-xhttp-in",
@@ -3418,7 +3453,7 @@ if exit_mode in ("warp", "masque"):
     }
 else:
     sockopt = {
-        "domainStrategy": "UseIPv4v6",
+        "domainStrategy": "UseIPv4",
         "tcpNoDelay": True
     }
     if wan_dev:
@@ -3464,6 +3499,7 @@ print_cloudflare_cdn_vless_links() {
     local cf_front_mode="${CF_FRONT_MODE:-hybrid}"
     local cf_cert_mode="${CF_CERT_MODE:-origin_ca}"
     local cf_listen_port="${CF_LISTEN_PORT:-443}"
+    local cf_transport="${CF_TRANSPORT:-ws}"
     local direct_port="${CF_DIRECT_REALITY_PORT:-8443}"
     local x_uuid="${XRAY_UUID:-}"
     local x_pub="${XRAY_PUB:-}"
@@ -3481,60 +3517,67 @@ print_cloudflare_cdn_vless_links() {
     pub_ip6="${SERVER_PUB_IPV6:-$(get_wan_global_ipv6)}"
 
     if [ -z "$x_uuid" ] || [ -z "$cf_domain" ]; then
-        echo -e "${C_YELLOW} Режим Cloudflare CDN + VLESS-XHTTP еще не настроен на этом сервере (запустите Пункт 1).${C_RESET}"
+        echo -e "${C_YELLOW} Режим Cloudflare CDN + VLESS еще не настроен на этом сервере (запустите Пункт 1).${C_RESET}"
         return 0
     fi
 
     local frag_params="fragment=40-60,30-50,tlshello&fragmentPackets=tlshello&fragmentLength=40-60&fragmentInterval=30-50"
     local fm_encoded="%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%22tlshello%22%2C%22length%22%3A%2240-60%22%2C%22delay%22%3A%2230-50%22%7D%7D%5D%7D"
 
-    # Клиент всегда подключается к Cloudflare на порт 443 (а если Xray на
-    # сервере слушает 2053/2083, то Cloudflare Origin Rule перенаправляет 443 ->
-    # порт сервера внутри CDN)
-    local cf_link_packet="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-CF-PacketUp"
-    local cf_link_auto="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=auto#${hname}-CF-Auto-H2"
-    local cf_link_h3="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h3&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-CF-HTTP3-QUIC"
-    local cf_link_clean_ip="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-CF-CleanIP-${cf_clean_ip}"
-
-    echo -e "\n${C_CYAN} === ССЫЛКИ И QR-КОДЫ VLESS-XHTTP + TLS ЗА CLOUDFLARE CDN (ПРЯМОЙ XRAY) ===${C_RESET}"
+    echo -e "\n${C_CYAN} === ССЫЛКИ И QR-КОДЫ VLESS ЗА CLOUDFLARE CDN (ПРЯМОЙ XRAY: ${cf_transport^^}) ===${C_RESET}"
     echo -e " Домен Cloudflare:     ${C_BOLD}${C_GREEN}${cf_domain}${C_RESET} (Порт Xray TLS на сервере: ${C_GREEN}${cf_listen_port}/tcp${C_RESET})"
     echo -e " Сервер (Origin WAN):  IPv4: ${C_GREEN}${pub_ip4:-нет}${C_RESET} | IPv6: ${C_CYAN}${pub_ip6:-не назначен}${C_RESET}"
-    echo -e " Архитектура входа:    ${C_GREEN}${cf_front_mode} (Прямой Xray VLESS-XHTTP + TLS, без прокладки Nginx)${C_RESET} | Выход: ${C_GREEN}${VLESS_OUT_MODE:-direct}${C_RESET}"
+    echo -e " Транспорт / Выход:    ${C_GREEN}${cf_transport^^} + TLS (${cf_front_mode})${C_RESET} | Выход: ${C_GREEN}${VLESS_OUT_MODE:-direct}${C_RESET}"
 
-    echo -e "\n ${C_BOLD}Параметры VLESS-XHTTP + TLS (Cloudflare CDN) для ручного ввода в Shadowrocket:${C_RESET}"
-    echo -e "   • Тип (Type):         ${C_GREEN}VLESS${C_RESET}"
-    echo -e "   • Адрес (Address):    ${C_GREEN}${cf_domain}${C_RESET} (или чистый IP Cloudflare: ${C_CYAN}${cf_clean_ip}${C_RESET})"
-    echo -e "   • Порт (Port):        ${C_GREEN}443${C_RESET}"
-    echo -e "   • UUID:               ${C_GREEN}${x_uuid}${C_RESET}"
-    echo -e "   • Транспорт (Network): ${C_GREEN}xhttp (SplitHTTP)${C_RESET}"
-    echo -e "   • Путь (Path):        ${C_GREEN}${x_path}${C_RESET}"
-    echo -e "   • Host / SNI (Peer):  ${C_GREEN}${cf_domain}${C_RESET}"
-    echo -e "   • Режим (XHTTP Mode): ${C_GREEN}packet-up${C_RESET} (или ${C_CYAN}auto${C_RESET})"
-    echo -e "   • TLS:                ${C_GREEN}Вкл (Обычный TLS, тумблер REALITY ВЫКЛЮЧЕН!)${C_RESET}"
+    if [ "$cf_transport" = "ws" ]; then
+        local cf_ws_link="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_path}#${hname}-CF-WS-TLS"
+        local cf_ws_clean="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_path}&${frag_params}&fm=${fm_encoded}#${hname}-CF-WS-CleanIP-${cf_clean_ip}"
 
-    echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (mode=packet-up, порт 443 — макс. совместимость с бесплатным CF):${C_RESET}"
-    echo -e " ${C_BOLD}${C_GREEN}${cf_link_packet}${C_RESET}"
+        echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (VLESS + WebSocket + TLS — мгновенная работа в Shadowrocket!):${C_RESET}"
+        echo -e " ${C_BOLD}${C_GREEN}${cf_ws_link}${C_RESET}"
 
-    echo -e "\n ${C_GREEN}2) Скоростная потоковая ссылка через Cloudflare CDN (mode=auto, alpn=h2):${C_RESET}"
-    echo -e " ${C_BOLD}${C_GREEN}${cf_link_auto}${C_RESET}"
+        echo -e "\n ${C_YELLOW}2) Пробивная ссылка через чистый Anycast IP Cloudflare (${cf_clean_ip}:443 + WS + TLS Fragment):${C_RESET}"
+        echo -e " ${C_BOLD}${C_YELLOW}${cf_ws_clean}${C_RESET}"
 
-    echo -e "\n ${C_CYAN}3) UDP / HTTP/3 QUIC ссылка (alpn=h3 — без вечернего торможения TCP):${C_RESET}"
-    echo -e " ${C_BOLD}${C_CYAN}${cf_link_h3}${C_RESET}"
+        if [ "$cf_front_mode" = "hybrid" ] && [ -n "$pub_ip4" ] && [ -n "$x_pub" ]; then
+            local direct_reality="vless://${x_uuid}@${pub_ip4}:${direct_port}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one#${hname}-Direct-REALITY-${direct_port}"
+            echo -e "\n ${C_CYAN}3) Прямая ссылка VLESS-XHTTP + REALITY по IP сервера (${pub_ip4}:${direct_port} — мимо Cloudflare):${C_RESET}"
+            echo -e " ${C_CYAN}${direct_reality}${C_RESET}"
+        fi
 
-    echo -e "\n ${C_YELLOW}4) Пробивная ссылка через чистый Anycast IP Cloudflare (${cf_clean_ip}:443 + TLS Fragment):${C_RESET}"
-    echo -e " ${C_BOLD}${C_YELLOW}${cf_link_clean_ip}${C_RESET}"
+        if command -v qrencode >/dev/null 2>&1; then
+            echo -e "\n ${C_GREEN}QR-код №1 — Cloudflare CDN (VLESS + WebSocket + TLS):${C_RESET}"
+            qrencode -t ansiutf8 "${cf_ws_link}" 2>/dev/null || true
+            echo -e "\n ${C_YELLOW}QR-код №2 — Cloudflare CDN через чистый Anycast IP (${cf_clean_ip}:443):${C_RESET}"
+            qrencode -t ansiutf8 "${cf_ws_clean}" 2>/dev/null || true
+        fi
+    else
+        local cf_link_packet="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-CF-PacketUp"
+        local cf_link_auto="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=auto#${hname}-CF-Auto-H2"
+        local cf_link_h3="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h3&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-CF-HTTP3-QUIC"
+        local cf_link_clean_ip="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-CF-CleanIP-${cf_clean_ip}"
 
-    if [ "$cf_front_mode" = "hybrid" ] && [ -n "$pub_ip4" ] && [ -n "$x_pub" ]; then
-        local direct_reality="vless://${x_uuid}@${pub_ip4}:${direct_port}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one#${hname}-Direct-REALITY-${direct_port}"
-        echo -e "\n ${C_GREEN}5) Прямая ссылка VLESS-XHTTP + REALITY по IP сервера (${pub_ip4}:${direct_port} — мимо Cloudflare):${C_RESET}"
-        echo -e " ${C_GREEN}${direct_reality}${C_RESET}"
-    fi
+        echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (XHTTP mode=packet-up, порт 443):${C_RESET}"
+        echo -e " ${C_BOLD}${C_GREEN}${cf_link_packet}${C_RESET}"
+        echo -e "\n ${C_GREEN}2) Потоковая ссылка (XHTTP mode=auto, alpn=h2):${C_RESET}"
+        echo -e " ${C_BOLD}${C_GREEN}${cf_link_auto}${C_RESET}"
+        echo -e "\n ${C_CYAN}3) UDP / HTTP/3 QUIC ссылка (alpn=h3):${C_RESET}"
+        echo -e " ${C_BOLD}${C_CYAN}${cf_link_h3}${C_RESET}"
+        echo -e "\n ${C_YELLOW}4) Пробивная ссылка через чистый Anycast IP Cloudflare (${cf_clean_ip}:443 + TLS Fragment):${C_RESET}"
+        echo -e " ${C_BOLD}${C_YELLOW}${cf_link_clean_ip}${C_RESET}"
 
-    if command -v qrencode >/dev/null 2>&1; then
-        echo -e "\n ${C_GREEN}QR-код №1 — Cloudflare CDN (mode=packet-up, основная):${C_RESET}"
-        qrencode -t ansiutf8 "${cf_link_packet}" 2>/dev/null || true
-        echo -e "\n ${C_YELLOW}QR-код №2 — Cloudflare CDN через чистый Anycast IP (${cf_clean_ip}:443):${C_RESET}"
-        qrencode -t ansiutf8 "${cf_link_clean_ip}" 2>/dev/null || true
+        if [ "$cf_front_mode" = "hybrid" ] && [ -n "$pub_ip4" ] && [ -n "$x_pub" ]; then
+            local direct_reality="vless://${x_uuid}@${pub_ip4}:${direct_port}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one#${hname}-Direct-REALITY-${direct_port}"
+            echo -e "\n ${C_GREEN}5) Прямая ссылка VLESS-XHTTP + REALITY по IP сервера (${pub_ip4}:${direct_port} — мимо Cloudflare):${C_RESET}"
+            echo -e " ${C_GREEN}${direct_reality}${C_RESET}"
+        fi
+
+        if command -v qrencode >/dev/null 2>&1; then
+            echo -e "\n ${C_GREEN}QR-код №1 — Cloudflare CDN (XHTTP packet-up):${C_RESET}"
+            qrencode -t ansiutf8 "${cf_link_packet}" 2>/dev/null || true
+            echo -e "\n ${C_YELLOW}QR-код №2 — Cloudflare CDN через чистый Anycast IP (${cf_clean_ip}:443):${C_RESET}"
+            qrencode -t ansiutf8 "${cf_link_clean_ip}" 2>/dev/null || true
+        fi
     fi
 
     local ssl_mode_hint="Full (Strict) — активен сертификат Cloudflare Origin CA / Let's Encrypt"
@@ -3543,7 +3586,7 @@ print_cloudflare_cdn_vless_links() {
     echo -e "\n${C_CYAN} === ШПАРГАЛКА НАСТРОЕК В ПАНЕЛИ CLOUDFLARE ===${C_RESET}"
     echo -e "   1) ${C_BOLD}DNS -> Records:${C_RESET} запись ${C_GREEN}A${C_RESET} (${cf_domain} -> ${pub_ip4:-IP_сервера}), тумблер ${C_YELLOW}Proxied = ON (Оранжевое облачко)${C_RESET}."
     echo -e "   2) ${C_BOLD}SSL/TLS -> Overview:${C_RESET} режим шифрования ${C_GREEN}${ssl_mode_hint}${C_RESET}."
-    echo -e "   3) ${C_BOLD}Network:${C_RESET} включите ${C_GREEN}HTTP/2 = ON${C_RESET}, ${C_GREEN}HTTP/3 (with QUIC) = ON${C_RESET}, ${C_GREEN}gRPC = ON${C_RESET}."
+    echo -e "   3) ${C_BOLD}Network:${C_RESET} обязательно включите ${C_GREEN}WebSockets = ON${C_RESET}, ${C_GREEN}HTTP/2 = ON${C_RESET}, ${C_GREEN}HTTP/3 (with QUIC) = ON${C_RESET}, ${C_GREEN}gRPC = ON${C_RESET}."
     if [ "$cf_listen_port" != "443" ]; then
         echo -e "   4) ${C_BOLD}Rules -> Origin Rules (ОБЯЗАТЕЛЬНО для порта ${cf_listen_port}):${C_RESET} Hostname equals ${C_GREEN}${cf_domain}${C_RESET} -> Destination Port = ${C_BOLD}${C_YELLOW}${cf_listen_port}${C_RESET}."
     else
@@ -3561,7 +3604,7 @@ select_cloudflare_clean_ip_interactive() {
 
     local ip_choice=""
     if ! smart_menu "Выбор чистого Anycast IP Cloudflare для клиентских ссылок" "
-Текущий Anycast IP в ссылке №4: ${cur_clean_ip}
+Текущий Anycast IP в ссылке: ${cur_clean_ip}
 
 Если провайдер ограничивает дефолтный IP вашего домена в Cloudflare, клиент Shadowrocket может подключаться к любому официальному Anycast IP сети Cloudflare, передавая ваш домен в полях SNI и Host:" 20 "$WT_WIDTH" 6 "ip_choice" \
         "1" " 104.16.132.229 (Cloudflare Anycast — пул 104.16.0.0/12)" \
@@ -3598,7 +3641,7 @@ select_cloudflare_clean_ip_interactive() {
 }
 
 switch_cloudflare_cdn_exit_mode_interactive() {
-    local cur_out="direct" cur_usque_mode="l4-socks" cf_dom="" cf_fmode="hybrid" cf_lport="443" direct_port="8443"
+    local cur_out="direct" cur_usque_mode="l4-socks" cf_dom="" cf_fmode="hybrid" cf_lport="443" direct_port="8443" cf_trans="ws"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
@@ -3608,13 +3651,14 @@ switch_cloudflare_cdn_exit_mode_interactive() {
         cf_fmode="${CF_FRONT_MODE:-hybrid}"
         cf_lport="${CF_LISTEN_PORT:-443}"
         direct_port="${CF_DIRECT_REALITY_PORT:-8443}"
+        cf_trans="${CF_TRANSPORT:-ws}"
     fi
     if [ -z "$cf_dom" ]; then
         echo -e "${C_YELLOW} Сначала выполните первичную настройку домена Cloudflare в Пункте 1.${C_RESET}"
         return 1
     fi
 
-    local cur_desc="Чистый IP самого зарубежного VPS (Direct Dual-Stack IPv4+IPv6)"
+    local cur_desc="Чистый IP самого зарубежного VPS (Direct IPv4)"
     [ "$cur_out" = "masque" ] && cur_desc="Cloudflare MASQUE (Usque ${cur_usque_mode} -> Выход с IP Cloudflare)"
     [ "$cur_out" = "wg0" ] && cur_desc="Внешний туннель WireGuard (wg0 Dual-Gateway)"
 
@@ -3665,7 +3709,7 @@ switch_cloudflare_cdn_exit_mode_interactive() {
             ;;
     esac
 
-    render_xray_cloudflare_cdn_config "$direct_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$target_out" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_lport" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY"
+    render_xray_cloudflare_cdn_config "$direct_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_dom" "$target_out" "$XRAY_XHTTP_PATH" "$cf_fmode" "$cf_lport" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY" "$cf_trans"
     if [ -s /etc/xray/vless_users.list ]; then
         rebuild_xray_inbound_clients
     fi
@@ -3684,11 +3728,11 @@ switch_cloudflare_cdn_exit_mode_interactive() {
 }
 
 setup_cloudflare_cdn_vless_wizard() {
-    echo -e "${C_CYAN} === НАСТРОЙКА ЗАРУБЕЖНОГО VPS ЗА CLOUDFLARE CDN: ПРЯМОЙ XRAY (VLESS-XHTTP + TLS) ===${C_RESET}"
-    echo -e "${C_BLUE} Прямая схема (без прослойки Nginx grpc_pass): сам Xray принимает TLS с сертификатом Cloudflare Origin CA.${C_RESET}"
-    echo -e "${C_BLUE} Гарантирует стабильную работу packet-up, auto, stream-up и stream-one за оранжевым облачком!${C_RESET}\n"
+    echo -e "${C_CYAN} === НАСТРОЙКА ЗАРУБЕЖНОГО VPS ЗА CLOUDFLARE CDN: ПРЯМОЙ XRAY (WS / XHTTP + TLS) ===${C_RESET}"
+    echo -e "${C_BLUE} Сам Xray принимает TLS с сертификатом Cloudflare Origin CA (без прослойки Nginx).${C_RESET}"
+    echo -e "${C_BLUE} Для Shadowrocket рекомендуется WebSocket (без буферизации в Cloudflare), для Podkop/v2rayN доступен XHTTP.${C_RESET}\n"
 
-    local saved_domain="" saved_clean_ip="104.16.132.229" saved_fmode="hybrid" saved_cf_port="443"
+    local saved_domain="" saved_clean_ip="104.16.132.229" saved_fmode="hybrid" saved_cf_port="443" saved_cf_trans="ws"
     if [ -f /etc/default/bobarev-cascade ]; then
         # shellcheck disable=SC1091
         source /etc/default/bobarev-cascade
@@ -3696,6 +3740,7 @@ setup_cloudflare_cdn_vless_wizard() {
         saved_clean_ip="${CF_CLEAN_IP:-104.16.132.229}"
         saved_fmode="${CF_FRONT_MODE:-hybrid}"
         saved_cf_port="${CF_LISTEN_PORT:-443}"
+        saved_cf_trans="${CF_TRANSPORT:-ws}"
     fi
     load_global_vless_credentials || true
     if [ -z "$saved_domain" ] && [ -n "${XRAY_SNI:-}" ] && [ "${XRAY_SNI}" != "www.microsoft.com" ] && [ "${XRAY_SNI}" != "itunes.apple.com" ] && [ "${XRAY_SNI}" != "www.amd.com" ]; then
@@ -3703,7 +3748,7 @@ setup_cloudflare_cdn_vless_wizard() {
     fi
 
     local cf_domain=""
-    prompt_default "1/4. Введите ваш домен или поддомен в Cloudflare (например, servhost.bbrv.io):" "$saved_domain" cf_domain
+    prompt_default "1/5. Введите ваш домен или поддомен в Cloudflare (например, servhost.bbrv.io):" "$saved_domain" cf_domain
     if [ "$MODULE_CANCELED" = true ] || [ -z "$cf_domain" ]; then
         echo -e "${C_YELLOW} Настройка отменена: домен не указан.${C_RESET}"
         return 0
@@ -3714,8 +3759,18 @@ setup_cloudflare_cdn_vless_wizard() {
         return 1
     fi
 
+    local tr_choice=""
+    if ! smart_menu "2/5. Протокол транспорта через Cloudflare CDN" "
+Выберите транспорт для прохождения через оранжевое облачко Cloudflare:" 17 "$WT_WIDTH" 2 "tr_choice" \
+        "1" " VLESS + WebSocket + TLS (Рекомендуется для Shadowrocket: без буферизации CF)" \
+        "2" " VLESS + XHTTP + TLS (Для OpenWrt Podkop, v2rayN, v2rayNG)"; then
+        return 0
+    fi
+    local cf_transport="ws"
+    [ "$tr_choice" = "2" ] && cf_transport="xhttp"
+
     local port_choice=""
-    if ! smart_menu "2/4. Входящий TLS-порт на сервере для Cloudflare CDN" "
+    if ! smart_menu "3/5. Входящий TLS-порт на сервере для Cloudflare CDN" "
 На каком порту этого сервера Xray должен принимать трафик от Cloudflare CDN?" 17 "$WT_WIDTH" 3 "port_choice" \
         "1" " Порт 443/tcp (По умолчанию — Origin Rules в Cloudflare НЕ нужны)" \
         "2" " Порт 2083/tcp (Скрытый порт — нужно Origin Rule 443 -> 2083 в Cloudflare)" \
@@ -3727,17 +3782,17 @@ setup_cloudflare_cdn_vless_wizard() {
     [ "$port_choice" = "3" ] && cf_listen_port="2053"
 
     local fmode_choice=""
-    if ! smart_menu "3/4. Архитектура приема трафика" "
-Xray принимает VLESS-XHTTP + TLS для Cloudflare CDN на порту ${cf_listen_port}/tcp:" 17 "$WT_WIDTH" 2 "fmode_choice" \
+    if ! smart_menu "4/5. Архитектура приема трафика" "
+Xray принимает Cloudflare CDN (${cf_transport^^} + TLS) на порту ${cf_listen_port}/tcp:" 17 "$WT_WIDTH" 2 "fmode_choice" \
         "1" " Гибридный (Рекомендуется): Cloudflare CDN (:${cf_listen_port}) + Прямой REALITY (:8443)" \
-        "2" " Чистый Cloudflare CDN: Только Xray VLESS-XHTTP + TLS (:${cf_listen_port})"; then
+        "2" " Чистый Cloudflare CDN: Только Cloudflare (:${cf_listen_port})"; then
         return 0
     fi
     local front_mode="hybrid"
     [ "$fmode_choice" = "2" ] && front_mode="cdn_only"
 
     local out_choice=""
-    if ! smart_menu "4/4. Выход в интернет с этого зарубежного VPS" "
+    if ! smart_menu "5/5. Выход в интернет с этого зарубежного VPS" "
 Как выпускать трафик с этого сервера в интернет после приема из Cloudflare CDN?" 18 "$WT_WIDTH" 3 "out_choice" \
         "1" " Чистый IP самого VPS: Напрямую, макс. скорость" \
         "2" " Через Cloudflare MASQUE: Usque 127.0.0.1:1080" \
@@ -3796,10 +3851,8 @@ Xray принимает VLESS-XHTTP + TLS для Cloudflare CDN на порту 
         target_foreign_mode="direct"
     fi
 
-    # Получаем или проверяем сертификат Cloudflare Origin CA / Let's Encrypt
     ensure_cloudflare_tls_cert "$cf_domain" "true" || return 1
 
-    # Освобождаем порт от nginx / caddy, так как Xray принимает TLS напрямую!
     if systemctl is-active --quiet nginx.service 2>/dev/null || systemctl is-active --quiet caddy.service 2>/dev/null; then
         echo -e "${C_BLUE} Остановка nginx / caddy для прямой работы Xray-core на порту ${cf_listen_port}/tcp...${C_RESET}"
         silent_run systemctl stop nginx.service caddy.service 2>/dev/null || true
@@ -3808,7 +3861,7 @@ Xray принимает VLESS-XHTTP + TLS для Cloudflare CDN на порту 
     rm -f /etc/nginx/conf.d/xray-selfsteal.conf 2>/dev/null || true
 
     local direct_reality_port="8443"
-    render_xray_cloudflare_cdn_config "$direct_reality_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_domain" "$target_out_mode" "$XRAY_XHTTP_PATH" "$front_mode" "$cf_listen_port" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY"
+    render_xray_cloudflare_cdn_config "$direct_reality_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_domain" "$target_out_mode" "$XRAY_XHTTP_PATH" "$front_mode" "$cf_listen_port" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY" "$cf_transport"
     if [ -s /etc/xray/vless_users.list ]; then
         rebuild_xray_inbound_clients
     fi
@@ -3845,6 +3898,7 @@ CF_CDN_DOMAIN="${cf_domain}"
 CF_CLEAN_IP="${saved_clean_ip}"
 CF_FRONT_MODE="${front_mode}"
 CF_LISTEN_PORT="${cf_listen_port}"
+CF_TRANSPORT="${cf_transport}"
 CF_DIRECT_REALITY_PORT="${direct_reality_port}"
 CF_CERT_MODE="${CF_ACTIVE_CERT_MODE:-origin_ca}"
 XRAY_PORT="${cf_listen_port}"
@@ -3862,7 +3916,7 @@ EOF
     save_global_vless_credentials "$cf_listen_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_PUB" "$XRAY_SHORT_ID" "$cf_domain" "www.microsoft.com:443" "$XRAY_XHTTP_PATH"
 
     echo ""
-    echo -e "${C_GREEN} === ЗАРУБЕЖНЫЙ СЕРВЕР VLESS-XHTTP + TLS (ПРЯМОЙ XRAY) ЗА CLOUDFLARE CDN ЗАПУЩЕН! ===${C_RESET}"
+    echo -e "${C_GREEN} === ЗАРУБЕЖНЫЙ СЕРВЕР VLESS (${cf_transport^^} + TLS) ЗА CLOUDFLARE CDN ЗАПУЩЕН! ===${C_RESET}"
     print_cloudflare_cdn_vless_links
 }
 
@@ -3870,7 +3924,7 @@ manage_cloudflare_cdn_vless_menu() {
     while true; do
         MODULE_CANCELED=false
         local cf_state="Не активен"
-        local cur_dom="" cur_out="direct" cur_fmode="hybrid" cur_clean="104.16.132.229" cur_cport="443"
+        local cur_dom="" cur_out="direct" cur_fmode="hybrid" cur_clean="104.16.132.229" cur_cport="443" cur_ctrans="ws"
         if [ -f /etc/default/bobarev-cascade ]; then
             # shellcheck disable=SC1091
             source /etc/default/bobarev-cascade
@@ -3879,20 +3933,21 @@ manage_cloudflare_cdn_vless_menu() {
             cur_fmode="${CF_FRONT_MODE:-hybrid}"
             cur_clean="${CF_CLEAN_IP:-104.16.132.229}"
             cur_cport="${CF_LISTEN_PORT:-443}"
+            cur_ctrans="${CF_TRANSPORT:-ws}"
         fi
         if systemctl is-active --quiet bobarev-xray.service 2>/dev/null && [ "${CASCADE_ROLE:-}" = "cloudflare_cdn_vless" ] && [ -n "$cur_dom" ]; then
-            cf_state="Активен: ${cur_dom}:${cur_cport} [Режим: ${cur_fmode} | Выход: ${cur_out} | Clean IP: ${cur_clean}]"
+            cf_state="Активен: ${cur_dom}:${cur_cport} [${cur_ctrans^^} | ${cur_fmode} | Выход: ${cur_out}]"
         fi
 
         local cf_choice=""
-        if ! smart_menu "Зарубежный VPS за Cloudflare CDN: Прямой Xray VLESS-XHTTP + TLS (Меню 2 -> 5)" "
+        if ! smart_menu "Зарубежный VPS за Cloudflare CDN: Прямой Xray WS/XHTTP + TLS (Меню 2 -> 5)" "
 Статус: ${cf_state}
-Прямой Xray-core VLESS-XHTTP + TLS (без Nginx grpc_pass) за оранжевым облачком Cloudflare:" 22 "$WT_WIDTH" 8 "cf_choice" \
-            "1" " Настроить прямой VLESS-XHTTP + TLS за Cloudflare CDN" \
+Прямой Xray-core VLESS (WebSocket или XHTTP) + TLS за оранжевым облачком Cloudflare:" 22 "$WT_WIDTH" 8 "cf_choice" \
+            "1" " Настроить VLESS (WebSocket / XHTTP) + TLS за Cloudflare CDN" \
             "2" " Выбрать выход в интернет: Чистый IP VPS / Cloudflare MASQUE / WireGuard" \
             "3" " Выбрать чистый Anycast IP Cloudflare для обхода фильтрации домена" \
             "4" " Настроить / вставить TLS-сертификат (Cloudflare Origin CA / Let's Encrypt)" \
-            "5" " Управление глобальными ключами VLESS-XHTTP и Path" \
+            "5" " Управление глобальными ключами VLESS и Path" \
             "6" " Показать ссылки, QR-коды и шпаргалку настроек Cloudflare Dashboard" \
             "7" " Остановить и отключить режим Cloudflare CDN" \
             "0" " Вернуться в главное меню" || [ "$cf_choice" = "0" ]; then
@@ -3926,7 +3981,7 @@ manage_cloudflare_cdn_vless_menu() {
                     ensure_cloudflare_tls_cert "$cur_dom" "true" || true
                     load_global_vless_credentials || true
                     if [ -n "${XRAY_UUID:-}" ]; then
-                        render_xray_cloudflare_cdn_config "${CF_DIRECT_REALITY_PORT:-8443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cur_dom" "${VLESS_OUT_MODE:-direct}" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "${CF_FRONT_MODE:-hybrid}" "${CF_LISTEN_PORT:-443}" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY"
+                        render_xray_cloudflare_cdn_config "${CF_DIRECT_REALITY_PORT:-8443}" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cur_dom" "${VLESS_OUT_MODE:-direct}" "${XRAY_XHTTP_PATH:-/xhttp-stream}" "${CF_FRONT_MODE:-hybrid}" "${CF_LISTEN_PORT:-443}" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY" "${CF_TRANSPORT:-ws}"
                         safe_restart_systemd_service bobarev-xray.service
                     fi
                 fi
@@ -3940,14 +3995,14 @@ manage_cloudflare_cdn_vless_menu() {
                 pause_enter
                 ;;
             7)
-                if prompt_yn "Остановить и отключить режим VLESS-XHTTP за Cloudflare CDN (bobarev-xray, usque)?" "false"; then
+                if prompt_yn "Остановить и отключить режим VLESS за Cloudflare CDN (bobarev-xray, usque)?" "false"; then
                     if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || [ -f /etc/wireguard/wg0.conf ]; then
                         disable_hybrid_wg_routing
                     fi
                     silent_run systemctl stop bobarev-xray.service usque.service
                     silent_run systemctl disable bobarev-xray.service usque.service
                     rm -f /etc/nginx/conf.d/xray-selfsteal.conf /etc/default/bobarev-cascade
-                    echo -e "${C_GREEN} Режим VLESS-XHTTP за Cloudflare CDN остановлен и отключен.${C_RESET}"
+                    echo -e "${C_GREEN} Режим VLESS за Cloudflare CDN остановлен и отключен.${C_RESET}"
                 fi
                 pause_enter
                 ;;
@@ -12804,7 +12859,7 @@ menu_connections_proxies() {
             "2" "Каскад: VLESS-XHTTP + Finalmask (+ MASQUE)" \
             "3" "Каскад: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)" \
             "4" "Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad" \
-            "5" "Зарубежный VPS за Cloudflare CDN: Прямой Xray VLESS-XHTTP + TLS" \
+            "5" "Зарубежный VPS за Cloudflare CDN: VLESS (WS / XHTTP) + TLS" \
             "0" "⬅ Назад"; then
             return 0
         fi

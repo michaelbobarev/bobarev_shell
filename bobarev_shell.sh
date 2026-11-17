@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.31 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.32 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN
 # и сетевого аудита. Включает небуферизованный ввод PEM-сертификатов,
 # разделение портов Nginx (443/2053) и Xray REALITY (8443) и фильтр P2P IPv4.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.31"
+SCRIPT_VERSION="3.20.32"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -7331,7 +7331,7 @@ fi
 
 # 1. Часовой пояс и синхронизация времени
 mod_timezone() {
-    echo -e "${C_CYAN} === 1/27. НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА ЧАСОВОГО ПОЯСА ===${C_RESET}"
     local current_tz=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "Europe/Moscow")
     echo "Текущий часовой пояс: $current_tz"
     local tz=""
@@ -7345,7 +7345,7 @@ mod_timezone() {
 
 # 2. Имя хоста
 mod_hostname() {
-    echo -e "${C_CYAN} === 2/27. НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА ИМЕНИ ХОСТА ===${C_RESET}"
     echo "Текущее имя хоста: $(hostname)"
     
     local default_brand_host="Server-VPS"
@@ -7380,7 +7380,7 @@ mod_hostname() {
 
 # 3. Обновление пакетов
 mod_apt_update() {
-    echo -e "${C_CYAN} === 3/27. ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
+    echo -e "${C_CYAN} === ОБНОВЛЕНИЕ ПАКЕТОВ И ОЧИСТКА ===${C_RESET}"
     export DEBIAN_FRONTEND=noninteractive
 
     install_universal_dns_boot_guard
@@ -7438,7 +7438,7 @@ ZRAM_EOF
 # 4. Пользователь и Sudo (с гарантированным приоритетом 99-zzz- в
 # /etc/sudoers.d)
 mod_user_setup() {
-    echo -e "${C_CYAN} === 4/27. СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
+    echo -e "${C_CYAN} === СОЗДАНИЕ И НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ ===${C_RESET}"
     local active_user=$(get_active_user)
     local username=""
     prompt_default "Имя администратора:" "$active_user" username
@@ -7519,7 +7519,7 @@ mod_user_setup() {
 
 # 5. SSH-ключи
 mod_ssh_key() {
-    echo -e "${C_CYAN} === 5/27. НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА КЛЮЧЕЙ ДОСТУПА ===${C_RESET}"
     local active_user=$(get_active_user)
     local target_user=""
     prompt_default "Для какого пользователя привязать ключ?" "$active_user" target_user
@@ -7584,7 +7584,7 @@ mod_ssh_key() {
 
 # 6. Конфигурация SSH (с поддержкой полной Zero-Trust изоляции на tailscale0)
 mod_ssh_config() {
-    echo -e "${C_CYAN} === 6/27. БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
+    echo -e "${C_CYAN} === БЕЗОПАСНОСТЬ УДАЛЕННОГО ДОСТУПА ===${C_RESET}"
     backup_file "/etc/ssh/sshd_config"
 
     silent_run sed -i -E 's/^\s*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)\s+/# &/g' /etc/ssh/sshd_config
@@ -7897,7 +7897,7 @@ mod_ssh_bruteforce_guard() {
 # 7. Защита ядра и сети (с префиксом 99-zzz- и включенным IPv4/IPv6
 # форвардингом)
 mod_hardening() {
-    echo -e "${C_CYAN} === 7/27. ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
+    echo -e "${C_CYAN} === ЗАЩИТА ЯДРА И УСКОРЕНИЕ МАРШРУТИЗАЦИИ ===${C_RESET}"
     
     sed -i -E '/^\s*(net\.core\.(rmem|wmem)_(max|default)|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc)\s*=/d' /etc/sysctl.conf 2>/dev/null || true
     backup_file "/etc/sysctl.d/99-zzz-server-hardening.conf"
@@ -7999,7 +7999,7 @@ HARDENING_EOF
 # 8. Firewall UFW (сохраняет правила личного DERP, Каскада
 # NaiveProxy/WARP/WG-Cascade и открывает 41641/udp при наличии Tailscale)
 mod_ufw() {
-    echo -e "${C_CYAN} === 8/27. НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
+    echo -e "${C_CYAN} === НАСТРОЙКА БРАНДМАУЭРА ===${C_RESET}"
     DEFAULT_WAN_IF=$(get_wan_if)
     
     local active_ssh_port="22"
@@ -8210,7 +8210,7 @@ mod_lock_root() {
         return 0
     fi
 
-    echo -e "${C_CYAN} === 9/27. УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
+    echo -e "${C_CYAN} === УПРАВЛЕНИЕ СИСТЕМНЫМ ДОСТУПОМ ===${C_RESET}"
     
     local root_choice
     if ! smart_menu "Системный доступ" "Выберите желаемое действие:" 12 $WT_WIDTH 2 "root_choice" \
@@ -8871,7 +8871,7 @@ mod_tailscale_auto() { mod_tailscale "auto"; }
 
 # 11. Управление логированием (Интерактивный менеджер)
 mod_logging_manager() {
-    echo -e "${C_CYAN} === 11/27. УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
+    echo -e "${C_CYAN} === УПРАВЛЕНИЕ СИСТЕМНЫМИ ЖУРНАЛАМИ ===${C_RESET}"
     
     local cur_usage="N/A"
     if command -v journalctl &>/dev/null; then
@@ -9008,7 +9008,7 @@ CONF
 
 # 12. Оптимизация RAM / Flash (с префиксом 99-zzz-)
 mod_ram_flash_opt() {
-    echo -e "${C_CYAN} === 12/27. ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
+    echo -e "${C_CYAN} === ОПТИМИЗАЦИЯ ПАМЯТИ И НАКОПИТЕЛЕЙ ===${C_RESET}"
     backup_file "/etc/fstab"
 
     local target_swappiness=1
@@ -9153,7 +9153,7 @@ mod_swap_manager() {
 
 # 14. Системные утилиты и режим процессора
 mod_desktop_apps() {
-    echo -e "${C_CYAN} === 14/27. СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
+    echo -e "${C_CYAN} === СИСТЕМНЫЕ УТИЛИТЫ И РЕЖИМ ПРОЦЕССОРА ===${C_RESET}"
 
     local gov_choice
     if smart_menu "Управление питанием процессора" "\nВыберите желаемый режим работы:\n\nТекущий режим напрямую влияет на скорость\nработы, нагрев и энергопотребление." 17 $WT_WIDTH 4 "gov_choice" \
@@ -9247,7 +9247,7 @@ EOF
 
 # 15. Программный сброс HDMI
 mod_hdmi_reset() {
-    echo -e "${C_CYAN} === 15/27. СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
+    echo -e "${C_CYAN} === СБРОС ВИДЕОВЫХОДА HDMI ===${C_RESET}"
     cat << 'HDMI_EOF' > /usr/local/bin/reset-hdmi.sh
 #!/bin/bash
 HDMI_OUTPUT=$(xrandr 2>/dev/null | grep -E "^HDMI-[0-9A-Z-]+ connected" | awk '{print $1}' | head -n 1 || true)
@@ -9277,7 +9277,7 @@ HDMI_EOF
 
 # 16. Диагностика времени загрузки
 mod_boot_diag() {
-    echo -e "${C_CYAN} === 16/27. АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
+    echo -e "${C_CYAN} === АНАЛИЗ ВРЕМЕНИ ЗАГРУЗКИ СИСТЕМЫ ===${C_RESET}"
     if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
         echo -e "${C_RED} Ошибка: система запущена без systemd. Диагностика невозможна.${C_RESET}"
         return
@@ -11519,7 +11519,7 @@ mod_network_reset() {
 }
 
 mod_backup_manager() {
-    echo -e "${C_CYAN} === 18/27. ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
+    echo -e "${C_CYAN} === ЭКСПОРТ И ИМПОРТ НАСТРОЕК ===${C_RESET}"
     local target_user=$(get_active_user)
     local target_home=$(getent passwd "$target_user" | cut -d: -f6)
     [ -z "$target_home" ] && target_home="/root"
@@ -12495,7 +12495,7 @@ mod_network_cascade_audit() {
         fi
 
         local na_choice=""
-        if ! smart_menu " 26/27. Аудит системы 2 и каскадные пары (v3.1)" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 "na_choice" \
+        if ! smart_menu " Аудит сети и каскадных пар" "\nВыберите режим диагностики сети, туннелей и обхода ТСПУ:\n(Отчет сохраняется в домашнюю директорию пользователя)" 19 $WT_WIDTH 6 "na_choice" \
         "1" " Срез состояния системы" \
         "2" " Тест связи между серверами" \
         "3" " Мониторинг трафика Live" \
@@ -12757,7 +12757,7 @@ menu_server_security() {
         if ! smart_menu "🛠 БАЗОВАЯ НАСТРОЙКА И БЕЗОПАСНОСТЬ" "Выберите этап настройки сервера:" 23 "$WT_WIDTH" 16 choice \
             "1" "Часовой пояс" \
             "2" "Имя сервера - Hostname" \
-            "3" "Обновление пакетов, приоритет IPv4 и zRAM" \
+            "3" "Обновление пакетов, защита DNS и zRAM" \
             "4" "Создание и настройка пользователя" \
             "5" "Привязка SSH-ключа безопасности" \
             "6" "Конфигурация SSH - порт, ключи, доступ" \

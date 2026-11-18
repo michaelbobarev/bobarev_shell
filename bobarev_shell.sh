@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.33 — универсальная система настройки безопасности,
-# Tailscale, каскадов VLESS-XHTTP / Hysteria 2 / MASQUE / Cloudflare CDN
-# и сетевого аудита. Включает небуферизованный ввод PEM-сертификатов,
-# разделение портов Nginx (443/2053) и Xray REALITY (8443) и фильтр P2P IPv4.
+# Bobarev Shell v3.20.34 — универсальная система настройки безопасности,
+# Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
+# Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
+# очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.33"
+SCRIPT_VERSION="3.20.34"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -458,6 +458,87 @@ TS_EOF
 # ------------------------------------------------------------------------------
 # ИНТЕРАКТИВНЫЙ СКАНЕР ПОРТОВ И СТЕК VLESS-REALITY (XTLS VISION + FINALMASK)
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+audit_and_clean_stale_tunnel_processes() {
+    # Ищет зависшие/осиротевшие туннельные процессы по /proc/<PID>/cmdline
+    # и systemd-юнитам (например, забытый naive-masque-bridge.json),
+    # чтобы чужой xray/usque/hysteria не маскировался под целевой сервис.
+    local menu_title="${1:-выбранный пункт меню}"
+    local allowed_cmdline_regex="${2:-}"
+    local target_bins="^(xray|usque|hysteria|sing-box|naive|cloudflared|derper|nginx|caddy)$"
+
+    local -a stale_pids=()
+    local -a stale_units=()
+    local -a stale_lines=()
+
+    local p_info pid comm cmdline unit ports_str
+    while IFS= read -r p_info; do
+        [ -z "$p_info" ] && continue
+        pid=$(printf '%s' "$p_info" | awk '{print $1}')
+        comm=$(printf '%s' "$p_info" | awk '{print $2}')
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        [[ "$comm" =~ $target_bins ]] || continue
+
+        cmdline=""
+        if [ -r "/proc/${pid}/cmdline" ]; then
+            cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//' || true)
+        fi
+        [ -z "$cmdline" ] && cmdline="$comm"
+
+        if [ -n "$allowed_cmdline_regex" ] && [[ "$cmdline" =~ $allowed_cmdline_regex ]]; then
+            continue
+        fi
+
+        unit=""
+        if command -v systemctl >/dev/null 2>&1; then
+            unit=$(ps -o unit= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
+            [[ "$unit" == *".scope" || "$unit" == "init.scope" ]] && unit=""
+        fi
+
+        ports_str=$(ss -H -ltunp 2>/dev/null | awk -v p="pid=${pid}," '$0 ~ p {print $1":"$5}' | paste -sd ',' - || true)
+        stale_pids+=("$pid")
+        [ -n "$unit" ] && stale_units+=("$unit")
+        stale_lines+=("  • PID ${pid}${unit:+ [${unit}]}${ports_str:+ (порты: ${ports_str})}: ${cmdline}")
+    done < <(ps -eo pid=,comm= 2>/dev/null || true)
+
+    if [ "${#stale_lines[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    echo -e "\n${C_YELLOW} ======================================================================${C_RESET}"
+    echo -e "${C_YELLOW} ОБНАРУЖЕНЫ КОНФЛИКТУЮЩИЕ ИЛИ ЗАВИСШИЕ ПРОЦЕССЫ (${menu_title}):${C_RESET}"
+    echo -e "${C_YELLOW} ======================================================================${C_RESET}"
+    local sl
+    for sl in "${stale_lines[@]}"; do
+        echo -e "${C_CYAN}${sl}${C_RESET}"
+    done
+    echo ""
+
+    if prompt_yn "Остановить и отключить найденные процессы перед запуском «${menu_title}»?" "true"; then
+        local u
+        if [ "${#stale_units[@]}" -gt 0 ]; then
+            while IFS= read -r u; do
+                [ -z "$u" ] && continue
+                silent_run systemctl stop "$u" 2>/dev/null || true
+                silent_run systemctl disable "$u" 2>/dev/null || true
+            done < <(printf '%s\n' "${stale_units[@]}" | sort -u)
+        fi
+        local sp
+        for sp in "${stale_pids[@]}"; do
+            if kill -0 "$sp" 2>/dev/null; then
+                kill -TERM "$sp" 2>/dev/null || true
+                sleep 0.3
+                kill -0 "$sp" 2>/dev/null && kill -KILL "$sp" 2>/dev/null || true
+            fi
+        done
+        echo -e "${C_GREEN} ✔ Зависшие и конфликтующие процессы остановлены.${C_RESET}"
+    else
+        echo -e "${C_YELLOW} Продолжаем без остановки обнаруженных процессов.${C_RESET}"
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------------
 scan_and_warn_occupied_ports_interactive() {
     # Сканирует указанные порты (формат: "443/tcp" "443/udp" "1080/tcp" или
     # просто "443")
@@ -647,6 +728,7 @@ ensure_or_init_global_vless_inbound_interactive() {
     local menu_label="${1:-Настройка VLESS-XHTTP}"
     local extra_ports=("${@:2}")
     ensure_xray_installed || return 1
+    audit_and_clean_stale_tunnel_processes "$menu_label" "/etc/xray/config\\.json|/usr/local/bin/usque" || return 0
 
     if load_global_vless_credentials; then
         echo -e "${C_GREEN} ✔ Используется глобальная учетная запись VLESS-XHTTP этого сервера:${C_RESET}"
@@ -3274,9 +3356,11 @@ render_xray_cloudflare_cdn_config() {
             wan_dev=""
         fi
     fi
+    local has_ipv6="false"
+    [ -n "$(get_wan_global_ipv6)" ] && has_ipv6="true"
 
     mkdir -p /etc/xray
-    python3 - "$direct_port" "$x_uuid" "$x_priv" "$x_short_id" "$cf_domain" "$exit_mode" "$x_path" "$front_mode" "$cf_listen_port" "$ssl_cert" "$ssl_key" "$wan_dev" "$cf_transport" << 'PY_XRAY_CF_EOF'
+    python3 - "$direct_port" "$x_uuid" "$x_priv" "$x_short_id" "$cf_domain" "$exit_mode" "$x_path" "$front_mode" "$cf_listen_port" "$ssl_cert" "$ssl_key" "$wan_dev" "$cf_transport" "$has_ipv6" << 'PY_XRAY_CF_EOF'
 import json
 import sys
 from pathlib import Path
@@ -3294,15 +3378,17 @@ ssl_cert = sys.argv[10]
 ssl_key = sys.argv[11]
 wan_dev = sys.argv[12]
 cf_transport = sys.argv[13] if len(sys.argv) > 13 else "ws"
+has_ipv6 = (sys.argv[14].lower() == "true") if len(sys.argv) > 14 else False
 
 inbounds = []
 
 if cf_transport == "ws":
-    # VLESS + WebSocket + TLS: 101 Switching Protocols отключает буферизацию
-    # Cloudflare и работает в Shadowrocket из коробки
+    # VLESS + WebSocket за Nginx (ssl_preread + заглушка 200 OK):
+    # Nginx принимает TLS на cf_listen_port и проксирует x_path на 127.0.0.1:10451
     inbounds.append({
         "tag": "vless-ws-cf-tls-in",
-        "port": cf_listen_port,
+        "listen": "127.0.0.1",
+        "port": 10451,
         "protocol": "vless",
         "settings": {
             "clients": [{"id": x_uuid}],
@@ -3310,19 +3396,13 @@ if cf_transport == "ws":
         },
         "streamSettings": {
             "network": "ws",
-            "security": "tls",
+            "security": "none",
             "wsSettings": {
-                "path": x_path
+                "path": x_path,
+                "heartbeatPeriod": 30
             },
-            "tlsSettings": {
-                "serverName": cf_domain,
-                "alpn": ["http/1.1"],
-                "certificates": [
-                    {
-                        "certificateFile": ssl_cert,
-                        "keyFile": ssl_key
-                    }
-                ]
+            "sockopt": {
+                "acceptProxyProtocol": False
             }
         },
         "sniffing": {
@@ -3440,7 +3520,7 @@ if exit_mode in ("warp", "masque"):
             "tag": "direct-udp",
             "protocol": "freedom",
             "streamSettings": {
-                "sockopt": {"domainStrategy": "UseIPv4v6"}
+                "sockopt": {"domainStrategy": "UseIPv4v6" if has_ipv6 else "UseIPv4"}
             }
         }
     ]
@@ -3727,10 +3807,148 @@ switch_cloudflare_cdn_exit_mode_interactive() {
     echo -e "${C_GREEN} ✔ Выход зарубежного VPS за Cloudflare CDN переключен на: ${C_BOLD}${target_out}${C_RESET}"
 }
 
+cleanup_cloudflare_nginx_ws_front() {
+    rm -f /etc/nginx/bobarev-cf-stream.conf /etc/nginx/conf.d/bobarev-cf-ws.conf /etc/nginx/conf.d/xray-selfsteal.conf 2>/dev/null || true
+    if [ -f /etc/nginx/nginx.conf ]; then
+        sed -i '/bobarev-cf-stream\.conf/d' /etc/nginx/nginx.conf 2>/dev/null || true
+    fi
+    if systemctl is-active --quiet nginx.service 2>/dev/null; then
+        silent_run systemctl stop nginx.service 2>/dev/null || true
+    fi
+    silent_run systemctl disable nginx.service 2>/dev/null || true
+}
+
+setup_cloudflare_nginx_ws_front() {
+    local cf_listen_port="${1:-443}"
+    local x_path="${2:-/xhttp-stream}"
+    local ssl_cert="$3"
+    local ssl_key="$4"
+    local ws_local_port="${5:-10451}"
+    local cf_domain="${6:-servhost.bbrv.io}"
+
+    [[ "$x_path" != /* ]] && x_path="/${x_path}"
+    x_path="${x_path%/}"
+
+    if ! command -v nginx >/dev/null 2>&1 || [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
+        echo -e "${C_BLUE} Установка nginx и libnginx-mod-stream для SNI-фронта (ssl_preread)...${C_RESET}"
+        apt_get_quiet_update || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx libnginx-mod-stream >/dev/null 2>&1 || true
+    fi
+    if ! command -v nginx >/dev/null 2>&1; then
+        echo -e "${C_RED} Ошибка: не удалось установить nginx.${C_RESET}"
+        return 1
+    fi
+
+    rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/xray-selfsteal.conf 2>/dev/null || true
+    systemctl stop caddy.service 2>/dev/null || true
+    systemctl disable caddy.service 2>/dev/null || true
+
+    local ngx_ver h2="http2" h2on=""
+    ngx_ver=$(nginx -v 2>&1 | sed -n 's|.*nginx/\([0-9][0-9.]*\).*|\1|p')
+    if [ -n "$ngx_ver" ] && [ "$(printf '%s\n1.25.1\n' "$ngx_ver" | sort -V | head -1)" = "1.25.1" ]; then
+        h2=""
+        h2on=$'\n    http2 on;'
+    fi
+
+    mkdir -p /var/www/bobarev-cf-stub
+    cat << 'EOF_STUB' > /var/www/bobarev-cf-stub/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Northbridge Cloud Notes</title>
+<style>
+body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f7f9;color:#1f2328;line-height:1.6}
+main{max-width:680px;margin:64px auto;padding:0 20px}
+h1{font-size:28px;margin:0 0 8px}
+p{color:#57606a}
+.card{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:18px;margin-top:16px}
+</style>
+</head>
+<body>
+<main>
+<h1>Northbridge Cloud Notes</h1>
+<p>Static engineering notes and infrastructure checklists.</p>
+<div class="card"><strong>Service status:</strong> Operational &middot; Static edge cache enabled.</div>
+</main>
+</body>
+</html>
+EOF_STUB
+    chmod 644 /var/www/bobarev-cf-stub/index.html
+
+    cat << EOF_STREAM > /etc/nginx/bobarev-cf-stream.conf
+# Bobarev Shell Cloudflare CDN stream SNI router
+stream {
+    map_hash_bucket_size 512;
+    map \$ssl_preread_server_name \$bobarev_cf_upstream {
+        default 127.0.0.1:10446;
+    }
+    server {
+        listen ${cf_listen_port};
+        listen [::]:${cf_listen_port};
+        ssl_preread on;
+        proxy_pass \$bobarev_cf_upstream;
+        proxy_protocol on;
+        proxy_connect_timeout 10s;
+        proxy_timeout 1h;
+    }
+}
+EOF_STREAM
+
+    cat << EOF_HTTP > /etc/nginx/conf.d/bobarev-cf-ws.conf
+# Bobarev Shell Cloudflare VLESS-WS + 200 OK Stub
+server {
+    listen 127.0.0.1:10446 ssl${h2:+ $h2} proxy_protocol;
+    server_name ${cf_domain} _;${h2on}
+    ssl_certificate ${ssl_cert};
+    ssl_certificate_key ${ssl_key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+    server_tokens off;
+    access_log off;
+
+    location = ${x_path} {
+        proxy_pass http://127.0.0.1:${ws_local_port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    location / {
+        root /var/www/bobarev-cf-stub;
+        index index.html;
+    }
+}
+EOF_HTTP
+
+    if ! grep -q 'bobarev-cf-stream.conf' /etc/nginx/nginx.conf 2>/dev/null; then
+        echo 'include /etc/nginx/bobarev-cf-stream.conf;' >> /etc/nginx/nginx.conf
+    fi
+
+    if ! nginx -t >/dev/null 2>&1; then
+        echo -e "${C_RED} Ошибка конфигурации Nginx:${C_RESET}"
+        nginx -t || true
+        cleanup_cloudflare_nginx_ws_front
+        return 1
+    fi
+
+    systemctl enable nginx.service >/dev/null 2>&1 || true
+    safe_restart_systemd_service nginx.service
+    echo -e "${C_GREEN} ✔ Nginx ssl_preread (:${cf_listen_port}) + заглушка 200 OK + VLESS-WS (:10451) запущены.${C_RESET}"
+    return 0
+}
+
 setup_cloudflare_cdn_vless_wizard() {
-    echo -e "${C_CYAN} === НАСТРОЙКА ЗАРУБЕЖНОГО VPS ЗА CLOUDFLARE CDN: ПРЯМОЙ XRAY (WS / XHTTP + TLS) ===${C_RESET}"
-    echo -e "${C_BLUE} Сам Xray принимает TLS с сертификатом Cloudflare Origin CA (без прослойки Nginx).${C_RESET}"
-    echo -e "${C_BLUE} Для Shadowrocket рекомендуется WebSocket (без буферизации в Cloudflare), для Podkop/v2rayN доступен XHTTP.${C_RESET}\n"
+    echo -e "${C_CYAN} === НАСТРОЙКА ЗАРУБЕЖНОГО VPS ЗА CLOUDFLARE CDN: XRAY + NGINX SSL_PREREAD ===${C_RESET}"
+    echo -e "${C_BLUE} Для WebSocket (Shadowrocket): Nginx ssl_preread (:443) + заглушка 200 OK + локальный VLESS-WS (:10451).${C_RESET}"
+    echo -e "${C_BLUE} Для XHTTP (Podkop/v2rayN): прямой Xray TLS с сертификатом Cloudflare Origin CA.${C_RESET}\n"
+    audit_and_clean_stale_tunnel_processes "Cloudflare CDN (Раздел 2 -> Пункт 5)" "/etc/xray/config\\.json|/usr/local/bin/usque" || return 0
 
     local saved_domain="" saved_clean_ip="104.16.132.229" saved_fmode="hybrid" saved_cf_port="443" saved_cf_trans="ws"
     if [ -f /etc/default/bobarev-cascade ]; then
@@ -3853,12 +4071,15 @@ Xray принимает Cloudflare CDN (${cf_transport^^} + TLS) на порту
 
     ensure_cloudflare_tls_cert "$cf_domain" "true" || return 1
 
-    if systemctl is-active --quiet nginx.service 2>/dev/null || systemctl is-active --quiet caddy.service 2>/dev/null; then
-        echo -e "${C_BLUE} Остановка nginx / caddy для прямой работы Xray-core на порту ${cf_listen_port}/tcp...${C_RESET}"
-        silent_run systemctl stop nginx.service caddy.service 2>/dev/null || true
-        silent_run systemctl disable nginx.service caddy.service 2>/dev/null || true
+    if [ "$cf_transport" = "ws" ]; then
+        setup_cloudflare_nginx_ws_front "$cf_listen_port" "$XRAY_XHTTP_PATH" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY" "10451" "$cf_domain" || return 1
+    else
+        cleanup_cloudflare_nginx_ws_front
+        if systemctl is-active --quiet caddy.service 2>/dev/null; then
+            silent_run systemctl stop caddy.service 2>/dev/null || true
+            silent_run systemctl disable caddy.service 2>/dev/null || true
+        fi
     fi
-    rm -f /etc/nginx/conf.d/xray-selfsteal.conf 2>/dev/null || true
 
     local direct_reality_port="8443"
     render_xray_cloudflare_cdn_config "$direct_reality_port" "$XRAY_UUID" "$XRAY_PRIV" "$XRAY_SHORT_ID" "$cf_domain" "$target_out_mode" "$XRAY_XHTTP_PATH" "$front_mode" "$cf_listen_port" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY" "$cf_transport"

@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.35 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.36 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.35"
+SCRIPT_VERSION="3.20.36"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -3831,7 +3831,7 @@ setup_cloudflare_nginx_ws_front() {
 
     if ! command -v nginx >/dev/null 2>&1 || [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
         echo -e "${C_BLUE} Установка nginx и libnginx-mod-stream для SNI-фронта (ssl_preread)...${C_RESET}"
-        apt_get_quiet_update || true
+        silent_run apt-get update || true
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx libnginx-mod-stream >/dev/null 2>&1 || true
     fi
     if ! command -v nginx >/dev/null 2>&1; then

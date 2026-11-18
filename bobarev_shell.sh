@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.34 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.35 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.34"
+SCRIPT_VERSION="3.20.35"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -3808,9 +3808,9 @@ switch_cloudflare_cdn_exit_mode_interactive() {
 }
 
 cleanup_cloudflare_nginx_ws_front() {
-    rm -f /etc/nginx/bobarev-cf-stream.conf /etc/nginx/conf.d/bobarev-cf-ws.conf /etc/nginx/conf.d/xray-selfsteal.conf 2>/dev/null || true
+    rm -f /etc/nginx/bobarev-cf-stream.conf /etc/nginx/conf.d/bobarev-cf-ws.conf /etc/nginx/conf.d/xray-selfsteal.conf /etc/nginx/conf.d/kit.conf /etc/nginx/kit-stream.conf 2>/dev/null || true
     if [ -f /etc/nginx/nginx.conf ]; then
-        sed -i '/bobarev-cf-stream\.conf/d' /etc/nginx/nginx.conf 2>/dev/null || true
+        sed -i '/bobarev-cf-stream\.conf/d; /kit-stream\.conf/d' /etc/nginx/nginx.conf 2>/dev/null || true
     fi
     if systemctl is-active --quiet nginx.service 2>/dev/null; then
         silent_run systemctl stop nginx.service 2>/dev/null || true
@@ -3824,7 +3824,7 @@ setup_cloudflare_nginx_ws_front() {
     local ssl_cert="$3"
     local ssl_key="$4"
     local ws_local_port="${5:-10451}"
-    local cf_domain="${6:-servhost.bbrv.io}"
+    local cf_domain="${6:-vpn.example.com}"
 
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
     x_path="${x_path%/}"
@@ -3839,7 +3839,10 @@ setup_cloudflare_nginx_ws_front() {
         return 1
     fi
 
-    rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/xray-selfsteal.conf 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/xray-selfsteal.conf /etc/nginx/conf.d/kit.conf /etc/nginx/kit-stream.conf 2>/dev/null || true
+    if [ -f /etc/nginx/nginx.conf ]; then
+        sed -i '/kit-stream\.conf/d; /bobarev-cf-stream\.conf/d' /etc/nginx/nginx.conf 2>/dev/null || true
+    fi
     systemctl stop caddy.service 2>/dev/null || true
     systemctl disable caddy.service 2>/dev/null || true
 
@@ -3966,7 +3969,7 @@ setup_cloudflare_cdn_vless_wizard() {
     fi
 
     local cf_domain=""
-    prompt_default "1/5. Введите ваш домен или поддомен в Cloudflare (например, servhost.bbrv.io):" "$saved_domain" cf_domain
+    prompt_default "1/5. Введите ваш домен или поддомен в Cloudflare (например, vpn.example.com):" "$saved_domain" cf_domain
     if [ "$MODULE_CANCELED" = true ] || [ -z "$cf_domain" ]; then
         echo -e "${C_YELLOW} Настройка отменена: домен не указан.${C_RESET}"
         return 0
@@ -4196,7 +4199,7 @@ manage_cloudflare_cdn_vless_menu() {
                     cur_dom="${CF_CDN_DOMAIN:-}"
                 fi
                 if [ -z "$cur_dom" ] || [ "$cur_dom" = "www.microsoft.com" ]; then
-                    prompt_default "Введите ваш домен в Cloudflare (например, servhost.bbrv.io):" "" cur_dom
+                    prompt_default "Введите ваш домен в Cloudflare (например, vpn.example.com):" "" cur_dom
                 fi
                 if [ -n "$cur_dom" ]; then
                     ensure_cloudflare_tls_cert "$cur_dom" "true" || true

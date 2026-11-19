@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.39 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.40 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.39"
+SCRIPT_VERSION="3.20.40"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -3150,12 +3150,16 @@ ensure_cloudflare_tls_cert() {
     CF_ACTIVE_SSL_KEY=""
     CF_ACTIVE_CERT_MODE="origin_ca"
 
-    if ! command -v nginx >/dev/null 2>&1 || ! command -v certbot >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
-        echo -e "${C_BLUE} Установка nginx, certbot и openssl...${C_RESET}"
-        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx certbot openssl >/dev/null 2>&1 || {
-            echo -e "${C_RED} Ошибка установки nginx / certbot.${C_RESET}"
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo -e "${C_BLUE} Установка openssl...${C_RESET}"
+        local _apt_log="/tmp/bobarev_apt_openssl.log"
+        if ! { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssl; } >"$_apt_log" 2>&1; then
+            echo -e "${C_RED} Ошибка установки openssl:${C_RESET}"
+            tail -n 10 "$_apt_log" 2>/dev/null || true
+            rm -f "$_apt_log"
             return 1
-        }
+        fi
+        rm -f "$_apt_log"
     fi
 
     mkdir -p /var/www/selfsteal/.well-known/acme-challenge /etc/ssl/bobarev-cf-origin
@@ -3240,6 +3244,15 @@ ${existing_desc}
             fi
             ;;
         3)
+            if ! command -v certbot >/dev/null 2>&1; then
+                echo -e "${C_BLUE} Установка certbot...${C_RESET}"
+                local _cb_log="/tmp/bobarev_apt_certbot.log"
+                if ! { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot; } >"$_cb_log" 2>&1; then
+                    echo -e "${C_YELLOW} ⚠ Не удалось установить certbot:${C_RESET}"
+                    tail -n 8 "$_cb_log" 2>/dev/null || true
+                fi
+                rm -f "$_cb_log"
+            fi
             echo -e "${C_BLUE} Выпуск сертификата Let's Encrypt для домена ${C_BOLD}${domain}${C_RESET}${C_BLUE}...${C_RESET}"
             silent_run systemctl stop caddy.service 2>/dev/null || true
             local cert_ok=false
@@ -3953,12 +3966,25 @@ setup_cloudflare_nginx_ws_front() {
 
     if ! command -v nginx >/dev/null 2>&1 || [ ! -f /usr/lib/nginx/modules/ngx_stream_module.so ]; then
         echo -e "${C_BLUE} Установка nginx и libnginx-mod-stream для SNI-фронта (ssl_preread)...${C_RESET}"
-        silent_run apt-get update || true
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx libnginx-mod-stream >/dev/null 2>&1 || true
-    fi
-    if ! command -v nginx >/dev/null 2>&1; then
-        echo -e "${C_RED} Ошибка: не удалось установить nginx.${C_RESET}"
-        return 1
+        silent_run systemctl stop caddy.service 2>/dev/null || true
+        silent_run systemctl stop nginx.service 2>/dev/null || true
+        rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+        local _ngx_log="/tmp/bobarev_apt_nginx.log"
+        if ! {
+            DEBIAN_FRONTEND=noninteractive dpkg --configure -a &&
+            apt-get update -qq &&
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nginx libnginx-mod-stream
+        } >"$_ngx_log" 2>&1; then
+            rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+            DEBIAN_FRONTEND=noninteractive dpkg --configure -a >>"$_ngx_log" 2>&1 || true
+        fi
+        if ! command -v nginx >/dev/null 2>&1; then
+            echo -e "${C_RED} Ошибка: не удалось установить nginx. Детали apt:${C_RESET}"
+            tail -n 15 "$_ngx_log" 2>/dev/null || true
+            rm -f "$_ngx_log"
+            return 1
+        fi
+        rm -f "$_ngx_log"
     fi
 
     rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/xray-selfsteal.conf /etc/nginx/conf.d/kit.conf /etc/nginx/kit-stream.conf 2>/dev/null || true

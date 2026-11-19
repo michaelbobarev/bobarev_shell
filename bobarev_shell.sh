@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.38"
+SCRIPT_VERSION="3.20.39"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -3505,7 +3505,21 @@ else:
             "security": "tls",
             "xhttpSettings": {
                 "path": x_path,
-                "mode": "auto"
+                "mode": "auto",
+                "extra": {
+                    "xPaddingBytes": "100-1000",
+                    "noGRPCHeader": True,
+                    "scMaxEachPostBytes": 1000000,
+                    "scMinPostsIntervalMs": "10-50",
+                    "xmux": {
+                        "maxConcurrency": "16-32",
+                        "maxConnections": 0,
+                        "cMaxReuseTimes": 0,
+                        "hMaxRequestTimes": "600-900",
+                        "hMaxReusableSecs": "1800-3000",
+                        "hKeepAlivePeriod": 0
+                    }
+                }
             },
             "tlsSettings": {
                 "serverName": cf_domain,
@@ -3539,7 +3553,21 @@ if front_mode == "hybrid" and x_priv:
             "security": "reality",
             "xhttpSettings": {
                 "path": x_path,
-                "mode": "auto"
+                "mode": "auto",
+                "extra": {
+                    "xPaddingBytes": "100-1000",
+                    "noGRPCHeader": True,
+                    "scMaxEachPostBytes": 1000000,
+                    "scMinPostsIntervalMs": "10-50",
+                    "xmux": {
+                        "maxConcurrency": "16-32",
+                        "maxConnections": 0,
+                        "cMaxReuseTimes": 0,
+                        "hMaxRequestTimes": "600-900",
+                        "hMaxReusableSecs": "1800-3000",
+                        "hKeepAlivePeriod": 0
+                    }
+                }
             },
             "realitySettings": {
                 "show": False,
@@ -3601,11 +3629,16 @@ if exit_mode in ("warp", "masque"):
             "streamSettings": {
                 "sockopt": {"domainStrategy": "UseIPv4v6" if has_ipv6 else "UseIPv4"}
             }
+        },
+        {
+            "tag": "block",
+            "protocol": "blackhole"
         }
     ]
     routing = {
         "domainStrategy": "AsIs",
         "rules": [
+            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"},
             {"type": "field", "network": "udp", "outboundTag": "direct-udp"},
             {"type": "field", "network": "tcp", "outboundTag": "masque-out"}
         ]
@@ -3624,11 +3657,17 @@ else:
             "streamSettings": {
                 "sockopt": sockopt
             }
+        },
+        {
+            "tag": "block",
+            "protocol": "blackhole"
         }
     ]
     routing = {
         "domainStrategy": "AsIs",
-        "rules": []
+        "rules": [
+            {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"}
+        ]
     }
 
 cfg = {
@@ -3682,6 +3721,8 @@ print_cloudflare_cdn_vless_links() {
 
     local frag_params="fragment=40-60,30-50,tlshello&fragmentPackets=tlshello&fragmentLength=40-60&fragmentInterval=30-50"
     local fm_encoded="%7B%22tcp%22%3A%5B%7B%22type%22%3A%22fragment%22%2C%22settings%22%3A%7B%22packets%22%3A%22tlshello%22%2C%22length%22%3A%2240-60%22%2C%22delay%22%3A%2230-50%22%7D%7D%5D%7D"
+    local encoded_ws_ed_path="${encoded_path}%3Fed%3D2048"
+    local xhttp_extra_encoded="%7B%22xPaddingBytes%22%3A%22100-1000%22%2C%22noGRPCHeader%22%3Atrue%2C%22scMaxEachPostBytes%22%3A1000000%2C%22scMinPostsIntervalMs%22%3A%2210-50%22%2C%22xmux%22%3A%7B%22maxConcurrency%22%3A%2216-32%22%2C%22maxConnections%22%3A0%2C%22cMaxReuseTimes%22%3A0%2C%22hMaxRequestTimes%22%3A%22600-900%22%2C%22hMaxReusableSecs%22%3A%221800-3000%22%2C%22hKeepAlivePeriod%22%3A0%7D%7D"
 
     echo -e "\n${C_CYAN} === ССЫЛКИ И QR-КОДЫ VLESS ЗА CLOUDFLARE CDN (ПРЯМОЙ XRAY: ${cf_transport^^}) ===${C_RESET}"
     echo -e " Домен Cloudflare:     ${C_BOLD}${C_GREEN}${cf_domain}${C_RESET} (Порт Xray TLS на сервере: ${C_GREEN}${cf_listen_port}/tcp${C_RESET})"
@@ -3689,8 +3730,8 @@ print_cloudflare_cdn_vless_links() {
     echo -e " Транспорт / Выход:    ${C_GREEN}${cf_transport^^} + TLS (${cf_front_mode})${C_RESET} | Выход: ${C_GREEN}${VLESS_OUT_MODE:-direct}${C_RESET}"
 
     if [ "$cf_transport" = "ws" ]; then
-        local cf_ws_link="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_path}#${hname}-CF-WS-TLS"
-        local cf_ws_clean="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_path}&${frag_params}&fm=${fm_encoded}#${hname}-CF-WS-CleanIP-${cf_clean_ip}"
+        local cf_ws_link="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_ws_ed_path}#${hname}-CF-WS-TLS"
+        local cf_ws_clean="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_ws_ed_path}&${frag_params}&fm=${fm_encoded}#${hname}-CF-WS-CleanIP-${cf_clean_ip}"
 
         echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (VLESS + WebSocket + TLS — мгновенная работа в Shadowrocket!):${C_RESET}"
         echo -e " ${C_BOLD}${C_GREEN}${cf_ws_link}${C_RESET}"
@@ -3711,10 +3752,10 @@ print_cloudflare_cdn_vless_links() {
             qrencode -t ansiutf8 "${cf_ws_clean}" 2>/dev/null || true
         fi
     else
-        local cf_link_packet="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-CF-PacketUp"
-        local cf_link_auto="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=auto#${hname}-CF-Auto-H2"
-        local cf_link_h3="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h3&type=xhttp&path=${encoded_path}&mode=packet-up#${hname}-CF-HTTP3-QUIC"
-        local cf_link_clean_ip="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&${frag_params}&fm=${fm_encoded}#${hname}-CF-CleanIP-${cf_clean_ip}"
+        local cf_link_packet="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&extra=${xhttp_extra_encoded}#${hname}-CF-PacketUp"
+        local cf_link_auto="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2&type=xhttp&path=${encoded_path}&mode=auto&extra=${xhttp_extra_encoded}#${hname}-CF-Auto-H2"
+        local cf_link_h3="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h3&type=xhttp&path=${encoded_path}&mode=packet-up&extra=${xhttp_extra_encoded}#${hname}-CF-HTTP3-QUIC"
+        local cf_link_clean_ip="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_path}&mode=packet-up&extra=${xhttp_extra_encoded}&${frag_params}&fm=${fm_encoded}#${hname}-CF-CleanIP-${cf_clean_ip}"
 
         echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (XHTTP mode=packet-up, порт 443):${C_RESET}"
         echo -e " ${C_BOLD}${C_GREEN}${cf_link_packet}${C_RESET}"
@@ -3745,11 +3786,13 @@ print_cloudflare_cdn_vless_links() {
     echo -e "\n${C_CYAN} === ШПАРГАЛКА НАСТРОЕК В ПАНЕЛИ CLOUDFLARE ===${C_RESET}"
     echo -e "   1) ${C_BOLD}DNS -> Records:${C_RESET} запись ${C_GREEN}A${C_RESET} (${cf_domain} -> ${pub_ip4:-IP_сервера}), тумблер ${C_YELLOW}Proxied = ON (Оранжевое облачко)${C_RESET}."
     echo -e "   2) ${C_BOLD}SSL/TLS -> Overview:${C_RESET} режим шифрования ${C_GREEN}${ssl_mode_hint}${C_RESET}."
-    echo -e "   3) ${C_BOLD}Network:${C_RESET} обязательно включите ${C_GREEN}WebSockets = ON${C_RESET}, ${C_GREEN}HTTP/2 = ON${C_RESET}, ${C_GREEN}HTTP/3 (with QUIC) = ON${C_RESET}, ${C_GREEN}gRPC = ON${C_RESET}."
+    echo -e "   3) ${C_BOLD}Network:${C_RESET} включите ${C_GREEN}WebSockets = ON${C_RESET}, ${C_GREEN}0-RTT Connection Resumption = ON${C_RESET}, ${C_GREEN}HTTP/2 = ON${C_RESET}, ${C_GREEN}HTTP/3 = ON${C_RESET}, ${C_GREEN}gRPC = ON${C_RESET}."
+    echo -e "   4) ${C_BOLD}Security -> Bots:${C_RESET} отключите ${C_YELLOW}Bot Fight Mode = OFF${C_RESET} и ${C_YELLOW}Block AI Bots = OFF${C_RESET} (иначе CF даст 403 Forbidden!)."
+    echo -e "   5) ${C_BOLD}Speed -> Optimization:${C_RESET} отключите ${C_YELLOW}Speed Brain = OFF${C_RESET} и ${C_YELLOW}Rocket Loader = OFF${C_RESET}; в Edge Certificates оставьте ${C_GREEN}TLS 1.3 = ON${C_RESET}."
     if [ "$cf_listen_port" != "443" ]; then
-        echo -e "   4) ${C_BOLD}Rules -> Origin Rules (ОБЯЗАТЕЛЬНО для порта ${cf_listen_port}):${C_RESET} Hostname equals ${C_GREEN}${cf_domain}${C_RESET} -> Destination Port = ${C_BOLD}${C_YELLOW}${cf_listen_port}${C_RESET}."
+        echo -e "   6) ${C_BOLD}Rules -> Origin Rules (ОБЯЗАТЕЛЬНО для порта ${cf_listen_port}):${C_RESET} Hostname equals ${C_GREEN}${cf_domain}${C_RESET} -> Destination Port = ${C_BOLD}${C_YELLOW}${cf_listen_port}${C_RESET}."
     else
-        echo -e "   4) ${C_BOLD}Origin Rules:${C_RESET} не требуются (Xray слушает стандартный порт 443/tcp напрямую)."
+        echo -e "   6) ${C_BOLD}Origin Rules:${C_RESET} не требуются (стандартный порт 443/tcp)."
     fi
 }
 
@@ -5966,7 +6009,21 @@ render_xray_server_config() {
         "security": "reality",
         "xhttpSettings": {
           "path": "${x_path}",
-          "mode": "auto"
+          "mode": "auto",
+          "extra": {
+            "xPaddingBytes": "100-1000",
+            "noGRPCHeader": true,
+            "scMaxEachPostBytes": 1000000,
+            "scMinPostsIntervalMs": "10-50",
+            "xmux": {
+              "maxConcurrency": "16-32",
+              "maxConnections": 0,
+              "cMaxReuseTimes": 0,
+              "hMaxRequestTimes": "600-900",
+              "hMaxReusableSecs": "1800-3000",
+              "hKeepAlivePeriod": 0
+            }
+          }
         },
         "realitySettings": {
           "show": false,
@@ -6146,7 +6203,21 @@ EOF
         "security": "reality",
         "xhttpSettings": {
           "path": "${x_path}",
-          "mode": "auto"
+          "mode": "auto",
+          "extra": {
+            "xPaddingBytes": "100-1000",
+            "noGRPCHeader": true,
+            "scMaxEachPostBytes": 1000000,
+            "scMinPostsIntervalMs": "10-50",
+            "xmux": {
+              "maxConcurrency": "16-32",
+              "maxConnections": 0,
+              "cMaxReuseTimes": 0,
+              "hMaxRequestTimes": "600-900",
+              "hMaxReusableSecs": "1800-3000",
+              "hKeepAlivePeriod": 0
+            }
+          }
         },
         "realitySettings": {
           "show": false,
@@ -6247,7 +6318,19 @@ render_xray_cascade_s1_config() {
         \"security\": \"reality\",
         \"xhttpSettings\": {
           \"path\": \"${s2_path}\",
-          \"mode\": \"stream-one\"
+          \"mode\": \"stream-one\",
+          \"extra\": {
+            \"xPaddingBytes\": \"100-1000\",
+            \"noGRPCHeader\": true,
+            \"xmux\": {
+              \"maxConcurrency\": \"16-32\",
+              \"maxConnections\": 0,
+              \"cMaxReuseTimes\": 0,
+              \"hMaxRequestTimes\": \"600-900\",
+              \"hMaxReusableSecs\": \"1800-3000\",
+              \"hKeepAlivePeriod\": 0
+            }
+          }
         },
         \"realitySettings\": {
           \"show\": false,
@@ -6305,7 +6388,21 @@ render_xray_cascade_s1_config() {
         "security": "reality",
         "xhttpSettings": {
           "path": "${s1_path}",
-          "mode": "auto"
+          "mode": "auto",
+          "extra": {
+            "xPaddingBytes": "100-1000",
+            "noGRPCHeader": true,
+            "scMaxEachPostBytes": 1000000,
+            "scMinPostsIntervalMs": "10-50",
+            "xmux": {
+              "maxConcurrency": "16-32",
+              "maxConnections": 0,
+              "cMaxReuseTimes": 0,
+              "hMaxRequestTimes": "600-900",
+              "hMaxReusableSecs": "1800-3000",
+              "hKeepAlivePeriod": 0
+            }
+          }
         },
         "realitySettings": {
           "show": false,
@@ -6366,7 +6463,19 @@ render_xray_cascade_s1_config() {
         "security": "reality",
         "xhttpSettings": {
           "path": "${s2_path}",
-          "mode": "stream-one"
+          "mode": "stream-one",
+          "extra": {
+            "xPaddingBytes": "100-1000",
+            "noGRPCHeader": true,
+            "xmux": {
+              "maxConcurrency": "16-32",
+              "maxConnections": 0,
+              "cMaxReuseTimes": 0,
+              "hMaxRequestTimes": "600-900",
+              "hMaxReusableSecs": "1800-3000",
+              "hKeepAlivePeriod": 0
+            }
+          }
         },
         "realitySettings": {
           "show": false,

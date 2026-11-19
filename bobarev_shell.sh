@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bobarev Shell v3.20.38 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.39 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.

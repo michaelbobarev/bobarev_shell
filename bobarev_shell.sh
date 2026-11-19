@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.41 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.42 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.41"
+SCRIPT_VERSION="3.20.42"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -2972,6 +2972,118 @@ open_cloudflare_cdn_ufw_ports() {
     fi
 }
 
+apply_cloudflare_only_ufw_port() {
+    local cf_port="${1:-443}"
+    local enable_lock="${2:-false}"
+    command -v ufw >/dev/null 2>&1 || return 0
+
+    local rule_nums=""
+    rule_nums=$(ufw status numbered 2>/dev/null | awk -v p="$cf_port" '/CF-Only/ && $0 ~ p { if (match($0, /^\[[ ]*([0-9]+)\]/, m)) print m[1] }' | sort -rn || true)
+    if [ -n "$rule_nums" ]; then
+        local rn
+        for rn in $rule_nums; do
+            yes | ufw delete "$rn" >/dev/null 2>&1 || true
+        done
+    fi
+
+    if [ "$enable_lock" != "true" ]; then
+        ufw allow "${cf_port}/tcp" comment 'Cloudflare HTTPS VLESS' >/dev/null 2>&1 || true
+        ufw reload >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    echo -e "${C_BLUE} Загрузка официальных IP-диапазонов Cloudflare для блокировки прямого сканирования :${cf_port}...${C_RESET}"
+    local cf_v4 cf_v6
+    cf_v4=$(curl -fsSL --max-time 8 https://www.cloudflare.com/ips-v4 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' || true)
+    cf_v6=$(curl -fsSL --max-time 8 https://www.cloudflare.com/ips-v6 2>/dev/null | grep -E '^[0-9a-fA-F:]+/[0-9]+$' || true)
+    if [ -z "$cf_v4" ]; then
+        echo -e "${C_YELLOW} ⚠ Не удалось скачать список IP Cloudflare — порт ${cf_port}/tcp оставлен открытым.${C_RESET}"
+        ufw allow "${cf_port}/tcp" comment 'Cloudflare HTTPS VLESS' >/dev/null 2>&1 || true
+        ufw reload >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    ufw delete allow "${cf_port}/tcp" >/dev/null 2>&1 || true
+    ufw delete allow "${cf_port}" >/dev/null 2>&1 || true
+    local cidr
+    for cidr in $cf_v4 $cf_v6; do
+        ufw allow from "$cidr" to any port "$cf_port" proto tcp comment 'CF-Only' >/dev/null 2>&1 || true
+    done
+    ufw reload >/dev/null 2>&1 || true
+    echo -e "${C_GREEN} ✔ Порт ${cf_port}/tcp в UFW ограничен только IP-подсетями Cloudflare (прямой пробинг отбит).${C_RESET}"
+}
+
+verify_cloudflare_cdn_edge() {
+    local cf_domain="$1"
+    local cf_port="${2:-443}"
+    local pub_ip4="${3:-}"
+    local pub_ip6="${4:-}"
+    local cf_transport="${5:-dual}"
+
+    echo -e "
+${C_CYAN} === АВТОПРОВЕРКА DNS И EDGE CLOUDFLARE ===${C_RESET}"
+    local resolved_v4="" resolved_v6=""
+    if command -v dig >/dev/null 2>&1; then
+        resolved_v4=$(dig +short A "$cf_domain" 2>/dev/null | grep -E '^[0-9]+\.' | tr '
+' ' ' || true)
+        resolved_v6=$(dig +short AAAA "$cf_domain" 2>/dev/null | grep -E ':' | tr '
+' ' ' || true)
+    fi
+    if [ -z "$resolved_v4" ]; then
+        resolved_v4=$(getent ahostsv4 "$cf_domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '
+' ' ' || true)
+    fi
+
+    local is_direct_origin=false
+    if [ -n "$pub_ip4" ] && [[ " $resolved_v4 " == *" $pub_ip4 "* ]]; then
+        is_direct_origin=true
+    fi
+    if [ -n "$pub_ip6" ] && [[ " $resolved_v6 " == *" $pub_ip6 "* ]]; then
+        is_direct_origin=true
+    fi
+
+    if [ -z "$resolved_v4" ] && [ -z "$resolved_v6" ]; then
+        echo -e "   ${C_YELLOW}⚠ DNS:${C_RESET} запись для ${C_BOLD}${cf_domain}${C_RESET} еще не резолвится. Проверьте A-запись в Cloudflare."
+    elif [ "$is_direct_origin" = true ]; then
+        echo -e "   ${C_RED}✖ DNS (ВНИМАНИЕ!):${C_RESET} ${C_BOLD}${cf_domain}${C_RESET} сейчас отдает IP самого VPS (${pub_ip4}), а не Cloudflare!"
+        echo -e "     Включите в DNS Cloudflare ${C_YELLOW}Proxy status = Proxied (Оранжевое облачко)${C_RESET}, иначе будет ошибка SSL."
+    else
+        echo -e "   ${C_GREEN}✔ DNS:${C_RESET} ${cf_domain} -> ${resolved_v4:-$resolved_v6} (проксируется через Edge)."
+    fi
+
+    if [ "$cf_transport" = "ws" ] || [ "$cf_transport" = "dual" ]; then
+        local local_code=""
+        local_code=$(curl -sko /dev/null -w '%{http_code}' --max-time 4 --resolve "${cf_domain}:${cf_port}:127.0.0.1" "https://${cf_domain}:${cf_port}/" 2>/dev/null || echo "000")
+        if [ "$local_code" = "200" ]; then
+            echo -e "   ${C_GREEN}✔ Локальный Nginx:${C_RESET} заглушка отдала HTTP ${local_code} OK."
+        else
+            echo -e "   ${C_YELLOW}⚠ Локальный Nginx:${C_RESET} вернул HTTP ${local_code} (ожидалось 200)."
+        fi
+    fi
+
+    if [ "$is_direct_origin" = false ] && { [ -n "$resolved_v4" ] || [ -n "$resolved_v6" ]; }; then
+        local edge_code=""
+        edge_code=$(curl -sIo /dev/null -w '%{http_code}' --max-time 8 "https://${cf_domain}/" 2>/dev/null || echo "000")
+        case "$edge_code" in
+            200|204|301|302)
+                echo -e "   ${C_GREEN}✔ Cloudflare Edge:${C_RESET} https://${cf_domain}/ доступен через CDN (HTTP ${edge_code})."
+                ;;
+            403)
+                echo -e "   ${C_YELLOW}⚠ Cloudflare Edge:${C_RESET} HTTP 403 — отключите Bot Fight Mode и Block AI Bots в Security -> Bots."
+                ;;
+            521|522|525|526)
+                echo -e "   ${C_RED}✖ Cloudflare Edge:${C_RESET} ошибка ${edge_code} (проверьте SSL/TLS = Full Strict и открытый порт ${cf_port})."
+                ;;
+            000)
+                echo -e "   ${C_YELLOW}⚠ Cloudflare Edge:${C_RESET} таймаут проверки https://${cf_domain}/ (если меняли DNS только что — подождите 1 мин)."
+                ;;
+            *)
+                echo -e "   ${C_CYAN}ℹ Cloudflare Edge:${C_RESET} ответ HTTP ${edge_code}."
+                ;;
+        esac
+    fi
+}
+
 read_pem_block_noncanonical() {
     local out_file="$1"
     local block_kind="$2"
@@ -3474,7 +3586,7 @@ has_ipv6 = (sys.argv[14].lower() == "true") if len(sys.argv) > 14 else False
 
 inbounds = []
 
-if cf_transport == "ws":
+if cf_transport in ("ws", "dual"):
     # VLESS + WebSocket за Nginx (ssl_preread + заглушка 200 OK):
     # Nginx принимает TLS на cf_listen_port и проксирует x_path на 127.0.0.1:10451
     inbounds.append({
@@ -3503,7 +3615,49 @@ if cf_transport == "ws":
             "routeOnly": True
         }
     })
-else:
+if cf_transport == "dual":
+    xh_path = f"{x_path}-xh/"
+    inbounds.append({
+        "tag": "vless-xhttp-cf-local-in",
+        "listen": "127.0.0.1",
+        "port": 10452,
+        "protocol": "vless",
+        "settings": {
+            "clients": [{"id": x_uuid}],
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": "xhttp",
+            "security": "none",
+            "xhttpSettings": {
+                "path": xh_path,
+                "mode": "packet-up",
+                "extra": {
+                    "xPaddingBytes": "100-1000",
+                    "noGRPCHeader": True,
+                    "scMaxEachPostBytes": 1000000,
+                    "scMinPostsIntervalMs": "10-50",
+                    "xmux": {
+                        "maxConcurrency": "16-32",
+                        "maxConnections": 0,
+                        "cMaxReuseTimes": 0,
+                        "hMaxRequestTimes": "600-900",
+                        "hMaxReusableSecs": "1800-3000",
+                        "hKeepAlivePeriod": 0
+                    }
+                }
+            },
+            "sockopt": {
+                "acceptProxyProtocol": False
+            }
+        },
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True
+        }
+    })
+elif cf_transport != "ws":
     # VLESS + XHTTP + TLS напрямую в Xray
     inbounds.append({
         "tag": "vless-xhttp-cf-tls-in",
@@ -3742,19 +3896,29 @@ print_cloudflare_cdn_vless_links() {
     echo -e " Сервер (Origin WAN):  IPv4: ${C_GREEN}${pub_ip4:-нет}${C_RESET} | IPv6: ${C_CYAN}${pub_ip6:-не назначен}${C_RESET}"
     echo -e " Транспорт / Выход:    ${C_GREEN}${cf_transport^^} + TLS (${cf_front_mode})${C_RESET} | Выход: ${C_GREEN}${VLESS_OUT_MODE:-direct}${C_RESET}"
 
-    if [ "$cf_transport" = "ws" ]; then
+    if [ "$cf_transport" = "ws" ] || [ "$cf_transport" = "dual" ]; then
         local cf_ws_link="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_ws_ed_path}#${hname}-CF-WS-TLS"
         local cf_ws_clean="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=http%2F1.1&type=ws&path=${encoded_ws_ed_path}&${frag_params}&fm=${fm_encoded}#${hname}-CF-WS-CleanIP-${cf_clean_ip}"
 
-        echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (VLESS + WebSocket + TLS — мгновенная работа в Shadowrocket!):${C_RESET}"
+        echo -e "\n ${C_GREEN}1) Основная ссылка через Cloudflare CDN (VLESS + WebSocket + TLS — для Shadowrocket):${C_RESET}"
         echo -e " ${C_BOLD}${C_GREEN}${cf_ws_link}${C_RESET}"
 
-        echo -e "\n ${C_YELLOW}2) Пробивная ссылка через чистый Anycast IP Cloudflare (${cf_clean_ip}:443 + WS + TLS Fragment):${C_RESET}"
+        echo -e "\n ${C_YELLOW}2) Пробивная ссылка WS через чистый Anycast IP Cloudflare (${cf_clean_ip}:443 + TLS Fragment):${C_RESET}"
         echo -e " ${C_BOLD}${C_YELLOW}${cf_ws_clean}${C_RESET}"
+
+        if [ "$cf_transport" = "dual" ]; then
+            local encoded_xh_path="%2F${x_path#/}-xh%2F"
+            local cf_xh_link="vless://${x_uuid}@${cf_domain}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_xh_path}&mode=packet-up&extra=${xhttp_extra_encoded}#${hname}-CF-XHTTP-PacketUp"
+            local cf_xh_clean="vless://${x_uuid}@${cf_clean_ip}:443?encryption=none&security=tls&sni=${cf_domain}&host=${cf_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&path=${encoded_xh_path}&mode=packet-up&extra=${xhttp_extra_encoded}&${frag_params}&fm=${fm_encoded}#${hname}-CF-XHTTP-CleanIP-${cf_clean_ip}"
+            echo -e "\n ${C_GREEN}3) Параллельная ссылка XHTTP (mode=packet-up — для Podkop / v2rayN / v2rayNG):${C_RESET}"
+            echo -e " ${C_BOLD}${C_GREEN}${cf_xh_link}${C_RESET}"
+            echo -e "\n ${C_YELLOW}4) XHTTP через чистый Anycast IP Cloudflare (${cf_clean_ip}:443):${C_RESET}"
+            echo -e " ${C_BOLD}${C_YELLOW}${cf_xh_clean}${C_RESET}"
+        fi
 
         if [ "$cf_front_mode" = "hybrid" ] && [ -n "$pub_ip4" ] && [ -n "$x_pub" ]; then
             local direct_reality="vless://${x_uuid}@${pub_ip4}:${direct_port}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${x_pub}&sid=${x_sid}&type=xhttp&path=${encoded_path}&mode=stream-one#${hname}-Direct-REALITY-${direct_port}"
-            echo -e "\n ${C_CYAN}3) Прямая ссылка VLESS-XHTTP + REALITY по IP сервера (${pub_ip4}:${direct_port} — мимо Cloudflare):${C_RESET}"
+            echo -e "\n ${C_CYAN}5) Прямая ссылка VLESS-XHTTP + REALITY по IP сервера (${pub_ip4}:${direct_port} — мимо Cloudflare):${C_RESET}"
             echo -e " ${C_CYAN}${direct_reality}${C_RESET}"
         fi
 
@@ -3960,6 +4124,7 @@ setup_cloudflare_nginx_ws_front() {
     local ssl_key="$4"
     local ws_local_port="${5:-10451}"
     local cf_domain="${6:-vpn.example.com}"
+    local cf_transport="${7:-dual}"
 
     [[ "$x_path" != /* ]] && x_path="/${x_path}"
     x_path="${x_path%/}"
@@ -4088,13 +4253,32 @@ server {
         proxy_read_timeout 1h;
         proxy_send_timeout 1h;
     }
+EOF_HTTP
+
+    if [ "$cf_transport" = "dual" ]; then
+        cat << EOF_HTTP_XH >> /etc/nginx/conf.d/bobarev-cf-ws.conf
+
+    location ${x_path}-xh/ {
+        proxy_pass http://127.0.0.1:10452;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+EOF_HTTP_XH
+    fi
+
+    cat << EOF_HTTP_END >> /etc/nginx/conf.d/bobarev-cf-ws.conf
 
     location / {
         root /var/www/bobarev-cf-stub;
         index index.html;
     }
 }
-EOF_HTTP
+EOF_HTTP_END
 
     if ! grep -q 'bobarev-cf-stream.conf' /etc/nginx/nginx.conf 2>/dev/null; then
         echo 'include /etc/nginx/bobarev-cf-stream.conf;' >> /etc/nginx/nginx.conf
@@ -4109,7 +4293,11 @@ EOF_HTTP
 
     systemctl enable nginx.service >/dev/null 2>&1 || true
     safe_restart_systemd_service nginx.service
-    echo -e "${C_GREEN} ✔ Nginx ssl_preread (:${cf_listen_port}) + заглушка 200 OK + VLESS-WS (:10451) запущены.${C_RESET}"
+    if [ "$cf_transport" = "dual" ]; then
+        echo -e "${C_GREEN} ✔ Nginx ssl_preread (:${cf_listen_port}) + заглушка 200 OK + WS (:10451) + XHTTP (:10452) запущены.${C_RESET}"
+    else
+        echo -e "${C_GREEN} ✔ Nginx ssl_preread (:${cf_listen_port}) + заглушка 200 OK + VLESS-WS (:10451) запущены.${C_RESET}"
+    fi
     return 0
 }
 
@@ -4148,13 +4336,15 @@ setup_cloudflare_cdn_vless_wizard() {
 
     local tr_choice=""
     if ! smart_menu "2/5. Протокол транспорта через Cloudflare CDN" "
-Выберите транспорт для прохождения через оранжевое облачко Cloudflare:" 17 "$WT_WIDTH" 2 "tr_choice" \
-        "1" " VLESS + WebSocket + TLS (Рекомендуется для Shadowrocket: без буферизации CF)" \
-        "2" " VLESS + XHTTP + TLS (Для OpenWrt Podkop, v2rayN, v2rayNG)"; then
+Выберите транспорт для прохождения через оранжевое облачко Cloudflare:" 18 "$WT_WIDTH" 3 "tr_choice" \
+        "1" " Dual: WS + XHTTP за Nginx (Shadowrocket + Podkop/v2rayN одновременно)" \
+        "2" " Только VLESS + WebSocket + TLS (Shadowrocket)" \
+        "3" " Только VLESS + XHTTP + TLS (Прямой Xray TLS для Podkop, v2rayN, v2rayNG)"; then
         return 0
     fi
-    local cf_transport="ws"
-    [ "$tr_choice" = "2" ] && cf_transport="xhttp"
+    local cf_transport="dual"
+    [ "$tr_choice" = "2" ] && cf_transport="ws"
+    [ "$tr_choice" = "3" ] && cf_transport="xhttp"
 
     local port_choice=""
     if ! smart_menu "3/5. Входящий TLS-порт на сервере для Cloudflare CDN" "
@@ -4187,10 +4377,15 @@ Xray принимает Cloudflare CDN (${cf_transport^^} + TLS) на порту
         return 0
     fi
 
+    local lock_cf_only="false"
+    if prompt_yn "Закрыть порт Cloudflare (${cf_listen_port}/tcp) в UFW для всех, кроме официальных IP-подсетей Cloudflare? (Защита от прямого сканирования VPS; прямой REALITY :8443 не затрагивается)" "false"; then
+        lock_cf_only="true"
+    fi
     open_cloudflare_cdn_ufw_ports "8443"
     if command -v ufw &>/dev/null; then
         silent_run ufw allow 2083/tcp comment 'Cloudflare Origin HTTPS 2083'
     fi
+    apply_cloudflare_only_ufw_port "$cf_listen_port" "$lock_cf_only"
 
     ensure_xray_installed || return 1
     ensure_ipv4_precedence_and_host_dns
@@ -4240,8 +4435,8 @@ Xray принимает Cloudflare CDN (${cf_transport^^} + TLS) на порту
 
     ensure_cloudflare_tls_cert "$cf_domain" "true" || return 1
 
-    if [ "$cf_transport" = "ws" ]; then
-        setup_cloudflare_nginx_ws_front "$cf_listen_port" "$XRAY_XHTTP_PATH" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY" "10451" "$cf_domain" || return 1
+    if [ "$cf_transport" = "ws" ] || [ "$cf_transport" = "dual" ]; then
+        setup_cloudflare_nginx_ws_front "$cf_listen_port" "$XRAY_XHTTP_PATH" "$CF_ACTIVE_SSL_CERT" "$CF_ACTIVE_SSL_KEY" "10451" "$cf_domain" "$cf_transport" || return 1
     else
         cleanup_cloudflare_nginx_ws_front
         if systemctl is-active --quiet caddy.service 2>/dev/null; then
@@ -4308,6 +4503,7 @@ EOF
     echo ""
     echo -e "${C_GREEN} === ЗАРУБЕЖНЫЙ СЕРВЕР VLESS (${cf_transport^^} + TLS) ЗА CLOUDFLARE CDN ЗАПУЩЕН! ===${C_RESET}"
     print_cloudflare_cdn_vless_links
+    verify_cloudflare_cdn_edge "$cf_domain" "$cf_listen_port" "$pub_ip" "$pub_ip6" "$cf_transport"
 }
 
 manage_cloudflare_cdn_vless_menu() {

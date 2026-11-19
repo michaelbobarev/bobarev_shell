@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.42 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.43 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.42"
+SCRIPT_VERSION="3.20.43"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -2978,7 +2978,7 @@ apply_cloudflare_only_ufw_port() {
     command -v ufw >/dev/null 2>&1 || return 0
 
     local rule_nums=""
-    rule_nums=$(ufw status numbered 2>/dev/null | awk -v p="$cf_port" '/CF-Only/ && $0 ~ p { if (match($0, /^\[[ ]*([0-9]+)\]/, m)) print m[1] }' | sort -rn || true)
+    rule_nums=$(ufw status numbered 2>/dev/null | awk -v p="$cf_port" '/CF-Only/ && $0 ~ p { print }' | sed -n 's/^\[[[:space:]]*\([0-9][0-9]*\)\].*/\1/p' | sort -rn || true)
     if [ -n "$rule_nums" ]; then
         local rn
         for rn in $rule_nums; do

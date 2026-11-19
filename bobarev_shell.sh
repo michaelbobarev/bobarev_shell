@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.37 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.38 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.37"
+SCRIPT_VERSION="3.20.38"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1743,6 +1743,75 @@ disable_hybrid_wg_routing() {
 SELECT_SNI_RESULT="www.microsoft.com"
 SELECT_DEST_RESULT="www.microsoft.com:443"
 
+discover_neighbor_reality_sni() {
+    # Ищет среди соседей в подсети /24 (/23) домены с TLS 1.3, ALPN h2,
+    # валидным сертификатом и без проксирования Cloudflare.
+    local wan_dev me a b c
+    wan_dev=$(get_wan_if)
+    me=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
+    if [[ ! "$me" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        me=$(curl -4 -fsS -m 5 https://api.ipify.org 2>/dev/null || true)
+    fi
+    if [[ ! "$me" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        echo -e "${C_YELLOW} Не удалось определить внешний IPv4 сервера для поиска соседей.${C_RESET}" >&2
+        return 1
+    fi
+
+    local sni_re='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+    local dyn_re='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|dynu\.net|no-ip\.(org|biz|info)|tk|ml|ga|cf|gq)$'
+    local brand_re='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
+    local bad_re='(porn|xxx|sex|adult|casino|bet|vpn|proxy|torrent|crack|hack|warez|escort|gambl|poker)'
+
+    IFS=. read -r a b c _ <<< "$me"
+    echo -e "${C_BLUE} Сканирую подсети ${a}.${b}.${c}.0/24 и ${a}.${b}.$((c ^ 1)).0/24 на TLS 1.3 + h2 (до 30-45 сек)...${C_RESET}" >&2
+
+    local -a found=()
+    local base raw_names dom hdr code
+    for base in "${a}.${b}.${c}" "${a}.${b}.$((c ^ 1))"; do
+        raw_names=$(seq 1 254 | xargs -P 16 -I{} bash -c '
+            ip="$1.{}"
+            [ "$ip" = "$2" ] && exit 0
+            echo | timeout 3 openssl s_client -connect "${ip}:443" -tls1_3 -alpn h2 2>/dev/null                 | openssl x509 -noout -ext subjectAltName 2>/dev/null                 | tr "," "\n" | sed -n "s/^ *DNS://p"
+        ' _ "$base" "$me" 2>/dev/null | sort -u | grep -E "$sni_re" | head -40 || true)
+
+        for dom in $raw_names; do
+            [[ "$dom" == "$me" || "$dom" =~ $dyn_re || "$dom" =~ $brand_re || "$dom" =~ $bad_re ]] && continue
+            echo | timeout 5 openssl s_client -connect "${dom}:443" -servername "$dom" -tls1_3 -alpn h2 2>/dev/null                 | grep -q 'ALPN protocol: h2' || continue
+            echo | timeout 5 openssl s_client -connect "${dom}:443" -servername "$dom" -verify_hostname "$dom" -verify_return_error 2>/dev/null                 | grep -q 'Verification: OK' || continue
+            hdr=$(curl -sS -m 5 -o /dev/null -D- "https://${dom}/" 2>/dev/null | tr -d '\r' || true)
+            [ -z "$hdr" ] && continue
+            printf '%s' "$hdr" | grep -qiE '^(server: cloudflare|cf-ray:)' && continue
+            code=$(printf '%s' "$hdr" | awk 'NR==1 {print $2}')
+            [[ "$code" =~ ^[23][0-9][0-9]$ ]] || continue
+
+            found+=("$dom")
+            [ "${#found[@]}" -ge 8 ] && break
+        done
+        [ "${#found[@]}" -gt 0 ] && break
+    done
+
+    if [ "${#found[@]}" -eq 0 ]; then
+        echo -e "${C_YELLOW} Подходящих «соседей» с TLS 1.3 + h2 в подсети не найдено.${C_RESET}" >&2
+        return 1
+    fi
+
+    echo -e "
+${C_GREEN} Найденные соседи по подсети (TLS 1.3, h2, валидный сертификат, не Cloudflare):${C_RESET}" >&2
+    local idx=1 item pick=""
+    for item in "${found[@]}"; do
+        echo -e "  ${C_CYAN}${idx})${C_RESET} ${item}" >&2
+        idx=$((idx + 1))
+    done
+    echo -e "  ${C_YELLOW}0)${C_RESET} Отмена (использовать www.microsoft.com)" >&2
+    read -r -p "Выберите номер соседа [1-${#found[@]}, Enter=1]: " pick
+    pick="${pick:-1}"
+    if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "${#found[@]}" ]; then
+        printf '%s' "${found[$((pick - 1))]}"
+        return 0
+    fi
+    return 1
+}
+
 select_reality_sni_and_dest_interactive() {
     local default_sni="${1:-www.microsoft.com}"
     local sni_choice="" chosen_sni="$default_sni" chosen_dest=""
@@ -1752,7 +1821,8 @@ select_reality_sni_and_dest_interactive() {
     echo -e "  ${C_CYAN}3)${C_RESET} www.amd.com       (Крупный международный узел с поддержкой TLS 1.3 и H2)"
     echo -e "  ${C_CYAN}4)${C_RESET} Ввести другой внешний домен (Steal Others SNI) вручную"
     echo -e "  ${C_GREEN}5)${C_RESET} Свой домен на этом сервере — Self-steal SNI (Steal Oneself, 127.0.0.1:8443 + Let's Encrypt)"
-    read -r -p "Ваш выбор [1-5, Enter=1]: " sni_choice
+    echo -e "  ${C_GREEN}6)${C_RESET} Автопоиск «соседа» в подсети /24 (/23) с TLS 1.3 + H2"
+    read -r -p "Ваш выбор [1-6, Enter=1]: " sni_choice
     case "${sni_choice:-1}" in
         1) chosen_sni="www.microsoft.com" ;;
         2) chosen_sni="itunes.apple.com" ;;
@@ -1776,6 +1846,15 @@ select_reality_sni_and_dest_interactive() {
                     echo -e "${C_YELLOW} Не удалось автоматически поднять локальный Self-steal бэкенд. Проверьте DNS A-запись и порт 80.${C_RESET}"
                     return 1
                 fi
+            else
+                chosen_sni="www.microsoft.com"
+            fi
+            ;;
+        6)
+            local nb_sni=""
+            nb_sni=$(discover_neighbor_reality_sni || true)
+            if [ -n "$nb_sni" ]; then
+                chosen_sni="$nb_sni"
             else
                 chosen_sni="www.microsoft.com"
             fi

@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.36 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.37 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.36"
+SCRIPT_VERSION="3.20.37"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -6141,9 +6141,16 @@ render_xray_cascade_s1_config() {
         [ -n "$s2_ipv6" ] && active_s2_ip="$s2_ipv6"
     fi
 
-    local vnext_extra=""
+    local outbound_v6_extra=""
+    local routing_target_line='"outboundTag": "proxy"'
+    local routing_balancers_block=""
     if [ "$tr_mode" = "dualstack" ] && [ -n "$s2_ipv6" ] && [ "$s2_ipv6" != "$active_s2_ip" ]; then
-        vnext_extra=",
+        outbound_v6_extra=",
+    {
+      \"tag\": \"proxy-v6\",
+      \"protocol\": \"vless\",
+      \"settings\": {
+        \"vnext\": [
           {
             \"address\": \"${s2_ipv6}\",
             \"port\": ${s2_port},
@@ -6153,7 +6160,39 @@ render_xray_cascade_s1_config() {
                 \"encryption\": \"none\"
               }
             ]
-          }"
+          }
+        ]
+      },
+      \"streamSettings\": {
+        \"network\": \"xhttp\",
+        \"security\": \"reality\",
+        \"xhttpSettings\": {
+          \"path\": \"${s2_path}\",
+          \"mode\": \"stream-one\"
+        },
+        \"realitySettings\": {
+          \"show\": false,
+          \"fingerprint\": \"chrome\",
+          \"serverName\": \"${s2_sni}\",
+          \"publicKey\": \"${s2_pub}\",
+          \"shortId\": \"${s2_short_id}\",
+          \"spiderX\": \"\"
+        },
+        \"sockopt\": {
+          \"dialerProxy\": \"fragment\",
+          \"tcpNoDelay\": true
+        }
+      }
+    }"
+        routing_target_line='"balancerTag": "proxy-bal"'
+        routing_balancers_block=',
+    "balancers": [
+      {
+        "tag": "proxy-bal",
+        "selector": ["proxy", "proxy-v6"],
+        "strategy": {"type": "random"}
+      }
+    ]'
     fi
 
     local wan_dev
@@ -6240,7 +6279,7 @@ render_xray_cascade_s1_config() {
                 "encryption": "none"
               }
             ]
-          }${vnext_extra}
+          }
         ]
       },
       "streamSettings": {
@@ -6286,7 +6325,7 @@ render_xray_cascade_s1_config() {
           "tcpNoDelay": true
         }
       }
-    }
+    }${outbound_v6_extra}
   ],
   "routing": {
     "domainStrategy": "AsIs",
@@ -6294,9 +6333,9 @@ render_xray_cascade_s1_config() {
       {
         "type": "field",
         "inboundTag": ["vless-xhttp-in", "socks-in"],
-        "outboundTag": "proxy"
+        ${routing_target_line}
       }
-    ]
+    ]${routing_balancers_block}
   }
 }
 EOF

@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.40 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.41 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.40"
+SCRIPT_VERSION="3.20.41"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -3990,6 +3990,24 @@ setup_cloudflare_nginx_ws_front() {
     rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/xray-selfsteal.conf /etc/nginx/conf.d/kit.conf /etc/nginx/kit-stream.conf 2>/dev/null || true
     if [ -f /etc/nginx/nginx.conf ]; then
         sed -i '/kit-stream\.conf/d; /bobarev-cf-stream\.conf/d' /etc/nginx/nginx.conf 2>/dev/null || true
+    fi
+
+    local stream_mod_so=""
+    stream_mod_so=$(find /usr/lib/nginx/modules /etc/nginx/modules -name 'ngx_stream_module.so' 2>/dev/null | head -n 1 || true)
+    if [ -z "$stream_mod_so" ] && ! nginx -V 2>&1 | grep -qE -- '--with-stream(\s|$)'; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnginx-mod-stream >/dev/null 2>&1 ||         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-module-stream >/dev/null 2>&1 ||         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-full >/dev/null 2>&1 || true
+        stream_mod_so=$(find /usr/lib/nginx/modules /etc/nginx/modules -name 'ngx_stream_module.so' 2>/dev/null | head -n 1 || true)
+    fi
+    if [ -n "$stream_mod_so" ] && [ -f /etc/nginx/nginx.conf ]; then
+        local stream_loaded=false
+        if grep -q 'ngx_stream_module\.so' /etc/nginx/nginx.conf 2>/dev/null; then
+            stream_loaded=true
+        elif grep -q 'modules-enabled' /etc/nginx/nginx.conf 2>/dev/null && ls /etc/nginx/modules-enabled/*stream* >/dev/null 2>&1; then
+            stream_loaded=true
+        fi
+        if [ "$stream_loaded" = false ]; then
+            sed -i "1i load_module ${stream_mod_so};" /etc/nginx/nginx.conf
+        fi
     fi
     systemctl stop caddy.service 2>/dev/null || true
     systemctl disable caddy.service 2>/dev/null || true

@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.44 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.45 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.44"
+SCRIPT_VERSION="3.20.45"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1195,11 +1195,18 @@ print_vless_shadowrocket_links() {
         local h_port="${HYSTERIA_PORT:-443}"
         local h_sni="${HYSTERIA_SNI:-www.bing.com}"
         local h_pin="${HYSTERIA_CERT_PIN:-}"
+        local h_hop="${HYSTERIA_HOP:-false}"
+        local h_obfs="${HYSTERIA_OBFS:-}"
         local pin_param="insecure=1"
         [ -n "$h_pin" ] && pin_param="insecure=1&pinSHA256=${h_pin}"
+        [ "$h_hop" = "true" ] && pin_param="${pin_param}&mport=20000-50000"
+        [ -n "$h_obfs" ] && pin_param="${pin_param}&obfs=salamander&obfs-password=${h_obfs}"
         if [ -n "$pub_ip4" ]; then
             local hy2_uri="hysteria2://${HYSTERIA_PASS}@${pub_ip4}:${h_port}/?sni=${h_sni}&${pin_param}#${hname}-Hysteria2-UDP"
-            echo -e "\n ${C_CYAN}5) Скоростная ссылка Hysteria 2 (QUIC UDP, порт ${h_port}/udp):${C_RESET}"
+            local hy2_note="${h_port}/udp"
+            [ "$h_hop" = "true" ] && hy2_note="${h_port}/udp + Hop 20000-50000"
+            [ -n "$h_obfs" ] && hy2_note="${hy2_note} + Salamander"
+            echo -e "\n ${C_CYAN}5) Скоростная ссылка Hysteria 2 (QUIC UDP, ${hy2_note}):${C_RESET}"
             echo -e " ${C_BOLD}${C_CYAN}${hy2_uri}${C_RESET}"
             if command -v qrencode >/dev/null 2>&1; then
                 echo -e "\n ${C_CYAN}QR-код №4 — Hysteria 2 (QUIC UDP):${C_RESET}"
@@ -2737,10 +2744,16 @@ setup_standalone_vless_wizard() {
         return 0
     fi
 
-    local enable_hy2_backup=false
+    local enable_hy2_backup=false enable_hy2_hop="false" enable_hy2_obfs="false"
     if prompt_yn "Включить дополнительно резервный скоростной протокол Hysteria 2 (QUIC) на UDP-порту ${x_port}/udp?
 (VLESS-XHTTP работает на ${x_port}/tcp, а Hysteria 2 на ${x_port}/udp — они не мешают друг другу!)" "true"; then
         enable_hy2_backup=true
+        if prompt_yn "Включить Port Hopping для Hysteria 2 (прыжки по UDP-портам 20000-50000 -> ${x_port})?" "true"; then
+            enable_hy2_hop="true"
+        fi
+        if prompt_yn "Включить обфускацию Salamander (только если провайдер полностью режет QUIC)?" "false"; then
+            enable_hy2_obfs="true"
+        fi
     fi
 
     ensure_ipv4_precedence_and_host_dns
@@ -2801,13 +2814,15 @@ setup_standalone_vless_wizard() {
         return 1
     fi
 
-    local h_pass="" cert_pin=""
+    local h_pass="" cert_pin="" h_obfs=""
     if [ "$enable_hy2_backup" = true ]; then
         if ensure_hysteria_installed; then
             h_pass=$(openssl rand -hex 16)
+            [ "$enable_hy2_obfs" = "true" ] && h_obfs=$(openssl rand -hex 16)
             local hy_out="direct"
             [ "$target_out_mode" = "masque" ] && hy_out="warp"
-            render_hysteria_server_config "$x_port" "$h_pass" "$hy_out"
+            render_hysteria_server_config "$x_port" "$h_pass" "$hy_out" "$h_obfs"
+            apply_hysteria_port_hopping "$x_port" "$enable_hy2_hop"
             cat << 'SVC_EOF' > /etc/systemd/system/hysteria-server.service
 [Unit]
 Description=Bobarev Shell Hysteria 2 Server
@@ -2856,6 +2871,8 @@ XRAY_XHTTP_PATH="${GEN_X_PATH:-/xhttp-stream}"
 HYSTERIA_PORT="${x_port}"
 HYSTERIA_PASS="${h_pass}"
 HYSTERIA_CERT_PIN="${cert_pin}"
+HYSTERIA_HOP="${enable_hy2_hop}"
+HYSTERIA_OBFS="${h_obfs}"
 SERVER_PUB_IP="${pub_ip}"
 SERVER_PUB_IPV6="${pub_ip6}"
 EOF
@@ -5389,10 +5406,41 @@ toggle_foreign_warp_menu() {
     fi
 }
 
+apply_hysteria_port_hopping() {
+    local h_port="${1:-443}"
+    local enable_hop="${2:-false}"
+    local wan_dev
+    wan_dev=$(get_wan_if)
+
+    # Очищаем старые правила REDIRECT для 20000:50000
+    while iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- '--dport 20000:50000'; do
+        local rule
+        rule=$(iptables -t nat -S PREROUTING 2>/dev/null | grep -m1 -- '--dport 20000:50000' | sed 's/^-A /-D /')
+        [ -n "$rule" ] && iptables -t nat $rule 2>/dev/null || break
+    done
+    while ip6tables -t nat -S PREROUTING 2>/dev/null | grep -q -- '--dport 20000:50000'; do
+        local rule6
+        rule6=$(ip6tables -t nat -S PREROUTING 2>/dev/null | grep -m1 -- '--dport 20000:50000' | sed 's/^-A /-D /')
+        [ -n "$rule6" ] && ip6tables -t nat $rule6 2>/dev/null || break
+    done
+
+    if [ "$enable_hop" = "true" ]; then
+        iptables -t nat -A PREROUTING ${wan_dev:+-i "$wan_dev"} -p udp --dport 20000:50000 -j REDIRECT --to-ports "$h_port" 2>/dev/null || true
+        if [ -n "$(get_wan_global_ipv6)" ]; then
+            ip6tables -t nat -A PREROUTING ${wan_dev:+-i "$wan_dev"} -p udp --dport 20000:50000 -j REDIRECT --to-ports "$h_port" 2>/dev/null || true
+        fi
+        if command -v ufw >/dev/null 2>&1; then
+            ufw allow 20000:50000/udp comment 'Hysteria 2 Port Hopping' >/dev/null 2>&1 || true
+        fi
+        echo -e "${C_GREEN} ✔ Hysteria 2 Port Hopping (UDP 20000-50000 -> ${h_port}) активирован.${C_RESET}"
+    fi
+}
+
 render_hysteria_server_config() {
     local h_port="$1"
     local h_pass="$2"
     local exit_mode="${3:-direct}"
+    local obfs_pass="${4:-}"
 
     mkdir -p /etc/hysteria
     if [ ! -s /etc/hysteria/server.crt ] || [ ! -s /etc/hysteria/server.key ]; then
@@ -5420,6 +5468,12 @@ render_hysteria_server_config() {
         printf '  maxIdleTimeout: 60s\n'
         printf '  maxIncomingStreams: 1024\n'
         printf '  disablePathMTUDiscovery: false\n\n'
+        if [ -n "$obfs_pass" ]; then
+            printf 'obfs:\n'
+            printf '  type: salamander\n'
+            printf '  salamander:\n'
+            printf '    password: "%s"\n\n' "$obfs_pass"
+        fi
         printf 'masquerade:\n'
         printf '  type: proxy\n'
         printf '  proxy:\n'
@@ -13589,16 +13643,275 @@ menu_server_security() {
     done
 }
 
+
+# ==============================================================================
+# МОДУЛЬ AMNEZIAWG 3.1 (L3-VPN ТУННЕЛЬ ДЛЯ OPENWRT И СМАРТФОНОВ)
+# ==============================================================================
+ensure_amneziawg_31_installed() {
+    if command -v awg >/dev/null 2>&1 && command -v amneziawg-go >/dev/null 2>&1; then
+        return 0
+    fi
+    echo -e "${C_BLUE} Установка AmneziaWG 3.1 (amneziawg-go + awg-tools)...${C_RESET}"
+    if grep -qi 'ubuntu' /etc/os-release 2>/dev/null && command -v add-apt-repository >/dev/null 2>&1; then
+        add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 || true
+        apt-get update -qq >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq amneziawg-tools amneziawg >/dev/null 2>&1 || true
+    fi
+    if ! command -v awg >/dev/null 2>&1 || ! command -v amneziawg-go >/dev/null 2>&1; then
+        echo -e "${C_BLUE} Сборка актуальных amneziawg-go и amneziawg-tools из официального GitHub...${C_RESET}"
+        apt-get update -qq >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make gcc golang-go iproute2 iptables qrencode >/dev/null 2>&1 || {
+            echo -e "${C_RED} Ошибка установки зависимостей для сборки AmneziaWG 3.1.${C_RESET}"
+            return 1
+        }
+        local build_dir="/tmp/awg31_build_$$"
+        rm -rf "$build_dir" && mkdir -p "$build_dir"
+        if ! command -v amneziawg-go >/dev/null 2>&1; then
+            if git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git "$build_dir/go" >/dev/null 2>&1 &&                (cd "$build_dir/go" && make >/dev/null 2>&1 && install -m 0755 amneziawg-go /usr/local/bin/amneziawg-go); then
+                :
+            else
+                echo -e "${C_RED} Не удалось собрать amneziawg-go.${C_RESET}"
+                rm -rf "$build_dir"
+                return 1
+            fi
+        fi
+        if ! command -v awg >/dev/null 2>&1; then
+            if git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git "$build_dir/tools" >/dev/null 2>&1 &&                (cd "$build_dir/tools/src" && make >/dev/null 2>&1 && make install >/dev/null 2>&1); then
+                :
+            else
+                echo -e "${C_RED} Не удалось собрать amneziawg-tools (awg / awg-quick).${C_RESET}"
+                rm -rf "$build_dir"
+                return 1
+            fi
+        fi
+        rm -rf "$build_dir"
+    fi
+    if command -v awg >/dev/null 2>&1; then
+        echo -e "${C_GREEN} ✔ AmneziaWG 3.1 установлен и готов к работе.${C_RESET}"
+        return 0
+    fi
+    return 1
+}
+
+add_amneziawg_31_client_interactive() {
+    local cfg_file="/etc/amnezia/amneziawg/awg0.conf"
+    local env_file="/etc/amnezia/amneziawg/awg31.env"
+    if [ ! -s "$cfg_file" ] || [ ! -s "$env_file" ]; then
+        echo -e "${C_YELLOW} Сначала разверните сервер AmneziaWG 3.1 (Пункт 1).${C_RESET}"
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    source "$env_file"
+
+    local cname=""
+    prompt_default "Введите имя нового клиента AmneziaWG 3.1 (латиница, без пробелов):" "phone" cname
+    [ "$MODULE_CANCELED" = true ] && return 0
+    cname=$(printf '%s' "$cname" | tr -cd 'A-Za-z0-9_-')
+    [ -z "$cname" ] && cname="client_$(date +%s)"
+
+    local next_octet=2
+    while grep -q "10\.66\.66\.${next_octet}/32" "$cfg_file" 2>/dev/null; do
+        next_octet=$((next_octet + 1))
+        if [ "$next_octet" -ge 254 ]; then
+            echo -e "${C_RED} Свободные IP в подсети 10.66.66.0/24 закончились.${C_RESET}"
+            return 1
+        fi
+    done
+
+    local c_priv c_pub
+    c_priv=$(awg genkey)
+    c_pub=$(printf '%s' "$c_priv" | awg pubkey)
+
+    cat << EOF_PEER >> "$cfg_file"
+
+# Client: ${cname}
+[Peer]
+PublicKey = ${c_pub}
+AllowedIPs = 10.66.66.${next_octet}/32
+EOF_PEER
+
+    if systemctl is-active --quiet awg-quick@awg0.service 2>/dev/null; then
+        awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || safe_restart_systemd_service awg-quick@awg0.service
+    fi
+
+    mkdir -p /etc/amnezia/amneziawg/clients
+    local out_conf="/etc/amnezia/amneziawg/clients/${cname}.conf"
+    cat << EOF_CLIENT > "$out_conf"
+[Interface]
+PrivateKey = ${c_priv}
+Address = 10.66.66.${next_octet}/32
+DNS = 1.1.1.1, 8.8.8.8
+MTU = 1280
+HeaderProtectionKey = ${AWG_HEADER_KEY}
+RandomTrailers = true
+DisableCookies = true
+S1 = ${AWG_S_VAL}
+S2 = ${AWG_S_VAL}
+S3 = ${AWG_S_VAL}
+S4 = ${AWG_S_VAL}
+H1 = ${AWG_H1}
+H2 = ${AWG_H2}
+H3 = ${AWG_H3}
+H4 = ${AWG_H4}
+ContentPaddingAddition = 0-113
+Jc = 6
+Jmin = 50
+Jmax = 650
+RekeyAfterTime = 115-135
+RekeyTimeout = 4-7
+RejectAfterTime = 180-220
+KeepaliveTimeout = 10-15
+I1 = <b 0xc00000000108><r 16-32><t><c><r 40-100>
+I2 = <b 0x000100002112a442><r 12><rc 8-16>
+
+[Peer]
+PublicKey = ${AWG_SRV_PUB}
+Endpoint = ${AWG_PUB_IP}:${AWG_PORT}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 22-30
+EOF_CLIENT
+    chmod 600 "$out_conf"
+
+    echo -e "
+${C_GREEN} ✔ Клиент '${cname}' (10.66.66.${next_octet}) добавлен на лету без разрыва текущих сессий!${C_RESET}"
+    echo -e "${C_CYAN} Файл конфига: ${out_conf}${C_RESET}
+"
+    cat "$out_conf"
+    if command -v qrencode >/dev/null 2>&1; then
+        echo -e "
+${C_GREEN} QR-код для AmneziaVPN (iOS / Android):${C_RESET}"
+        qrencode -t ansiutf8 < "$out_conf" 2>/dev/null || true
+    fi
+}
+
+setup_amneziawg_31_server() {
+    echo -e "${C_CYAN} === НАСТРОЙКА РЕЗЕРВНОГО L3-VPN AMNEZIAWG 3.1 (AWG0) ===${C_RESET}"
+    ensure_amneziawg_31_installed || return 1
+
+    local awg_port="51820"
+    prompt_default "Введите UDP-порт для сервера AmneziaWG 3.1 (например, 51820 или 4443):" "51820" awg_port
+    [ "$MODULE_CANCELED" = true ] && return 0
+    awg_port=$(printf '%s' "$awg_port" | tr -cd '0-9')
+    [ -z "$awg_port" ] && awg_port="51820"
+
+    local wan_dev pub_ip
+    wan_dev=$(get_wan_if)
+    pub_ip=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
+    [ -z "$pub_ip" ] && pub_ip=$(curl -4 -fsS -m 5 https://api.ipify.org 2>/dev/null || true)
+
+    mkdir -p /etc/amnezia/amneziawg /etc/systemd/system/awg-quick@awg0.service.d
+    local srv_priv srv_pub hdr_key s_val h1 h2 h3 h4
+    srv_priv=$(awg genkey)
+    srv_pub=$(printf '%s' "$srv_priv" | awg pubkey)
+    hdr_key=$(openssl rand -base64 32)
+    s_val=$(( (RANDOM % 25) + 28 ))
+    h1="100000-200000"
+    h2="300000-400000"
+    h3="500000-600000"
+    h4="700000-800000"
+
+    cat << EOF_SRV > /etc/amnezia/amneziawg/awg0.conf
+[Interface]
+Address = 10.66.66.1/24
+ListenPort = ${awg_port}
+PrivateKey = ${srv_priv}
+HeaderProtectionKey = ${hdr_key}
+RandomTrailers = true
+DisableCookies = true
+S1 = ${s_val}
+S2 = ${s_val}
+S3 = ${s_val}
+S4 = ${s_val}
+H1 = ${h1}
+H2 = ${h2}
+H3 = ${h3}
+H4 = ${h4}
+ContentPaddingAddition = 0-113
+Jc = 6
+Jmin = 50
+Jmax = 650
+RekeyAfterTime = 115-135
+RekeyTimeout = 4-7
+RejectAfterTime = 180-220
+KeepaliveTimeout = 10-15
+I1 = <b 0xc00000000108><r 16-32><t><c><r 40-100>
+I2 = <b 0x000100002112a442><r 12><rc 8-16>
+PostUp = sysctl -w net.ipv4.ip_forward=1 >/dev/null; iptables -t nat -A POSTROUTING -s 10.66.66.0/24 -o ${wan_dev:-eth0} -j MASQUERADE; iptables -t mangle -A FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -t nat -D POSTROUTING -s 10.66.66.0/24 -o ${wan_dev:-eth0} -j MASQUERADE 2>/dev/null || true; iptables -t mangle -D FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+EOF_SRV
+    chmod 600 /etc/amnezia/amneziawg/awg0.conf
+
+    cat << EOF_ENV > /etc/amnezia/amneziawg/awg31.env
+AWG_PORT="${awg_port}"
+AWG_PUB_IP="${pub_ip}"
+AWG_SRV_PUB="${srv_pub}"
+AWG_HEADER_KEY="${hdr_key}"
+AWG_S_VAL="${s_val}"
+AWG_H1="${h1}"
+AWG_H2="${h2}"
+AWG_H3="${h3}"
+AWG_H4="${h4}"
+EOF_ENV
+    chmod 600 /etc/amnezia/amneziawg/awg31.env
+
+    if [ -x /usr/local/bin/amneziawg-go ]; then
+        cat << 'EOF_DROPIN' > /etc/systemd/system/awg-quick@awg0.service.d/override.conf
+[Service]
+Environment="WG_QUICK_USERSPACE_IMPLEMENTATION=/usr/local/bin/amneziawg-go"
+EOF_DROPIN
+        systemctl daemon-reload
+    fi
+
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "${awg_port}/udp" comment 'AmneziaWG 3.1' >/dev/null 2>&1 || true
+        ufw reload >/dev/null 2>&1 || true
+    fi
+
+    systemctl enable awg-quick@awg0.service >/dev/null 2>&1 || true
+    safe_restart_systemd_service awg-quick@awg0.service
+    echo -e "${C_GREEN} ✔ Сервер AmneziaWG 3.1 запущен на порту ${awg_port}/udp (интерфейс awg0).${C_RESET}"
+    add_amneziawg_31_client_interactive
+}
+
+manage_amneziawg_31_menu() {
+    while true; do
+        MODULE_CANCELED=false
+        local awg_state="Не настроен"
+        if systemctl is-active --quiet awg-quick@awg0.service 2>/dev/null; then
+            awg_state="Активен (awg0)"
+        fi
+        local ch=""
+        if ! smart_menu "🛡 AMNEZIAWG 3.1 (РЕЗЕРВНЫЙ L3-VPN ПО UDP)" "Состояние: ${awg_state}
+Параметры: HeaderProtectionKey + RandomTrailers + S1-S4>=12 + Range Timers" 18 "$WT_WIDTH" 4 "ch"             "1" " Развернуть / пересоздать сервер AmneziaWG 3.1 (awg0)"             "2" " Добавить нового клиента (.conf + QR-код без обрыва сессий)"             "3" " Статус пиров и хендшейков (awg show awg0)"             "4" " Остановить и отключить AmneziaWG 3.1 (awg0)"; then
+            return 0
+        fi
+        case "$ch" in
+            1) setup_amneziawg_31_server || true; pause_enter ;;
+            2) add_amneziawg_31_client_interactive || true; pause_enter ;;
+            3) awg show awg0 2>/dev/null || echo "Интерфейс awg0 не активен."; pause_enter ;;
+            4)
+                if prompt_yn "Остановить и отключить AmneziaWG 3.1 (awg0)?" "false"; then
+                    systemctl stop awg-quick@awg0.service 2>/dev/null || true
+                    systemctl disable awg-quick@awg0.service 2>/dev/null || true
+                    echo -e "${C_GREEN} ✔ AmneziaWG 3.1 остановлен.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
+}
+
 menu_connections_proxies() {
     while true; do
         MODULE_CANCELED=false
         local sub_choice=""
-        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-XHTTP)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 18 "$WT_WIDTH" 6 sub_choice \
+        if ! smart_menu "🌍 ПРОКСИ, VPN И КАСКАДЫ (VLESS-XHTTP)" "Выберите топологию (без остановки активных сервисов и Tailscale):" 19 "$WT_WIDTH" 7 sub_choice \
             "1" "Автономный сервер: VLESS-XHTTP (Чистый IP / MASQUE / WG)" \
             "2" "Каскад: VLESS-XHTTP + Finalmask (+ MASQUE)" \
             "3" "Каскад: VLESS-XHTTP + Hysteria 2 QUIC (+ MASQUE)" \
             "4" "Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad" \
             "5" "Зарубежный VPS за Cloudflare CDN: VLESS (WS / XHTTP) + TLS" \
+            "6" "Резервный L3-VPN: AmneziaWG 3.1 (HeaderKey + RandomTrailers)" \
             "0" "⬅ Назад"; then
             return 0
         fi
@@ -13610,6 +13923,7 @@ menu_connections_proxies() {
             3) manage_cascade_hysteria_menu || true ;;
             4) manage_cascade_naive_ts_warp || true ;;
             5) manage_cloudflare_cdn_vless_menu || true ;;
+            6) manage_amneziawg_31_menu || true ;;
         esac
     done
 }

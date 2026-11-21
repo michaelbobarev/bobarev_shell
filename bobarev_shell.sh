@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.45 — универсальная система настройки безопасности,
-# Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
-# Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
-# очистку зависших процессов по /proc/cmdline.
+# Bobarev Shell v3.20.47 — комплексная настройка VPS: безопасность,
+# Tailscale, VLESS-XHTTP/REALITY (XMUX), Hysteria 2 (Port Hopping),
+# AmneziaWG 3.1, каскады и Dual Cloudflare CDN (WS + XHTTP).
+# Включает XTLS RealiTLScanner, UFW CF-Only и pre-flight аудит.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.45"
+SCRIPT_VERSION="3.20.47"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -5129,15 +5129,14 @@ manage_cascade_naive_ts_warp() {
         local c_choice=""
         if ! smart_menu "Каскад / Шлюз: VLESS-XHTTP + Tailscale / Mullvad" "
 Статус: $c_state
-Подходит как для 1 VPS с выходом через Mullvad Exit Node, так и для 2 своих VPS в сети Tailscale (MTU 1280, MSS 1220, BBR, буферы 16 МБ, Dual-Stack IPv4+IPv6):" 22 "$WT_WIDTH" 9 "c_choice" \
+Подходит как для 1 VPS с выходом через Mullvad Exit Node, так и для 2 своих VPS в сети Tailscale (MTU 1280, MSS 1220, BBR, буферы 16 МБ, Dual-Stack IPv4+IPv6):" 21 "$WT_WIDTH" 8 "c_choice" \
             "1" " Сервер 1 (Вход / Шлюз): VLESS-XHTTP -> Tailscale / Mullvad Exit Node" \
-            "2" " Сервер 2 (Свой зарубежный VPS): Tailscale -> Выход (Чистый IP / MASQUE)" \
+            "2" " Сервер 2 (Зарубежный VPS): Настроить / переключить выход (Чистый IP <-> MASQUE)" \
             "3" " Выбрать выходной сервер (Exit Node: Mullvad или свой Сервер 2)" \
             "4" " Транспорт между серверами (41641/udp): IPv4+IPv6 / Только IPv4 / Только IPv6" \
             "5" " Управление глобальными ключами VLESS-XHTTP, Path и SNI" \
             "6" " Показать ссылки и QR-коды VLESS-XHTTP для Shadowrocket" \
-            "7" " Переключить выход своего Сервера 2: Чистый IP <-> Cloudflare MASQUE" \
-            "8" " Отключить Exit Node / Остановить компоненты каскада" \
+            "7" " Отключить Exit Node / Остановить компоненты каскада" \
             "0" " Вернуться в главное меню" || [ "$c_choice" = "0" ]; then
             break
         fi
@@ -5168,10 +5167,6 @@ manage_cascade_naive_ts_warp() {
                 pause_enter
                 ;;
             7)
-                toggle_foreign_warp_menu
-                pause_enter
-                ;;
-            8)
                 if prompt_yn "Отключить Exit Node и остановить службы этого каскада / шлюза (VLESS-XHTTP / Tailscale Exit / Cloudflare MASQUE)?" "false"; then
                     silent_run systemctl stop bobarev-xray.service bobarev-cascade-ru.service usque.service
                     while iptables -t nat -D PREROUTING -i tailscale0 -p tcp ! -d 100.64.0.0/10 -j REDIRECT --to-ports 10809 2>/dev/null; do :; done

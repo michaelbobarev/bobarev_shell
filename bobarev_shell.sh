@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.43 — универсальная система настройки безопасности,
+# Bobarev Shell v3.20.44 — универсальная система настройки безопасности,
 # Tailscale, каскадов VLESS / Hysteria 2 / MASQUE / Cloudflare CDN и аудита.
 # Включает Nginx ssl_preread + VLESS-WS с заглушкой 200 OK и pre-flight
 # очистку зависших процессов по /proc/cmdline.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.43"
+SCRIPT_VERSION="3.20.44"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -1744,8 +1744,8 @@ SELECT_SNI_RESULT="www.microsoft.com"
 SELECT_DEST_RESULT="www.microsoft.com:443"
 
 discover_neighbor_reality_sni() {
-    # Ищет среди соседей в подсети /24 (/23) домены с TLS 1.3, ALPN h2,
-    # валидным сертификатом и без проксирования Cloudflare.
+    # Ищет соседей в подсети через официальный XTLS RealiTLScanner (с фолбэком
+    # на OpenSSL /24+/23), фильтрует техзаглушки хостеров и измеряет пинг.
     local wan_dev me a b c
     wan_dev=$(get_wan_if)
     me=$(ip -4 -o addr show dev "${wan_dev:-eth0}" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)
@@ -1760,34 +1760,83 @@ discover_neighbor_reality_sni() {
     local sni_re='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
     local dyn_re='(^|\.)(sslip\.io|nip\.io|xip\.io|traefik\.me|work\.gd|duckdns\.org|ddns\.net|hopto\.org|zapto\.org|dynu\.net|no-ip\.(org|biz|info)|tk|ml|ga|cf|gq)$'
     local brand_re='(^|\.)(google|googleapis|gstatic|youtube|microsoft|windows|apple|icloud|amazon|amazonaws|samsung|yahoo|cloudflare|facebook|instagram|netflix|github|telegram)\.[a-z.]+$'
+    local host_stub_re='(^|\.)(vps[-0-9]*|srv[-0-9]*|server[-0-9]*|node[-0-9]*|host[-0-9]*|static[-0-9]*|dedic[-0-9]*|mail|webmail|smtp|imap|pop3|cpanel|plesk|panel|autodiscover|autoconfig)\.|\.(hetzner\.de|your-server\.de|contaboserver\.net|ovh\.net|kimsufi\.com|timeweb\.ru|beget\.tech|regru\.ru|aeza\.net|vdsina\.ru|selectel\.ru)$'
     local bad_re='(porn|xxx|sex|adult|casino|bet|vpn|proxy|torrent|crack|hack|warez|escort|gambl|poker)'
 
-    IFS=. read -r a b c _ <<< "$me"
-    echo -e "${C_BLUE} Сканирую подсети ${a}.${b}.${c}.0/24 и ${a}.${b}.$((c ^ 1)).0/24 на TLS 1.3 + h2 (до 30-45 сек)...${C_RESET}" >&2
+    local raw_pairs=""
+    local rscan_bin="/usr/local/bin/realitlscanner"
+    local rscan_arch=""
+    case "$(uname -m)" in
+        x86_64|amd64) rscan_arch="RealiTLScanner-linux-64" ;;
+        aarch64|arm64) rscan_arch="RealiTLScanner-linux-arm64" ;;
+    esac
 
-    local -a found=()
-    local base raw_names dom hdr code
-    for base in "${a}.${b}.${c}" "${a}.${b}.$((c ^ 1))"; do
-        raw_names=$(seq 1 254 | xargs -P 16 -I{} bash -c '
-            ip="$1.{}"
-            [ "$ip" = "$2" ] && exit 0
-            echo | timeout 3 openssl s_client -connect "${ip}:443" -tls1_3 -alpn h2 2>/dev/null                 | openssl x509 -noout -ext subjectAltName 2>/dev/null                 | tr "," "\n" | sed -n "s/^ *DNS://p"
-        ' _ "$base" "$me" 2>/dev/null | sort -u | grep -E "$sni_re" | head -40 || true)
+    if [ ! -x "$rscan_bin" ] && [ -n "$rscan_arch" ]; then
+        echo -e "${C_BLUE} Загрузка официального XTLS RealiTLScanner (${rscan_arch})...${C_RESET}" >&2
+        curl -fsSL -m 15 "https://github.com/XTLS/RealiTLScanner/releases/latest/download/${rscan_arch}" -o "$rscan_bin" 2>/dev/null || rm -f "$rscan_bin"
+        [ -s "$rscan_bin" ] && chmod +x "$rscan_bin"
+    fi
 
-        for dom in $raw_names; do
-            [[ "$dom" == "$me" || "$dom" =~ $dyn_re || "$dom" =~ $brand_re || "$dom" =~ $bad_re ]] && continue
-            echo | timeout 5 openssl s_client -connect "${dom}:443" -servername "$dom" -tls1_3 -alpn h2 2>/dev/null                 | grep -q 'ALPN protocol: h2' || continue
-            echo | timeout 5 openssl s_client -connect "${dom}:443" -servername "$dom" -verify_hostname "$dom" -verify_return_error 2>/dev/null                 | grep -q 'Verification: OK' || continue
-            hdr=$(curl -sS -m 5 -o /dev/null -D- "https://${dom}/" 2>/dev/null | tr -d '\r' || true)
-            [ -z "$hdr" ] && continue
-            printf '%s' "$hdr" | grep -qiE '^(server: cloudflare|cf-ray:)' && continue
-            code=$(printf '%s' "$hdr" | awk 'NR==1 {print $2}')
-            [[ "$code" =~ ^[23][0-9][0-9]$ ]] || continue
+    if [ -x "$rscan_bin" ]; then
+        echo -e "${C_BLUE} Поиск соседей вокруг ${me} через XTLS RealiTLScanner (до 25 сек)...${C_RESET}" >&2
+        raw_pairs=$(timeout 25 "$rscan_bin" -addr "$me" -port 443 -thread 32 -timeout 4 2>&1 | awk '
+            /feasible=false/ { next }
+            {
+                ip=""; dom=""
+                for (i=1; i<=NF; i++) {
+                    if ($i ~ /^ip=/) ip=substr($i, 4)
+                    else if ($i ~ /^host=/ && ip=="") ip=substr($i, 6)
+                    if ($i ~ /^cert-domain=/) dom=substr($i, 13)
+                    else if ($i ~ /^domain=/ && dom=="") dom=substr($i, 8)
+                }
+                gsub(/["'"'"']/, "", dom)
+                if (dom != "" && ip != "") print ip "|" dom
+            }
+        ' | awk -F'|' '!seen[$2]++' | head -50 || true)
+    fi
 
-            found+=("$dom")
-            [ "${#found[@]}" -ge 8 ] && break
+    if [ -z "$raw_pairs" ]; then
+        IFS=. read -r a b c _ <<< "$me"
+        echo -e "${C_BLUE} Сканирую подсети ${a}.${b}.${c}.0/24 и ${a}.${b}.$((c ^ 1)).0/24 через OpenSSL (до 30-45 сек)...${C_RESET}" >&2
+        local base
+        for base in "${a}.${b}.${c}" "${a}.${b}.$((c ^ 1))"; do
+            raw_pairs=$(seq 1 254 | xargs -P 16 -I{} bash -c '
+                ip="$1.{}"
+                [ "$ip" = "$2" ] && exit 0
+                sans=$(echo | timeout 3 openssl s_client -connect "${ip}:443" -tls1_3 -alpn h2 2>/dev/null \
+                    | openssl x509 -noout -ext subjectAltName 2>/dev/null \
+                    | tr "," "\n" | sed -n "s/^ *DNS://p" | head -3)
+                for d in $sans; do
+                    echo "${ip}|${d}"
+                done
+            ' _ "$base" "$me" 2>/dev/null | awk -F'|' '!seen[$2]++' | head -50 || true)
+            [ -n "$raw_pairs" ] && break
         done
-        [ "${#found[@]}" -gt 0 ] && break
+    fi
+
+    local -a found=() found_meta=()
+    local pair nb_ip dom hdr code dns_ip conn_sec conn_ms
+    for pair in $raw_pairs; do
+        nb_ip="${pair%%|*}"
+        dom="${pair#*|}"
+        [[ ! "$dom" =~ $sni_re ]] && continue
+        [[ "$dom" == "$me" || "$dom" =~ $dyn_re || "$dom" =~ $brand_re || "$dom" =~ $host_stub_re || "$dom" =~ $bad_re ]] && continue
+        echo | timeout 4 openssl s_client -connect "${dom}:443" -servername "$dom" -tls1_3 -alpn h2 2>/dev/null \
+            | grep -q 'ALPN protocol: h2' || continue
+        echo | timeout 4 openssl s_client -connect "${dom}:443" -servername "$dom" -verify_hostname "$dom" -verify_return_error 2>/dev/null \
+            | grep -q 'Verification: OK' || continue
+        hdr=$(curl -sS -m 5 -o /dev/null -D- -w 'CURL_CONN:%{time_connect}' "https://${dom}/" 2>/dev/null | tr -d '\r' || true)
+        [ -z "$hdr" ] && continue
+        printf '%s' "$hdr" | grep -qiE '^(server: cloudflare|cf-ray:)' && continue
+        code=$(printf '%s' "$hdr" | awk 'NR==1 {print $2}')
+        [[ "$code" =~ ^[23][0-9][0-9]$ ]] || continue
+        conn_sec=$(printf '%s' "$hdr" | sed -n 's/.*CURL_CONN:\([0-9.]*\).*/\1/p' | tail -n 1)
+        conn_ms=$(awk -v s="${conn_sec:-0}" 'BEGIN { printf "%.1f", s * 1000 }')
+        dns_ip=$(getent ahostsv4 "$dom" 2>/dev/null | awk '{print $1; exit}' || true)
+
+        found+=("$dom")
+        found_meta+=("IP: ${dns_ip:-$nb_ip} | TCP: ${conn_ms} ms")
+        [ "${#found[@]}" -ge 8 ] && break
     done
 
     if [ "${#found[@]}" -eq 0 ]; then
@@ -1796,11 +1845,10 @@ discover_neighbor_reality_sni() {
     fi
 
     echo -e "
-${C_GREEN} Найденные соседи по подсети (TLS 1.3, h2, валидный сертификат, не Cloudflare):${C_RESET}" >&2
-    local idx=1 item pick=""
-    for item in "${found[@]}"; do
-        echo -e "  ${C_CYAN}${idx})${C_RESET} ${item}" >&2
-        idx=$((idx + 1))
+${C_GREEN} Найденные соседи по подсети (TLS 1.3, h2, валидный SSL, не Cloudflare, не заглушка):${C_RESET}" >&2
+    local idx=1 pick=""
+    for ((idx=0; idx<${#found[@]}; idx++)); do
+        echo -e "  ${C_CYAN}$((idx + 1)))${C_RESET} ${found[$idx]} ${C_BLUE}(${found_meta[$idx]})${C_RESET}" >&2
     done
     echo -e "  ${C_YELLOW}0)${C_RESET} Отмена (использовать www.microsoft.com)" >&2
     read -r -p "Выберите номер соседа [1-${#found[@]}, Enter=1]: " pick

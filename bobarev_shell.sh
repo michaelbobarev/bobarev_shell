@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.47 — комплексная настройка VPS: безопасность,
+# Bobarev Shell v3.20.49 — комплексная настройка VPS: безопасность,
 # Tailscale, VLESS-XHTTP/REALITY (XMUX), Hysteria 2 (Port Hopping),
 # AmneziaWG 3.1, каскады и Dual Cloudflare CDN (WS + XHTTP).
 # Включает XTLS RealiTLScanner, UFW CF-Only и pre-flight аудит.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.47"
+SCRIPT_VERSION="3.20.49"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -973,9 +973,10 @@ apply_naive_tcp_tuning_profile() {
     silent_run modprobe nf_conntrack
     apply_system_nofile_limits
     mkdir -p /etc/sysctl.d
+    rm -f /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf 2>/dev/null || true
 
     if [ "$profile" = "aggressive" ]; then
-        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
+        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzzz-bobarev-naive-tuning.conf
 # Bobarev Shell v3.20.22: Aggressive Anti-HoL Blocking & Low-Latency XHTTP
 # Profile
 fs.file-max = 2097152
@@ -1023,7 +1024,7 @@ net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     else
-        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf
+        cat << 'TUNE_EOF' > /etc/sysctl.d/99-zzzz-bobarev-naive-tuning.conf
 # Bobarev Shell v3.20.22: Zero-Bufferbloat High-Throughput Balanced XHTTP
 # & Tailscale/Mullvad Profile
 fs.file-max = 2097152
@@ -1074,7 +1075,7 @@ net.ipv4.tcp_congestion_control = bbr
 TUNE_EOF
     fi
 
-    sysctl -p /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
+    sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-zzzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
     tune_fq_qdisc_interfaces
     ip tcp_metrics flush all >/dev/null 2>&1 || true
 
@@ -1239,7 +1240,9 @@ sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null 2>&1 || true
 for rp in /proc/sys/net/ipv4/conf/*/rp_filter; do
     [ -f "$rp" ] && echo 0 > "$rp" 2>/dev/null || true
 done
-if [ -f /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf ]; then
+if [ -f /etc/sysctl.d/99-zzzz-bobarev-naive-tuning.conf ]; then
+    sysctl -p /etc/sysctl.d/99-zzzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
+elif [ -f /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf ]; then
     sysctl -p /etc/sysctl.d/99-zzz-bobarev-naive-tuning.conf >/dev/null 2>&1 || true
 else
     sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1 || true
@@ -1644,6 +1647,15 @@ PersistentKeepalive = $keepalive
 EOF
     chmod 600 /etc/wireguard/wg0.conf
 
+    if ! command -v wg-quick >/dev/null 2>&1 || ! systemctl list-unit-files 'wg-quick@.service' 2>/dev/null | grep -q 'wg-quick@'; then
+        echo -e "${C_BLUE} Установка пакета wireguard-tools (wg / wg-quick)...${C_RESET}"
+        apt-get update -qq >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard-tools >/dev/null 2>&1 || {
+            echo -e "${C_RED} Ошибка: не удалось установить wireguard-tools.${C_RESET}"
+            return 1
+        }
+    fi
+
     echo -e "${C_BLUE} Запуск и включение автозагрузки WireGuard (wg0)...${C_RESET}"
     silent_run systemctl daemon-reload
     systemctl reset-failed wg-quick@wg0 2>/dev/null || true
@@ -1651,8 +1663,12 @@ EOF
     if ! systemctl restart wg-quick@wg0; then
         echo -e "${C_YELLOW} Повторная инициализация интерфейса wg0...${C_RESET}"
         ip link del dev wg0 2>/dev/null || true
-        systemctl restart wg-quick@wg0
-
+        systemctl restart wg-quick@wg0 || true
+    fi
+    if ! systemctl is-active --quiet wg-quick@wg0; then
+        echo -e "${C_RED} Ошибка: служба wg-quick@wg0 не запустилась. Журнал:${C_RESET}"
+        journalctl -u wg-quick@wg0 -n 15 --no-pager 2>/dev/null || true
+        return 1
     fi
 
     if command -v tailscale &>/dev/null; then
@@ -1687,11 +1703,11 @@ EOF
     echo -e "${C_BLUE} Проверка подключения и внешнего IP...${C_RESET}"
     local test_ip=""
     for i in {1..5}; do
-        test_ip=$(curl -4 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
+        test_ip=$(curl -4 --interface wg0 -s --max-time 4 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/{print $2}' | tr -d '[:space:]' || echo "")
         [ -n "$test_ip" ] && break
         sleep 1
     done
-    [ -z "$test_ip" ] && test_ip=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || echo "Проверьте пир WireGuard")
+    [ -z "$test_ip" ] && test_ip=$(curl -4 --interface wg0 -s --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || echo "Проверьте пир WireGuard")
 
     echo -e "
 ${C_GREEN} Гибридный шлюз успешно активирован!${C_RESET}"

@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.49 — комплексная настройка VPS: безопасность,
+# Bobarev Shell v3.20.50 — комплексная настройка VPS: безопасность,
 # Tailscale, VLESS-XHTTP/REALITY (XMUX), Hysteria 2 (Port Hopping),
 # AmneziaWG 3.1, каскады и Dual Cloudflare CDN (WS + XHTTP).
 # Включает XTLS RealiTLScanner, UFW CF-Only и pre-flight аудит.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.49"
+SCRIPT_VERSION="3.20.50"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -289,6 +289,90 @@ ensure_ufw_nat_rule() {
     fi
 }
 
+apply_wan_exit_ipv6_nft() {
+    local wan_dev="$1"
+    local quiet="${2:-false}"
+    [ -z "$wan_dev" ] && return 0
+
+    silent_run modprobe ip6table_mangle xt_TCPMSS ip6table_nat xt_MASQUERADE
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    mkdir -p /etc/sysctl.d
+    if [ ! -f /etc/sysctl.d/99-tailscale-forward.conf ]; then
+        printf "net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n" > /etc/sysctl.d/99-tailscale-forward.conf
+    elif ! grep -q "net.ipv6.conf.all.forwarding" /etc/sysctl.d/99-tailscale-forward.conf 2>/dev/null; then
+        echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.d/99-tailscale-forward.conf
+    fi
+
+    if command -v nft &>/dev/null; then
+        cat << EOF > /usr/local/bin/bobarev-exit-ip6.sh
+#!/bin/bash
+sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+nft delete table ip6 bobarev_exit_ip6 2>/dev/null || true
+nft -f - << NFT_EXIT6_EOF || true
+table ip6 bobarev_exit_ip6 {
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "tailscale0" tcp flags syn / syn,rst tcp option maxseg size set 1220
+    }
+    chain forward {
+        type filter hook forward priority mangle; policy accept;
+        iifname "tailscale0" oifname "${wan_dev}" accept
+        iifname "${wan_dev}" oifname "tailscale0" ct state related,established accept
+        iifname "tailscale0" tcp flags syn / syn,rst tcp option maxseg size set 1220
+        oifname "tailscale0" tcp flags syn / syn,rst tcp option maxseg size set 1220
+    }
+    chain postrouting {
+        type filter hook postrouting priority mangle; policy accept;
+        oifname "tailscale0" tcp flags syn / syn,rst tcp option maxseg size set 1220
+    }
+    chain nat_post {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "${wan_dev}" masquerade
+    }
+}
+NFT_EXIT6_EOF
+EOF
+        chmod +x /usr/local/bin/bobarev-exit-ip6.sh
+        /usr/local/bin/bobarev-exit-ip6.sh >/dev/null 2>&1 || true
+        cat << 'SVC_EOF' > /etc/systemd/system/bobarev-exit-ip6.service
+[Unit]
+Description=Bobarev Shell Standalone Exit-Node IPv6 NAT & TCPMSS
+After=network-online.target ufw.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bobarev-exit-ip6.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVC_EOF
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable bobarev-exit-ip6.service >/dev/null 2>&1 || true
+        if [ "$quiet" != "true" ]; then
+            echo -e "${C_BLUE} Закреплена таблица nftables IPv6 (MASQUERADE + TCPMSS 1220) для $wan_dev.${C_RESET}"
+        fi
+    elif command -v ip6tables &>/dev/null; then
+        ip6tables -C FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i tailscale0 -o "$wan_dev" -j ACCEPT 2>/dev/null || true
+        ip6tables -C FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i "$wan_dev" -o tailscale0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+        ip6tables -t nat -C POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+        ip6tables -t mangle -I FORWARD 1 -i tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+        ip6tables -t mangle -I FORWARD 1 -o tailscale0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || true
+    fi
+}
+
+remove_wan_exit_ipv6_nft() {
+    local wan_dev="${1:-}"
+    systemctl disable --now bobarev-exit-ip6.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/bobarev-exit-ip6.service /usr/local/bin/bobarev-exit-ip6.sh 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    command -v nft &>/dev/null && nft delete table ip6 bobarev_exit_ip6 2>/dev/null || true
+    if [ -n "$wan_dev" ] && command -v ip6tables &>/dev/null; then
+        ip6tables -t nat -D POSTROUTING -o "$wan_dev" -j MASQUERADE 2>/dev/null || true
+    fi
+}
+
 apply_wan_exit_nat() {
     local wan_dev="$1"
     local quiet="${2:-false}"
@@ -329,6 +413,7 @@ apply_wan_exit_nat() {
             echo -e "${C_BLUE} Закреплено правило маскарадинга (MASQUERADE) для $wan_dev в /etc/ufw/before.rules.${C_RESET}"
         fi
     fi
+    apply_wan_exit_ipv6_nft "$wan_dev" "$quiet" || true
     return 0
 }
 
@@ -9598,6 +9683,7 @@ mod_tailscale() {
                                     silent_run ufw reload
                                 fi
                             fi
+                            remove_wan_exit_ipv6_nft "$wan_dev" || true
                             echo -e "${C_GREEN} Функция шлюза Tailscale отключена.${C_RESET}"
                             pause_enter
                             ;;

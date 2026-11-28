@@ -1,12 +1,12 @@
 #!/bin/bash
-# Bobarev Shell v3.20.50 — комплексная настройка VPS: безопасность,
+# Bobarev Shell v3.20.51 — комплексная настройка VPS: безопасность,
 # Tailscale, VLESS-XHTTP/REALITY (XMUX), Hysteria 2 (Port Hopping),
 # AmneziaWG 3.1, каскады и Dual Cloudflare CDN (WS + XHTTP).
 # Включает XTLS RealiTLScanner, UFW CF-Only и pre-flight аудит.
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.20.50"
+SCRIPT_VERSION="3.20.51"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
@@ -7897,8 +7897,10 @@ apply_ufw_docker_protection() {
 *filter
 :ufw-user-forward - [0:0]
 :DOCKER-USER - [0:0]
--A DOCKER-USER -j ufw-user-forward
 -A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -i docker0 -o $wan_if -j RETURN
+-A DOCKER-USER -i br-+ -o $wan_if -j RETURN
+-A DOCKER-USER -j ufw-user-forward
 -A DOCKER-USER -i tailscale0 -j RETURN
 -A DOCKER-USER -i tun+ -j RETURN
 -A DOCKER-USER -i wg+ -j RETURN
@@ -7909,6 +7911,78 @@ apply_ufw_docker_protection() {
 COMMIT
 # END UFW AND DOCKER
 DOCKER_UFW_EOF
+    if command -v ufw &>/dev/null; then
+        for d_if in $(ip -br link show 2>/dev/null | awk '{print $1}' | sed 's/@.*//' | grep -E '^(docker0|br-.*)$' || true); do
+            silent_run ufw route allow in on "$d_if" out on "$wan_if" comment "Docker $d_if to $wan_if"
+            silent_run ufw route allow in on "$wan_if" out on "$d_if" comment "Return $wan_if to $d_if"
+        done
+    fi
+}
+
+restore_docker_internet_ufw() {
+    echo -e "${C_BLUE} Восстановление доступа в интернет для контейнеров Docker...${C_RESET}"
+    local wan_if
+    wan_if=$(get_wan_if)
+    remove_ufw_docker_protection
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+    if command -v ufw &>/dev/null && [ -n "$wan_if" ]; then
+        silent_run ufw default allow routed
+        silent_run sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+        for d_if in $(ip -br link show 2>/dev/null | awk '{print $1}' | sed 's/@.*//' | grep -E '^(docker0|br-.*)$' || true); do
+            silent_run ufw route allow in on "$d_if" out on "$wan_if" comment "Docker $d_if to $wan_if"
+            silent_run ufw route allow in on "$wan_if" out on "$d_if" comment "Return $wan_if to $d_if"
+        done
+        if LC_ALL=C ufw status | grep -qw "active"; then
+            silent_run ufw reload
+        fi
+    fi
+
+    if [ -n "$wan_if" ]; then
+        iptables -I DOCKER-USER 1 -j RETURN 2>/dev/null || true
+        for d_if in $(ip -br link show 2>/dev/null | awk '{print $1}' | sed 's/@.*//' | grep -E '^(docker0|br-.*)$' || true); do
+            iptables -C FORWARD -i "$d_if" -o "$wan_if" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$d_if" -o "$wan_if" -j ACCEPT 2>/dev/null || true
+            iptables -C FORWARD -i "$wan_if" -o "$d_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$wan_if" -o "$d_if" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+        done
+        apply_wan_exit_nat "$wan_if" "true" || true
+    fi
+
+    if systemctl is-active --quiet docker.service 2>/dev/null; then
+        silent_run systemctl restart docker.service || true
+    fi
+    echo -e "${C_GREEN} Интернет для контейнеров Docker восстановлен (изоляция DOCKER-USER снята, маршрутизация открыта).${C_RESET}"
+}
+
+manage_ufw_menu() {
+    while true; do
+        local docker_iso_state="Выключена"
+        if [ -f /etc/ufw/after.rules ] && grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null; then
+            docker_iso_state="Включена"
+        fi
+        local ufw_sub=""
+        if ! smart_menu "Брандмауэр UFW и доступ Docker" "
+Статус изоляции Docker в UFW: $docker_iso_state" 16 "$WT_WIDTH" 6 ufw_sub             "1" " Настроить / пересоздать брандмауэр UFW (мастер)"             "2" " Вернуть интернет контейнерам Docker (снять изоляцию DOCKER-USER)"             "3" " Включить защиту Docker от обхода UFW с WAN (с сохранением интернета)"             "0" " ⬅ Назад"; then
+            return 0
+        fi
+        if [ -z "$ufw_sub" ] || [ "$ufw_sub" = "0" ]; then return 0; fi
+        clear
+        case "$ufw_sub" in
+            1) mod_ufw || true; pause_enter ;;
+            2) restore_docker_internet_ufw || true; pause_enter ;;
+            3)
+                local wan_if
+                wan_if=$(get_wan_if)
+                if [ -n "$wan_if" ]; then
+                    apply_ufw_docker_protection "$wan_if"
+                    command -v ufw &>/dev/null && LC_ALL=C ufw status | grep -qw "active" && silent_run ufw reload
+                    echo -e "${C_GREEN} Защита Docker от входящих с $wan_if включена (исходящий интернет контейнеров разрешен).${C_RESET}"
+                else
+                    echo -e "${C_RED} Не удалось определить внешний интерфейс WAN.${C_RESET}"
+                fi
+                pause_enter
+                ;;
+        esac
+    done
 }
 
 configure_rps_for_interfaces() {
@@ -13729,7 +13803,7 @@ menu_server_security() {
             6) mod_ssh_config || true; pause_enter ;;
             7) mod_ssh_bruteforce_guard || true ;;
             8) mod_hardening || true; pause_enter ;;
-            9) mod_ufw || true; pause_enter ;;
+            9) manage_ufw_menu || true ;;
             10) mod_lock_root || true; pause_enter ;;
             11) mod_ram_flash_opt || true; pause_enter ;;
             12) mod_swap_manager || true; pause_enter ;;
